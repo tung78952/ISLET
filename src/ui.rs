@@ -2,6 +2,7 @@
 //! captures; panel-local x is relative to the notch's left edge.
 
 use crate::gfx::{Align, Font, Rc};
+use crate::devices::DeviceKind;
 use crate::media::LyrStatus;
 use crate::model::{self, Phase};
 use crate::{App, ToastKind};
@@ -49,6 +50,12 @@ pub enum Act {
     Seek(u32),
     /// Water reminder toast buttons.
     ToastDrank,
+    /// End-of-phase toast: start the prepared phase, or dismiss.
+    ToastStartPhase,
+    ToastDismiss,
+    /// Task reminder: remind again in 10 minutes, or start a focus session for it.
+    TaskLater,
+    TaskStart,
     ToastSnooze,
     /// Timeline bar at (x, width) in tenths of a layout unit; dragging it scrubs.
     Scrub(i32, i32),
@@ -81,6 +88,11 @@ pub enum Act {
     ShelfOpen(usize),
     ShelfRemove(usize),
     ShelfClear,
+    /// Notification detail view: open what it is about, or dismiss it.
+    NoticeOpen,
+    NoticeClose,
+    /// Device card: open the drive that was plugged in.
+    DeviceOpen,
 }
 
 /// Formats up to 8 typed digits into the "HH:MM-HH:MM" mask.
@@ -286,21 +298,156 @@ mod icon {
         g.line(cx + 7.0, cy + 3.4, cx + 7.0, cy - 7.6, 1.4, hex, a);
         g.line(cx - 1.0, cy - 6.0, cx + 7.0, cy - 7.6, 2.4, hex, a);
     }
-    pub fn speaker(g: &Gfx, cx: f32, cy: f32, muted: bool, hex: u32, a: f32) {
+    /// Speaker whose waves follow the (eased) level as in Nusa: one wave per third of the range,
+    /// each fading and growing in as the level passes it; muted or zero shows a cross instead.
+    pub fn speaker(g: &Gfx, cx: f32, cy: f32, level: f32, muted: bool, hex: u32, a: f32) {
         // (cx, cy) is the mouth of the cone; waves are centered on it.
         g.polygon(&[(cx - 10.0, cy - 4.4), (cx - 4.8, cy - 4.4), (cx, cy - 8.0), (cx, cy + 8.0), (cx - 4.8, cy + 4.4), (cx - 10.0, cy + 4.4)], hex, a);
-        if muted {
-            g.line(cx + 3.2, cy - 3.2, cx + 9.2, cy + 2.8, 2.2, hex, a);
-            g.line(cx + 3.2, cy + 2.8, cx + 9.2, cy - 3.2, 2.2, hex, a);
-        } else {
-            g.arc_between(cx, cy, 4.4, -1.2, 1.2, 2.2, hex, a);
-            g.arc_between(cx, cy, 8.0, -0.95, 0.95, 2.2, hex, a);
+        let l = level.clamp(0.0, 1.0);
+        let cross = if muted { 1.0 } else { (1.0 - l * 25.0).clamp(0.0, 1.0) };
+        if cross > 0.0 {
+            g.line(cx + 3.8, cy - 3.6, cx + 10.2, cy + 3.6, 2.0, hex, a * cross);
+            g.line(cx + 3.8, cy + 3.6, cx + 10.2, cy - 3.6, 2.0, hex, a * cross);
+        }
+        for (k, r) in [4.2f32, 7.6, 10.8].iter().enumerate() {
+            let w = (l * 3.0 - k as f32 + 0.3).clamp(0.0, 1.0) * (1.0 - cross);
+            if w > 0.0 {
+                g.arc_between(cx, cy, r * (0.85 + 0.15 * w), -0.8, 0.8, 1.8, hex, a * w);
+            }
+        }
+    }
+    /// Pomodoro bubble: a dark glass with red liquid whose level is the time left and whose
+    /// surface slowly tilts and ripples (Nusa's compact timer).
+    pub fn liquid(g: &Gfx, cx: f32, cy: f32, r: f32, level: f32, t: f32, a: f32) {
+        // Dark glass, darker at the top.
+        g.fill_circle(cx, cy, r, r, 0x1E0306, a);
+        g.glow(cx, cy + r * 0.4, r * 1.1, 0x3A070C, 0.8 * a);
+        // Surface height: 0.10 empty … 0.58 full (a full timer reads as a half glass, as in Nusa),
+        // slowly tilting with a gentle travelling wave.
+        let h = cy + r - (0.1 + 0.48 * level.clamp(0.0, 1.0)) * 2.0 * r;
+        let tilt = 0.5 * (t * 0.7).sin() + 0.12 * (t * 1.9).sin();
+        let mut surf = Vec::with_capacity(34);
+        for i in 0..=32 {
+            let u = i as f32 / 32.0;
+            let x = cx - r + 2.0 * r * u;
+            let wave = 0.7 * (u * 5.5 + t * 2.0).sin() + 0.35 * (u * 9.0 - t * 2.7).sin();
+            surf.push((x, h + (x - cx) * tilt.tan() + wave));
+        }
+        let mut body = surf.clone();
+        body.push((cx + r, cy + r + 2.0));
+        body.push((cx - r, cy + r + 2.0));
+        g.clip_circle(cx, cy, r - 0.5, || {
+            g.polygon(&body, super::RED_PIE, a);
+            // Light from the upper left inside the liquid, deeper red at the bottom right.
+            g.glow(cx - r * 0.4, h + r * 0.35, r * 0.95, 0xFF7C80, 0.45 * a);
+            g.glow(cx + r * 0.5, cy + r * 0.8, r * 0.9, 0xB81F2C, 0.5 * a);
+            // A bright meniscus along the surface.
+            g.polyline(&surf, 1.1, 0xFFB0B3, 0.55 * a);
+        });
+        // Glass rim and a small specular highlight.
+        g.stroke_circle(cx, cy, r - 0.6, 1.4, 0xF4A3A7, 0.8 * a);
+        g.arc_between(cx, cy, r - 2.6, 3.6, 4.4, 1.2, 0xFFFFFF, 0.35 * a);
+    }
+    /// Messenger-style chat icon (drawn, not the trademark artwork): a blue-to-violet bubble with
+    /// a white zig-zag bolt.
+    pub fn messenger(g: &Gfx, cx: f32, cy: f32, r: f32, a: f32) {
+        let rc = crate::gfx::Rc::new(cx - r, cy - r, 2.0 * r, 2.0 * r);
+        g.fill_rrect_hgrad(rc, r, (0x0A84FF, a), (0xA33BFF, a));
+        g.polygon(&[(cx - r * 0.42, cy + r * 0.52), (cx - r * 0.52, cy + r * 0.95), (cx - r * 0.05, cy + r * 0.72)], 0x6A5CFF, a);
+        let s = r * 0.5;
+        let p = |x: f32, y: f32| (cx + x * s, cy + y * s);
+        g.polyline(&[p(-1.0, 0.5), p(-0.25, -0.35), p(0.2, 0.15), p(1.0, -0.5)], r * 0.17, 0xFFFFFF, a);
+    }
+    pub fn bolt_small(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
+        g.polygon(&[(cx + 1.2, cy - 6.0), (cx - 3.6, cy + 0.8), (cx - 0.4, cy + 0.8), (cx - 1.2, cy + 6.0), (cx + 3.6, cy - 0.8), (cx + 0.4, cy - 0.8)], hex, a);
+    }
+    /// Eight rays turned by `rot` radians (clockwise) around a still disc. With the (eased) level
+    /// the rays lengthen, move out and brighten, as in Nusa (dim and short at 0 %).
+    pub fn sun(g: &Gfx, cx: f32, cy: f32, rot: f32, level: f32, hex: u32, a: f32) {
+        let l = level.clamp(0.0, 1.0);
+        g.fill_circle(cx, cy, 3.2, 3.2, hex, a);
+        let (r0, r1) = (5.2 + 1.6 * l, 7.4 + 2.6 * l);
+        for k in 0..8 {
+            let t = rot + k as f32 * std::f32::consts::FRAC_PI_4;
+            let (c, s) = (t.cos(), t.sin());
+            g.line(cx + c * r0, cy + s * r0, cx + c * r1, cy + s * r1, 1.6, hex, a * (0.35 + 0.65 * l));
+        }
+    }
+    /// Wi-Fi glyph whose bounding box is centred on (cx, cy).
+    pub fn wifi_centered(g: &Gfx, cx: f32, cy: f32, arcs: f32, hex: u32, a: f32) {
+        // Scaled to fit a badge: dot centre at +4.6, outer arc top at -7.4 (bounding box ±6.0).
+        let base = cy + 4.0;
+        g.fill_circle(cx, base, 1.5, 1.5, hex, a);
+        for (i, r) in [3.6f32, 6.8, 10.0].iter().enumerate() {
+            let k = (arcs - i as f32).clamp(0.0, 1.0);
+            if k > 0.0 {
+                g.arc_between(cx, base + 1.4, *r, -2.36, -0.78, 1.8, hex, a * k);
+            }
         }
     }
     pub fn bluetooth(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         // The rune: a vertical stem with two closed loops on the right and two crossing arms.
         let (h, d) = (6.4, 3.4);
         g.polyline(&[(cx - d, cy - h * 0.5), (cx + d, cy + h * 0.5), (cx, cy + h), (cx, cy - h), (cx + d, cy - h * 0.5), (cx - d, cy + h * 0.5)], 1.6, hex, a);
+    }
+    /// The icon for a kind of device, about 16 units across, centred on (cx, cy).
+    pub fn device(g: &Gfx, kind: crate::devices::DeviceKind, cx: f32, cy: f32, hex: u32, a: f32) {
+        use crate::devices::DeviceKind as K;
+        use crate::gfx::Rc;
+        match kind {
+            K::Headphones | K::Other => headphones(g, cx, cy, hex, a),
+            K::Headset => {
+                headphones(g, cx, cy - 1.0, hex, a);
+                // Microphone boom from the left cup.
+                g.polyline(&[(cx - 7.2, cy + 6.0), (cx - 6.6, cy + 8.4), (cx - 2.4, cy + 8.6)], 1.5, hex, a);
+                g.fill_circle(cx - 1.8, cy + 8.6, 1.4, 1.4, hex, a);
+            }
+            K::Speaker => {
+                g.stroke_rrect(Rc::new(cx - 5.2, cy - 7.6, 10.4, 15.2), 2.6, 1.6, hex, a);
+                g.stroke_circle(cx, cy + 2.2, 2.9, 1.5, hex, a);
+                g.fill_circle(cx, cy - 4.0, 1.1, 1.1, hex, a);
+            }
+            K::Mouse => {
+                g.stroke_rrect(Rc::new(cx - 4.6, cy - 7.6, 9.2, 15.2), 4.6, 1.6, hex, a);
+                g.line(cx, cy - 6.6, cx, cy - 2.6, 1.6, hex, a);
+            }
+            K::Keyboard => {
+                g.stroke_rrect(Rc::new(cx - 8.0, cy - 5.0, 16.0, 10.0), 2.2, 1.5, hex, a);
+                for (row, y) in [(0, cy - 2.0), (1, cy + 0.6)] {
+                    for i in 0..4 {
+                        let x = cx - 4.8 + i as f32 * 3.2 + if row == 1 { 0.8 } else { 0.0 };
+                        g.fill_rrect(Rc::new(x - 0.8, y - 0.7, 1.6, 1.4), 0.4, hex, a);
+                    }
+                }
+                g.line(cx - 3.0, cy + 3.0, cx + 3.0, cy + 3.0, 1.4, hex, a);
+            }
+            K::Gamepad => {
+                g.stroke_rrect(Rc::new(cx - 8.4, cy - 4.8, 16.8, 9.6), 4.8, 1.6, hex, a);
+                g.line(cx - 6.0, cy, cx - 2.4, cy, 1.5, hex, a);
+                g.line(cx - 4.2, cy - 1.8, cx - 4.2, cy + 1.8, 1.5, hex, a);
+                g.fill_circle(cx + 3.4, cy + 1.0, 1.1, 1.1, hex, a);
+                g.fill_circle(cx + 5.4, cy - 1.0, 1.1, 1.1, hex, a);
+            }
+            K::Phone => {
+                g.stroke_rrect(Rc::new(cx - 4.6, cy - 8.0, 9.2, 16.0), 2.2, 1.6, hex, a);
+                g.line(cx - 1.6, cy + 5.4, cx + 1.6, cy + 5.4, 1.4, hex, a);
+            }
+            K::Drive => {
+                g.stroke_rrect(Rc::new(cx - 7.6, cy - 4.6, 15.2, 9.2), 2.2, 1.6, hex, a);
+                g.fill_circle(cx + 4.4, cy + 1.2, 1.1, 1.1, hex, a);
+                g.line(cx - 4.6, cy + 1.2, cx + 1.0, cy + 1.2, 1.4, hex, a);
+            }
+        }
+    }
+    /// The USB trident.
+    pub fn usb(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
+        g.line(cx, cy + 6.6, cx, cy - 5.0, 1.6, hex, a);
+        g.polygon(&[(cx, cy - 8.0), (cx - 2.2, cy - 4.6), (cx + 2.2, cy - 4.6)], hex, a);
+        g.polyline(&[(cx, cy + 3.0), (cx - 4.2, cy + 0.2), (cx - 4.2, cy - 1.8)], 1.5, hex, a);
+        g.fill_circle(cx - 4.2, cy - 2.6, 1.4, 1.4, hex, a);
+        g.polyline(&[(cx, cy + 1.2), (cx + 4.2, cy - 1.6), (cx + 4.2, cy - 3.0)], 1.5, hex, a);
+        g.fill_rrect(crate::gfx::Rc::new(cx + 3.0, cy - 5.2, 2.4, 2.4), 0.3, hex, a);
+        g.fill_circle(cx, cy + 6.8, 1.6, 1.6, hex, a);
     }
     pub fn headphones(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.arc_between(cx, cy + 1.0, 7.2, std::f32::consts::PI, std::f32::consts::TAU, 2.0, hex, a);
@@ -331,6 +478,7 @@ mod icon {
 
 pub fn draw(a: &mut App) {
     a.hits.clear();
+    a.loop_rect = None;
     let (visual_cx, visual_w) = a.notch_geometry();
     let (w, h) = (visual_w.max(1.0), a.sh.x.max(1.0));
     let cx = visual_cx;
@@ -338,9 +486,12 @@ pub fn draw(a: &mut App) {
     // Corner and ear radii fitted to the reference silhouette (compact 30 tall → expanded 140 tall).
     let radius = 12.4 + 19.2 * t;
     let ear = 10.0 + 12.2 * t;
-    if a.minimal() && a.mode == crate::Mode::Compact {
+    if a.minimal() && !a.yielded && a.mode == crate::Mode::Compact {
         // A near-invisible pad keeps the tiny minimal notch easy to hover.
         a.gfx.fill_rrect(Rc::new(cx - 70.0, 0.0, 140.0, 18.0), 0.0, 0x000000, 0.005);
+    }
+    if a.catch_all {
+        a.gfx.fill_rrect(Rc::new(0.0, 0.0, crate::WIN_W, crate::WIN_H), 0.0, 0x000000, 1.5 / 255.0);
     }
     let na = 1.0;
     a.gfx.alpha = na;
@@ -348,12 +499,13 @@ pub fn draw(a: &mut App) {
     let left = cx - w / 2.0;
 
     // The drop light sits behind everything on the panel, header included.
-    if a.page == Page::Shelf && a.fade.x > 0.01 && (a.drag_over || a.ripple.is_some()) {
+    if (a.page == Page::Shelf && a.drag_over) || a.ripple.is_some() {
         // Light effects live inside the notch's own outline, never past its rim.
         let clipped = a.gfx.push_notch_clip(cx, w, h, radius, ear);
-        a.gfx.alpha = a.fade.x.clamp(0.0, 1.0);
+        a.gfx.alpha = 1.0;
         let (fx, fy, st) = aurora_state(a);
-        aurora(a, fx, fy, st);
+        aurora(a, fx, fy, st.min(1.0));
+        aurora_highlight(a, fx, st);
         drop_wave(a);
         a.gfx.alpha = 1.0;
         if clipped {
@@ -367,7 +519,7 @@ pub fn draw(a: &mut App) {
 
     let exp_alpha = a.fade.x.clamp(0.0, 1.0) * ((h - 70.0) / 50.0).clamp(0.0, 1.0);
     let tall = a.toast.as_ref().or(a.last_toast.as_ref()).is_some_and(|t| t.kind.tall()) && a.toast_mix.x > 0.5;
-    let fade_from = if tall { 58.0 } else { 36.0 };
+    let fade_from = if tall { 84.0 } else { 36.0 };
     let small_alpha = (1.0 - (h - fade_from) / 14.0).clamp(0.0, 1.0) * (1.0 - a.fade.x).clamp(0.0, 1.0);
 
     if exp_alpha > 0.01 {
@@ -380,15 +532,18 @@ pub fn draw(a: &mut App) {
         let tm = a.toast_mix.x.clamp(0.0, 1.0);
         let pm = a.pill_mix.x.clamp(0.0, 1.0) * (1.0 - tm);
         let base = (1.0 - tm - pm).max(0.0);
-        if base > 0.01 && h > 18.0 && !a.minimal() {
+        if base > 0.01 && h > 18.0 && !a.minimal() && !a.yielded {
             a.gfx.alpha = na * small_alpha * base;
             compact(a, left, w);
         }
-        if pm > 0.01 && a.lyric_line().is_some() {
+        // While the notch steps aside only its sliver remains: nothing may be drawn over the app
+        // below (reminders that need an answer keep their size and stay).
+        let urgent = a.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break));
+        if pm > 0.01 && a.lyric_line().is_some() && !a.yielded {
             a.gfx.alpha = na * small_alpha * pm;
             lyric_pill(a, left, w);
         }
-        if tm > 0.01 {
+        if tm > 0.01 && (!a.yielded || urgent) {
             let sw = a.toast_swap.x.clamp(0.0, 1.0);
             let base = na * small_alpha * tm;
             match (a.toast.clone(), a.last_toast.clone()) {
@@ -408,6 +563,15 @@ pub fn draw(a: &mut App) {
                 }
                 _ => {}
             }
+        }
+    }
+    if a.notice_toast() && a.fade.x < 0.01 {
+        let d = ((h - 86.0) / 40.0).clamp(0.0, 1.0);
+        if d > 0.01 {
+            a.gfx.alpha = na * d;
+            a.gfx.push_clip(Rc::new(left, 0.0, w, h));
+            notice_detail(a, left, w, h, d > 0.6);
+            a.gfx.pop_clip();
         }
     }
     a.gfx.alpha = 1.0;
@@ -432,11 +596,12 @@ fn compact(a: &mut App, left: f32, w: f32) {
 
 /// Equalizer bars while music plays, or the focus-timer pie while it runs.
 fn right_indicator(a: &mut App, x: f32, cy: f32) {
+    // The only part that moves when nothing else does: frames can redraw just this box.
+    a.loop_rect = Some(Rc::new(x - 3.0, cy - 12.0, 27.0, 24.0));
     if a.pomo.running() {
         let frac = (a.pomo.left() / a.pomo.phase.secs()) as f32;
-        let cx = x + 9.2;
-        a.gfx.fill_circle(cx, cy, 9.6, 9.6, RED_PIE, 0.35);
-        a.gfx.pie(cx, cy, 9.6, frac, RED_PIE, 1.0);
+        let t = a.born.elapsed().as_secs_f32();
+        icon::liquid(&a.gfx, x + 9.2, cy, 9.2, frac, t, 1.0);
         return;
     }
     if !a.playing() {
@@ -508,12 +673,22 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
     let ix = left + 24.0;
     match kind {
         ToastKind::Volume(muted) => {
-            icon::speaker(&a.gfx, ix + 1.2, cy, muted, WHITE, 1.0);
             // The endpoint impact belongs to the toast silhouette.  Keeping
             // the meter itself stable avoids a second, conflicting stretch.
+            let lv = if live { a.vol_level.x } else { level.unwrap_or(0.0) }.clamp(0.0, 1.0);
+            icon::speaker(&a.gfx, ix + 1.2, cy, lv, muted, WHITE, 1.0);
             let bar = Rc::new(left + 49.6, cy - 2.8, w - 49.6 - 24.0, 6.4);
             a.gfx.fill_rrect(bar, 3.2, 0x474747, 1.0);
+            if lv > 0.0 {
+                a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * lv).max(bar.h), bar.h), 3.2, WHITE, 1.0);
+            }
+            return;
+        }
+        ToastKind::Brightness => {
             let lv = if live { a.vol_level.x } else { level.unwrap_or(0.0) }.clamp(0.0, 1.0);
+            icon::sun(&a.gfx, ix + 1.2, cy, a.sun_rot.x.to_radians(), lv, WHITE, 1.0);
+            let bar = Rc::new(left + 49.6, cy - 2.8, w - 49.6 - 24.0, 6.4);
+            a.gfx.fill_rrect(bar, 3.2, 0x474747, 1.0);
             if lv > 0.0 {
                 a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * lv).max(bar.h), bar.h), 3.2, WHITE, 1.0);
             }
@@ -563,83 +738,449 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
     }
 }
 
-/// Two-line toasts. Bluetooth: badge, name, "Connected · N%" counting up while a battery ring
-/// fills around the headphones and a ripple runs out, then the ring dims. Water: a pulsing droplet
-/// with Snooze / Drank buttons. App notices: initial badge, app name and message.
-fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
-    let (kind, title, value) = (t.kind, t.title.as_str(), t.value.as_str());
-    let age = t.born.elapsed().as_secs_f32();
-    let cy = 29.6;
-    let bx = left + 32.0;
-    let tx = left + 64.0;
-    match kind {
-        ToastKind::Bluetooth(on) => {
-            a.gfx.fill_circle(bx, cy, 14.4, 14.4, if on { 0x56C1F5 } else { 0x6B6B6B }, 1.0);
-            a.gfx.fill_circle(bx, cy, 10.8, 10.8, if on { 0x0D2C44 } else { 0x222222 }, 1.0);
-            icon::bluetooth(&a.gfx, bx, cy, WHITE, 1.0);
-            let ex = left + w - 40.0;
-            // Battery count-up over ~0.9 s, eased out.
-            let k = (age / 0.9).clamp(0.0, 1.0);
-            let ease = 1.0 - (1.0 - k).powi(3);
-            let lv = t.level.unwrap_or(0.0) * ease;
-            let sub = match t.level {
-                Some(_) => format!("{value} · {}%", (lv * 100.0).round()),
-                None => value.to_string(),
-            };
-            a.gfx.ui(title, Rc::new(tx, 13.6, w - 64.0 - 72.0, 19.0), 15.0, 700, WHITE, 1.0, Align::L);
-            a.gfx.ui(&sub, Rc::new(tx, 33.6, w - 64.0 - 72.0, 15.0), 11.5, 400, 0x9A9A9A, 1.0, Align::L);
-            // Ripple rings while counting, then the ring settles to a dim track.
-            for d in [0.0f32, 0.35] {
-                let q = ((age - d) / 0.8).clamp(0.0, 1.0);
-                if on && q > 0.0 && q < 1.0 {
-                    a.gfx.stroke_circle(ex, cy, 16.0 + 9.0 * q, 1.4, 0x46D9CE, 0.5 * (1.0 - q));
+/// Icon drawn inside a status badge or indicator ring.
+#[derive(Clone, Copy, PartialEq)]
+enum Glyph {
+    Bluetooth,
+    /// Wi-Fi arcs revealed 0..3; `true` when connected.
+    Wifi(f32, bool),
+    /// Signal bars lit 0..4.
+    Bars(f32),
+    Bolt,
+    Battery,
+    Check(f32),
+    Drop,
+    Bell,
+    Stopwatch,
+    Checklist,
+    /// What a connected device is (headphones, mouse, drive...).
+    Device(DeviceKind),
+    Usb,
+}
+
+fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
+    match g {
+        Glyph::Device(k) => icon::device(&a.gfx, k, cx, cy, hex, 1.0),
+        Glyph::Usb => icon::usb(&a.gfx, cx, cy, hex, 1.0),
+        Glyph::Bluetooth => icon::bluetooth(&a.gfx, cx, cy, hex, 1.0),
+        // The arcs' bounding box is centred on (cx, cy): dot 4.6 below, outer arc 7.4 above.
+        Glyph::Wifi(arcs, _) => icon::wifi_centered(&a.gfx, cx, cy, arcs, hex, 1.0),
+        Glyph::Bars(lit) => {
+            for i in 0..4 {
+                let h = 3.4 + i as f32 * 2.6;
+                // Each bar pops up in turn with a small overshoot.
+                let k = (lit - i as f32).clamp(0.0, 1.0);
+                let pop = if k > 0.0 && k < 1.0 { 1.0 + 0.25 * (std::f32::consts::PI * k).sin() } else { 1.0 };
+                let hh = h * if k > 0.0 { pop } else { 1.0 };
+                let r = Rc::new(cx - 7.0 + i as f32 * 3.8, cy + 5.0 - hh, 2.6, hh);
+                a.gfx.fill_rrect(r, 1.3, mix(0x3A3A3A, hex, k), 1.0);
+            }
+        }
+        Glyph::Bolt => icon::bolt_small(&a.gfx, cx, cy, hex, 1.0),
+        Glyph::Battery => {
+            a.gfx.stroke_rrect(Rc::new(cx - 6.0, cy - 3.6, 11.0, 7.2), 1.8, 1.4, hex, 1.0);
+            a.gfx.fill_rrect(Rc::new(cx + 5.4, cy - 1.6, 1.6, 3.2), 0.6, hex, 1.0);
+        }
+        Glyph::Check(k) => {
+            // Drawn stroke by stroke.
+            let pts = [(cx - 5.0, cy + 0.2), (cx - 1.4, cy + 3.8), (cx + 5.4, cy - 3.6)];
+            let k = k.clamp(0.0, 1.0);
+            if k > 0.0 {
+                let first = (k / 0.4).min(1.0);
+                let p1 = (pts[0].0 + (pts[1].0 - pts[0].0) * first, pts[0].1 + (pts[1].1 - pts[0].1) * first);
+                let mut line = vec![pts[0], p1];
+                if k > 0.4 {
+                    let s = (k - 0.4) / 0.6;
+                    line.push((pts[1].0 + (pts[2].0 - pts[1].0) * s, pts[1].1 + (pts[2].1 - pts[1].1) * s));
                 }
-            }
-            let settle = ((age - 1.0) / 0.5).clamp(0.0, 1.0);
-            a.gfx.fill_circle(ex, cy, 16.0, 16.0, 0x0C1414, 1.0);
-            a.gfx.stroke_circle(ex, cy, 16.0, 2.0, 0x2A3A3A, 1.0);
-            if on && lv > 0.0 {
-                a.gfx.arc(ex, cy, 16.0, lv, 2.0, mix(0x46D9CE, 0x3A4A4A, settle), 1.0);
-            }
-            icon::headphones(&a.gfx, ex, cy, if on { WHITE } else { 0x9A9A9A }, 1.0);
-        }
-        ToastKind::Water => {
-            // Droplet in a dark disc with a breathing cyan ring.
-            let pulse = 0.5 + 0.5 * (age * 5.2).sin();
-            a.gfx.glow(bx, cy, 20.0, 0x2FD6E0, 0.10 + 0.14 * pulse);
-            a.gfx.fill_circle(bx, cy, 15.2, 15.2, 0x0B1A1E, 1.0);
-            a.gfx.stroke_circle(bx, cy, 15.2, 1.6, 0x2FD6E0, 0.25 + 0.6 * pulse);
-            icon::droplet(&a.gfx, bx, cy + 2.0, 9.6, 0x35E0E8, 1.0);
-            let bw = 128.0;
-            a.gfx.ui(title, Rc::new(tx, 13.6, w - 64.0 - bw - 8.0, 19.0), 15.0, 700, WHITE, 1.0, Align::L);
-            // The original keeps this supporting line readable against the
-            // transparent toast; #9A9A9A became visibly soft at fractional
-            // DPI with grayscale antialiasing.
-            a.gfx.ui(value, Rc::new(tx, 33.6, w - 64.0 - bw - 8.0, 15.0), 11.5, 400, 0xB2B2B2, 1.0, Align::L);
-            let snooze = Rc::new(left + w - bw - 14.0, cy - 13.0, 58.0, 26.0);
-            let drank = Rc::new(left + w - 66.0, cy - 13.0, 54.0, 26.0);
-            let hs = if live { btn(a, snooze, 0.07) } else { 0.0 };
-            a.gfx.fill_rrect(snooze, 13.0, mix(0x343434, 0x4A4A4A, hs), 1.0);
-            a.gfx.ui("Snooze", snooze, 11.5, 600, 0xE6E6E6, 1.0, Align::C);
-            a.gfx.unzoom();
-            let hd = if live { btn(a, drank, 0.07) } else { 0.0 };
-            a.gfx.fill_rrect(drank, 13.0, mix(0x1E50C8, 0x2A66E8, hd), 1.0);
-            a.gfx.ui("Drank", drank, 11.5, 600, 0xBFD6FF, 1.0, Align::C);
-            a.gfx.unzoom();
-            if live {
-                hit(a, snooze, Act::ToastSnooze);
-                hit(a, drank, Act::ToastDrank);
+                a.gfx.polyline(&line, 2.0, hex, 1.0);
             }
         }
-        _ => {
-            a.gfx.fill_circle(bx, cy, 14.4, 14.4, 0x2E2E2E, 1.0);
-            let initial: String = value.chars().next().map(String::from).unwrap_or_default();
-            a.gfx.ui(&initial, Rc::new(bx - 14.4, cy - 14.4, 28.8, 28.8), 13.0, 700, WHITE, 1.0, Align::C);
-            a.gfx.ui(value, Rc::new(tx, 13.6, w - 88.0, 19.0), 15.0, 700, WHITE, 1.0, Align::L);
-            a.gfx.ui(title, Rc::new(tx, 33.6, w - 88.0, 15.0), 11.5, 400, 0x9A9A9A, 1.0, Align::L);
+        Glyph::Drop => icon::droplet(&a.gfx, cx, cy + 1.4, 8.0, hex, 1.0),
+        Glyph::Bell => {
+            a.gfx.zoom(cx, cy, 1.3);
+            icon::bell(&a.gfx, cx, cy, hex, 1.0);
+            a.gfx.unzoom();
+        }
+        Glyph::Stopwatch => icon::stopwatch(&a.gfx, cx, cy + 1.2, 7.4, hex, 1.0),
+        Glyph::Checklist => {
+            a.gfx.zoom(cx, cy, 0.62);
+            icon::checklist(&a.gfx, cx, cy, hex, 1.0);
+            a.gfx.unzoom();
         }
     }
 }
+
+/// The shared card layout of every two-line toast, modelled on the Bluetooth toast: a round badge
+/// (accent ring, dark centre, glyph) on the left, bold title over a grey line, and an optional
+/// indicator ring on the right that fills to `level` while ripples run out.
+struct Card {
+    accent: u32,
+    dark: u32,
+    badge: Glyph,
+    /// Badge motion: shake amplitude (radians) for alarms, 0 for none.
+    shake: f32,
+    /// Right indicator: (glyph inside, ring fill 0..1); None leaves the space for buttons/text.
+    ring: Option<(Glyph, f32)>,
+    /// Right edge reserved for buttons.
+    reserve: f32,
+}
+
+fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, sub: &str, c: &Card) {
+    let age = t.born.elapsed().as_secs_f32();
+    let cy = h / 2.0;
+    let bx = left + 32.0;
+    let tx = left + 62.0;
+    // Badge: a ripple leaves it once, the ring breathes gently.
+    let q = (age / 0.8).clamp(0.0, 1.0);
+    if q < 1.0 {
+        a.gfx.stroke_circle(bx, cy, 14.4 + 8.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
+    }
+    a.gfx.fill_circle(bx, cy, 14.4, 14.4, c.accent, 1.0);
+    a.gfx.fill_circle(bx, cy, 11.2, 11.2, c.dark, 1.0);
+    if c.shake > 0.0 {
+        a.gfx.rotate(bx, cy, ring_angle(age, c.shake));
+    }
+    glyph(a, c.badge, bx, cy, WHITE);
+    if c.shake > 0.0 {
+        a.gfx.unzoom();
+    }
+    let right_w = if c.ring.is_some() { 56.0 } else { c.reserve };
+    let tw = w - (tx - left) - right_w - 8.0;
+    a.gfx.ui(title, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+    a.gfx.ui(sub, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+    if let Some((g, level)) = c.ring {
+        let ex = left + w - 36.0;
+        for d in [0.0f32, 0.35] {
+            let q = ((age - d) / 0.8).clamp(0.0, 1.0);
+            if q > 0.0 && q < 1.0 {
+                a.gfx.stroke_circle(ex, cy, 15.0 + 9.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
+            }
+        }
+        let settle = ((age - 1.0) / 0.5).clamp(0.0, 1.0);
+        a.gfx.fill_circle(ex, cy, 15.0, 15.0, 0x0E0E10, 1.0);
+        a.gfx.stroke_circle(ex, cy, 15.0, 2.0, 0x2A2D30, 1.0);
+        if level > 0.0 {
+            a.gfx.arc(ex, cy, 15.0, level, 2.0, mix(c.accent, mix(c.accent, 0x3A3A3A, 0.6), settle), 1.0);
+        }
+        glyph(a, g, ex, cy, WHITE);
+    }
+}
+
+/// A notification grown into its detail view: app row, title, wrapped content (or a screenshot
+/// preview) and Open / Close buttons on the bottom row.
+fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
+    let Some(n) = a.notice.as_ref() else { return };
+    let (kind, app, site, title, body, born, thumb, file, size, openable, aumid) = (
+        n.kind,
+        n.app.clone(),
+        n.site.clone(),
+        n.title.clone(),
+        n.body.clone(),
+        n.born,
+        n.thumb.clone(),
+        n.file.clone(),
+        n.file_size.clone(),
+        n.openable(),
+        n.aumid.clone(),
+    );
+    let pad = 22.0;
+    let (x0, x1) = (left + pad, left + w - pad);
+    // Header: badge, source name, age.
+    let hy = 26.0;
+    match kind {
+        crate::NoticeKind::Chat => icon::messenger(&a.gfx, x0 + 11.0, hy, 11.0, 1.0),
+        _ => {
+            let icon = (!aumid.is_empty()).then(|| std::path::PathBuf::from(format!("shell:AppsFolder\\{aumid}")));
+            let bmp = icon.and_then(|p| a.shelf_icon(&p).0);
+            match bmp {
+                Some(b) => a.gfx.image_fit(&b, Rc::new(x0, hy - 11.0, 22.0, 22.0), 5.0, 1.0, false),
+                None => {
+                    a.gfx.fill_rrect(Rc::new(x0, hy - 11.0, 22.0, 22.0), 6.0, 0x2C2C2E, 1.0);
+                    let letter: String = app.chars().take(1).collect::<String>().to_uppercase();
+                    a.gfx.ui(&letter, Rc::new(x0, hy - 11.0, 22.0, 22.0), 12.0, 700, WHITE, 1.0, Align::C);
+                }
+            }
+        }
+    }
+    let source = match (&kind, &site) {
+        (crate::NoticeKind::Chat, _) => "Messenger".to_string(),
+        (crate::NoticeKind::Screenshot, _) => "Snipping Tool".to_string(),
+        (_, Some(s)) => format!("{app} · {}", s.trim_start_matches("www.")),
+        _ => app.clone(),
+    };
+    let secs = born.elapsed().as_secs();
+    let age = if secs < 60 { "now".to_string() } else { format!("{} min", secs / 60) };
+    a.gfx.ui(&age, Rc::new(x1 - 60.0, hy - 9.0, 60.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
+    a.gfx.ui(&source, Rc::new(x0 + 32.0, hy - 9.0, x1 - x0 - 32.0 - 66.0, 18.0), 12.0, 600, 0xA0A0A5, 1.0, Align::L);
+
+    // Content.
+    let top = 46.0;
+    let bottom = h - 14.0 - 28.0 - 10.0;
+    if kind == crate::NoticeKind::Screenshot {
+        let tr = Rc::new(x0, top, 128.0, 72.0);
+        match &thumb {
+            Some(b) => a.gfx.image_fit(b, tr, 8.0, 1.0, true),
+            None => a.gfx.fill_rrect(tr, 8.0, 0x1C1C1E, 1.0),
+        }
+        a.gfx.stroke_rrect(tr, 8.0, 1.0, 0x3A3A3C, 1.0);
+        let tx = tr.x + tr.w + 14.0;
+        let tw = x1 - tx;
+        a.gfx.ui("Ảnh chụp màn hình", Rc::new(tx, top + 2.0, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+        let line = match &file {
+            Some(f) => f.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            None => "Đã chép vào bộ nhớ tạm".to_string(),
+        };
+        a.gfx.ui(&line, Rc::new(tx, top + 26.0, tw, 17.0), 12.0, 400, 0xC7C7CC, 1.0, Align::L);
+        if !size.is_empty() {
+            a.gfx.ui(&size, Rc::new(tx, top + 45.0, tw, 16.0), 11.5, 400, 0x8E8E93, 1.0, Align::L);
+        }
+    } else {
+        let shown = if kind == crate::NoticeKind::Chat && !a.settings.show_content { "Tin nhắn mới".to_string() } else { body.clone() };
+        a.gfx.ui(&title, Rc::new(x0, top, x1 - x0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+        let by = top + 24.0;
+        a.gfx.push_clip(Rc::new(x0, by, x1 - x0, (bottom - by).max(0.0)));
+        a.gfx.text(&shown, Rc::new(x0, by, x1 - x0, 200.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
+        a.gfx.pop_clip();
+    }
+
+    // Buttons: Close always; Open when it leads somewhere. Clicking the content opens too.
+    let by = h - 14.0 - 28.0;
+    let close = Rc::new(x1 - 28.0, by, 28.0, 28.0);
+    let hc = if live { btn(a, close, 0.07) } else { 0.0 };
+    a.gfx.fill_circle(close.cx(), close.cy(), 14.0, 14.0, mix(0x2C2C2E, 0x3A3A3C, hc), 1.0);
+    a.gfx.line(close.cx() - 4.0, close.cy() - 4.0, close.cx() + 4.0, close.cy() + 4.0, 1.8, 0xD1D1D6, 1.0);
+    a.gfx.line(close.cx() - 4.0, close.cy() + 4.0, close.cx() + 4.0, close.cy() - 4.0, 1.8, 0xD1D1D6, 1.0);
+    a.gfx.unzoom();
+    if live {
+        hit(a, Rc::new(left, top - 4.0, w, by - top), if openable { Act::NoticeOpen } else { Act::None });
+        hit(a, close, Act::NoticeClose);
+    }
+    if openable {
+        let label = match kind {
+            crate::NoticeKind::Screenshot => "Mở ảnh",
+            crate::NoticeKind::Chat => "Trả lời",
+            _ => "Mở",
+        };
+        let open = Rc::new(close.x - 8.0 - 84.0, by, 84.0, 28.0);
+        card_button(a, open, label, 0x1E50C8, 0xDCE8FF, live, Act::NoticeOpen);
+    }
+}
+
+const AMBER: u32 = 0xFFB020;
+
+/// Battery colours (accent, dark badge): above 50 % green, 21-50 % amber, 20 % and below red.
+/// Called with the counting-up level, so a card climbs through the colours to the real one.
+fn battery_tone(level: f32) -> (u32, u32) {
+    let blend = |lo: f32, x: f32| ((x - lo) / 0.01).clamp(0.0, 1.0);
+    let l = level.clamp(0.0, 1.0);
+    if l > 0.5 {
+        let k = blend(0.5, l);
+        (mix(AMBER, GREEN, k), mix(0x3A2A08, 0x0C2E14, k))
+    } else if l > 0.2 {
+        let k = blend(0.2, l);
+        (mix(RED, AMBER, k), mix(0x3A0E10, 0x3A2A08, k))
+    } else {
+        (RED, 0x3A0E10)
+    }
+}
+
+/// Count-up shared by every card: 0 → 1 over 0.9 s, eased out.
+fn count_up(t: &crate::Toast) -> f32 {
+    let k = (t.born.elapsed().as_secs_f32() / 0.9).clamp(0.0, 1.0);
+    1.0 - (1.0 - k).powi(3)
+}
+
+/// Rounded action button used on interactive cards (same height, radius and type everywhere).
+fn card_button(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, live: bool, act: Act) {
+    let h = if live { btn(a, r, 0.07) } else { 0.0 };
+    a.gfx.fill_rrect(r, r.h / 2.0, mix(bg, mix(bg, 0xFFFFFF, 0.12), h), 1.0);
+    a.gfx.ui(label, r, 12.0, 600, fg, 1.0, Align::C);
+    a.gfx.unzoom();
+    if live {
+        hit(a, r, act);
+    }
+}
+
+/// Two-line toasts, all on the shared `card` layout.
+fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
+    let (kind, title, value) = (t.kind, t.title.as_str(), t.value.as_str());
+    let age = t.born.elapsed().as_secs_f32();
+    let h = a.sh.x.max(40.0);
+    let up = count_up(t);
+    // Buttons: 28 tall, right-aligned with a 14 margin and 8 between.
+    let buttons = |w1: f32, w2: f32| {
+        let cy = h / 2.0;
+        let b2 = Rc::new(left + w - 14.0 - w2, cy - 14.0, w2, 28.0);
+        let b1 = Rc::new(b2.x - 8.0 - w1, cy - 14.0, w1, 28.0);
+        (b1, b2)
+    };
+    match kind {
+        ToastKind::Message => {
+            // iPhone lock-screen style: app icon, sender + "now", then two lines of message.
+            let k = (age / 0.35).clamp(0.0, 1.0);
+            let drop = -10.0 * (1.0 - k).powi(3);
+            let off = a.gfx.off;
+            a.gfx.offset(off.0, off.1 + drop);
+            let ix = left + 34.0;
+            icon::messenger(&a.gfx, ix, h / 2.0, 19.0, 1.0);
+            let tx = left + 64.0;
+            let tw = w - 64.0 - 22.0;
+            // Sender and message are centred together on the card, one line or two.
+            let body = if a.settings.show_content { title } else { "Tin nhắn mới" };
+            let body_h = a.gfx.measure_wrapped(body, 13.0, 400, tw).clamp(17.0, 34.0);
+            // Optical centre: glyphs sit low in their line boxes.
+            let top = ((h - (20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(4.0);
+            a.gfx.ui(value, Rc::new(tx, top, tw - 40.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+            a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top + 1.0, 40.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
+            let by = top + 22.0;
+            a.gfx.push_clip(Rc::new(tx, by, tw, body_h + 2.0));
+            a.gfx.text(body, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
+            a.gfx.pop_clip();
+            a.gfx.offset(off.0, off.1);
+        }
+        ToastKind::Bluetooth(on) => {
+            let lv = t.level.unwrap_or(0.0) * up;
+            // A nearly flat battery (mice especially) is said out loud and turns the ring red.
+            let low = on && t.level.is_some_and(|l| l <= 0.2);
+            let sub = match t.level {
+                Some(_) if low => format!("Low battery · {}%", (lv * 100.0).round()),
+                Some(_) => format!("{value} · {}%", (lv * 100.0).round()),
+                None => value.to_string(),
+            };
+            let kind = match a.device_kind {
+                DeviceKind::Other => DeviceKind::Headphones,
+                k => k,
+            };
+            // With a known battery the card takes its colour; without one it stays Bluetooth blue.
+            let (accent, dark) = match t.level {
+                Some(_) if on => battery_tone(lv),
+                _ if on => (0x56C1F5, 0x0D2C44),
+                _ => (0x6B6B6B, 0x222222),
+            };
+            let c = Card {
+                accent,
+                dark,
+                badge: Glyph::Bluetooth,
+                shake: if low { 0.18 } else { 0.0 },
+                ring: Some((Glyph::Device(kind), if on { lv } else { 0.0 })),
+                reserve: 0.0,
+            };
+            card(a, left, w, h, t, title, &sub, &c);
+        }
+        ToastKind::Device(on) => {
+            let drive = on && a.device_root.is_some();
+            let b = buttons(0.0, 64.0).1;
+            let c = Card {
+                accent: if on { GREEN } else { 0x6B6B6B },
+                dark: if on { 0x0C2E14 } else { 0x222222 },
+                badge: Glyph::Usb,
+                shake: 0.0,
+                ring: if drive { None } else { Some((Glyph::Device(a.device_kind), if on { up } else { 0.0 })) },
+                reserve: if drive { b.w + 14.0 } else { 0.0 },
+            };
+            card(a, left, w, h, t, title, value, &c);
+            if drive {
+                card_button(a, b, "Open", 0x1E50C8, 0xDCE8FF, live, Act::DeviceOpen);
+            }
+        }
+        ToastKind::Net(on) => {
+            let bars = t.level.unwrap_or(0.8);
+            let c = Card {
+                accent: if on { BLUE } else { 0x6B6B6B },
+                dark: if on { 0x0D2C44 } else { 0x222222 },
+                badge: Glyph::Wifi(if on { 3.0 * up } else { 3.0 }, on),
+                shake: 0.0,
+                ring: Some((Glyph::Bars(if on { 4.0 * bars * up } else { 0.0 }), if on { bars * up } else { 0.0 })),
+                reserve: 0.0,
+            };
+            card(a, left, w, h, t, title, value, &c);
+            if !on {
+                // A slash draws across the Wi-Fi glyph.
+                let (bx, cy) = (left + 32.0, h / 2.0);
+                let d = 6.4 * up;
+                a.gfx.line(bx - 6.4, cy - 6.4, bx - 6.4 + 2.0 * d, cy - 6.4 + 2.0 * d, 1.8, 0xD0D0D0, 1.0);
+            }
+        }
+        ToastKind::Charging(_) | ToastKind::Battery => {
+            let charging = matches!(kind, ToastKind::Charging(true));
+            let low = kind == ToastKind::Battery;
+            let lv = t.level.unwrap_or(1.0).clamp(0.0, 1.0);
+            let shown = lv * up;
+            // "Charger connected · 94%", counting up like the Bluetooth battery.
+            let sub = if value.contains('%') { value.to_string() } else { format!("{value} · {}%", (shown * 100.0).round()) };
+            // Charging is always green; on battery the card shows how much is left.
+            let (accent, dark) = if low {
+                (RED, 0x3A0E10)
+            } else if charging {
+                (GREEN, 0x0C2E14)
+            } else {
+                battery_tone(shown)
+            };
+            let c = Card {
+                accent,
+                dark,
+                badge: if charging { Glyph::Bolt } else { Glyph::Battery },
+                shake: if low { 0.18 } else { 0.0 },
+                ring: Some((if charging { Glyph::Bolt } else { Glyph::Battery }, shown)),
+                reserve: 0.0,
+            };
+            card(a, left, w, h, t, title, &sub, &c);
+        }
+        ToastKind::Goal => {
+            let c = Card { accent: CYAN, dark: 0x0B2A33, badge: Glyph::Drop, shake: 0.0, ring: Some((Glyph::Check(up), up)), reserve: 0.0 };
+            card(a, left, w, h, t, title, value, &c);
+        }
+        ToastKind::Focus | ToastKind::Break => {
+            let focus = kind == ToastKind::Focus;
+            let (b1, b2) = buttons(32.0, 64.0);
+            let c = Card { accent: RED, dark: 0x2A0A0C, badge: Glyph::Stopwatch, shake: 0.2, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, value, &c);
+            // Close: a round ✕ the same height as the action button.
+            let x_btn = Rc::new(b1.x + 2.0, b1.y, 28.0, 28.0);
+            let hx = if live { btn(a, x_btn, 0.08) } else { 0.0 };
+            a.gfx.fill_circle(x_btn.cx(), x_btn.cy(), 14.0, 14.0, mix(0x4A1517, 0x6A1E21, hx), 1.0);
+            let (qx, qy, d) = (x_btn.cx(), x_btn.cy(), 5.0);
+            a.gfx.line(qx - d, qy - d, qx + d, qy + d, 2.2, 0xF0484F, 1.0);
+            a.gfx.line(qx - d, qy + d, qx + d, qy - d, 2.2, 0xF0484F, 1.0);
+            a.gfx.unzoom();
+            if live {
+                hit(a, x_btn, Act::ToastDismiss);
+            }
+            let (bg, fg) = if focus { (0x0E3A1B, 0x35D766) } else { (0x0D2F44, 0x4DBDFF) };
+            card_button(a, b2, if focus { "Focus" } else { "Break" }, bg, fg, live, Act::ToastStartPhase);
+        }
+        ToastKind::Task => {
+            let (b1, b2) = buttons(56.0, 56.0);
+            let c = Card { accent: TODO_GREEN, dark: 0x0B2414, badge: Glyph::Checklist, shake: 0.18, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, value, &c);
+            card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::TaskLater);
+            card_button(a, b2, "Start", 0x0E3A1B, 0x35D766, live, Act::TaskStart);
+        }
+        ToastKind::Water => {
+            let (b1, b2) = buttons(62.0, 56.0);
+            let c = Card { accent: CYAN, dark: 0x0B2A33, badge: Glyph::Drop, shake: 0.16, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, value, &c);
+            card_button(a, b1, "Snooze", 0x2E2E2E, 0xE6E6E6, live, Act::ToastSnooze);
+            card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live, Act::ToastDrank);
+        }
+        _ => {
+            // App notification: ringing bell badge, sender over message.
+            let c = Card { accent: 0xF5B833, dark: 0x2A2310, badge: Glyph::Bell, shake: 0.32, ring: None, reserve: 14.0 };
+            card(a, left, w, h, t, value, title, &c);
+        }
+    }
+}
+
+/// Alarm-style shake: bursts of a fast decaying wobble every 1.6 s, amplitude `amp` radians.
+fn ring_angle(age: f32, amp: f32) -> f32 {
+    let p = age % 1.6;
+    if p > 0.7 {
+        return 0.0;
+    }
+    amp * (-p * 5.0).exp() * (p * 38.0).sin()
+}
+
 
 // ---------------------------------------------------------------- expanded
 
@@ -991,12 +1532,24 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
 fn pomo(a: &mut App, lx: f32) {
     title(a, lx, "Pomodoro", None);
     let (cx, cy) = (lx + 80.0, 74.0);
-    // Glow halo then the ring itself, lit from the top-left.
+    // Glow halo then the ring itself, lit from the top-left. The ring shows the time left: the
+    // elapsed part opens clockwise from 12 o'clock.
+    use std::f32::consts::{FRAC_PI_2, TAU};
     let (r, tl, br) = (31.8, 0xFD685D, 0xF33548);
+    let left = (a.pomo.left() / a.pomo.phase.secs()).clamp(0.0, 1.0) as f32;
+    let (from, to) = (-FRAC_PI_2 + TAU * (1.0 - left), -FRAC_PI_2 + TAU);
     for (w, alpha) in [(18.4, 0.07), (12.8, 0.11), (8.8, 0.18)] {
-        a.gfx.stroke_circle_diag(cx, cy, r, w, (tl, alpha), (br, alpha));
+        if left > 0.999 {
+            a.gfx.stroke_circle_diag(cx, cy, r, w, (tl, alpha), (br, alpha));
+        } else {
+            a.gfx.arc_diag(cx, cy, r, from, to, w, (tl, alpha), (br, alpha));
+        }
     }
-    a.gfx.stroke_circle_diag(cx, cy, r, 6.2, (tl, 1.0), (br, 1.0));
+    if left > 0.999 {
+        a.gfx.stroke_circle_diag(cx, cy, r, 6.2, (tl, 1.0), (br, 1.0));
+    } else {
+        a.gfx.arc_diag(cx, cy, r, from, to, 6.2, (tl, 1.0), (br, 1.0));
+    }
     icon::stopwatch(&a.gfx, cx, cy + 2.5, 16.2, WHITE, 1.0);
 
     let label = a.pomo.label();
@@ -1245,6 +1798,12 @@ fn shelf(a: &mut App, lx: f32) {
     let area = Rc::new(lx + 43.6, 32.0, 336.8, 91.2);
     let drag = a.drag_over;
     let items = a.shelf.items.clone();
+    if drag && !items.is_empty() {
+        // Nusa keeps the Clear chip next to the title while files are dragged in.
+        let clear = Rc::new(lx + 84.0, 10.8, 40.0, 17.6);
+        a.gfx.fill_rrect(clear, 8.8, 0x2A2A2A, 1.0);
+        a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
+    }
     if items.is_empty() || drag {
         if drag {
             // Items already on the shelf stay faintly visible behind the drop frame.
@@ -1256,7 +1815,7 @@ fn shelf(a: &mut App, lx: f32) {
                 for (i, p) in items.iter().take(n).enumerate() {
                     let tile = Rc::new(area.x + i as f32 * step, area.y, step - 6.0, area.h - 4.0);
                     if let (Some(bmp), _) = a.shelf_icon(p) {
-                        a.gfx.image(&bmp, Rc::new(tile.cx() - 20.0, tile.y + 8.0, 40.0, 40.0), 0.0, 1.0);
+                        a.gfx.image_fit(&bmp, Rc::new(tile.cx() - 20.0, tile.y + 8.0, 40.0, 40.0), 0.0, 1.0, false);
                     }
                     let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     a.gfx.ui(&name, Rc::new(tile.x + 2.0, tile.y + 53.0, tile.w - 4.0, 14.0), 10.5, 600, WHITE, 1.0, Align::C);
@@ -1266,7 +1825,8 @@ fn shelf(a: &mut App, lx: f32) {
             // Nusa keeps the target itself near-neutral charcoal.  The colour
             // comes from the broad violet aurora behind it, not from a blue
             // fill laid over every shelf item.
-            a.gfx.fill_rrect(area, 12.0, 0x25262A, 0.42);
+            // The drop frame is a translucent grey layer: dark at the top, lifting the blue below.
+            a.gfx.fill_rrect_vgrad(area, 12.0, (0x18191C, 0.62), (0x2E2E2E, 0.62));
             drag_bloom(a, area);
         } else {
             a.gfx.fill_rrect(area, 12.0, 0x0B0B0B, 1.0);
@@ -1284,7 +1844,7 @@ fn shelf(a: &mut App, lx: f32) {
     }
     // The empty drop area dissolves under the newly dropped items.
     if let Some((start, _, _)) = a.ripple {
-        let k = (1.0 - start.elapsed().as_secs_f32() / 0.6).clamp(0.0, 1.0);
+        let k = (1.0 - start.elapsed().as_secs_f32() / 0.16).clamp(0.0, 1.0);
         if k > 0.0 {
             let base = a.gfx.alpha;
             a.gfx.alpha = base * k;
@@ -1306,7 +1866,7 @@ fn shelf(a: &mut App, lx: f32) {
     for (i, p) in items.iter().take(n).enumerate() {
         let tile = Rc::new(area.x + i as f32 * step, area.y, step - 6.0, area.h - 4.0);
         // Freshly dropped items fade and rise into place.
-        let enter = a.ripple.map(|r| ((r.0.elapsed().as_secs_f32() - 0.08) / 0.3).clamp(0.0, 1.0)).unwrap_or(1.0);
+        let enter = a.ripple.map(|r| ((r.0.elapsed().as_secs_f32() - 0.02) / 0.12).clamp(0.0, 1.0)).unwrap_or(1.0);
         let (base, off) = (a.gfx.alpha, a.gfx.off);
         a.gfx.alpha = base * enter;
         a.gfx.offset(off.0, off.1 + 8.0 * (1.0 - enter).powi(2));
@@ -1318,7 +1878,7 @@ fn shelf(a: &mut App, lx: f32) {
         let ib = Rc::new(tile.cx() - 20.0, tile.y + 8.0, 40.0, 40.0);
         let (bmp, size) = a.shelf_icon(p);
         if let Some(bmp) = bmp {
-            a.gfx.image(&bmp, ib, 0.0, 1.0);
+            a.gfx.image_fit(&bmp, ib, 0.0, 1.0, false);
         } else {
             a.gfx.fill_rrect(ib, 6.0, 0x2A2A2A, 1.0);
             let ext = p.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_else(|| "FILE".into());
@@ -1339,27 +1899,29 @@ fn shelf(a: &mut App, lx: f32) {
     }
 }
 
-/// The panel's light while files are dragged in and after a drop, matched to Nusa screenshots:
-/// Nusa's drag backdrop has three separate lights: a teal spill under the
-/// left ear, a nearly colourless slate haze behind the tray, and a violet-blue
-/// spill under the right ear.  Keeping them separate matters: averaging them
-/// produces the flat blue/purple wash that the reference does not have.
+/// Bottom-edge light of the panel during a drag and after a drop. Colours are sampled from
+/// Nusa's own screen recording (effectvid/new4, frame 100, bottom row) across the panel width;
+/// each column rises from black near the top to that colour at the bottom edge.
+const AURORA: [u32; 13] = [
+    0x072635, 0x0E2A41, 0x152F50, 0x1C365B, 0x213E6D, 0x284476, 0x2B4477, 0x273B70, 0x223262, 0x1C2A53, 0x1A1D43, 0x141336, 0x161236,
+];
+
 fn aurora(a: &mut App, _focus_x: f32, _focus_y: f32, s: f32) {
     if s <= 0.01 {
         return;
     }
     let panel = Rc::new(crate::WIN_W / 2.0 - a.sw.x / 2.0, 0.0, a.sw.x, a.sh.x);
-    let (w, h) = (panel.w, panel.h);
-    let bottom = panel.y + h;
-    let mid = panel.x + w * 0.53;
-    // Broad, desaturated underpainting. Its centre is just inside the lower
-    // rim, so it reads as a soft blur rather than a coloured rectangle.
-    a.gfx.glow_ellipse(panel.x + w * 0.08, bottom + 9.0, w * 0.34, h * 0.66, 0x07516B, 0.62 * s);
-    a.gfx.glow_ellipse(mid, bottom + 7.0, w * 0.46, h * 0.67, 0x727787, 0.27 * s);
-    a.gfx.glow_ellipse(panel.x + w * 0.89, bottom - 2.0, w * 0.48, h * 0.82, 0x482878, 0.88 * s);
-    // A small indigo bridge prevents a hard seam between the two corner
-    // colours, but intentionally never dominates either lobe.
-    a.gfx.glow_ellipse(panel.x + w * 0.68, bottom + 3.0, w * 0.30, h * 0.52, 0x2C4394, 0.38 * s);
+    // Columns sampled at panel x = 12.5 + 40·k px of a 525 px panel; the gradient spans that range.
+    let x0 = panel.x + 12.5 / 1.25;
+    let x1 = x0 + 480.0 / 1.25;
+    let band = Rc::new(panel.x, panel.y + 18.0, panel.w, panel.h - 18.0);
+    a.gfx.push_clip(band);
+    a.gfx.fill_rrect(Rc::new(panel.x, band.y, x0 - panel.x + 0.5, band.h), 0.0, AURORA[0], s);
+    a.gfx.fill_rrect(Rc::new(x1 - 0.5, band.y, panel.x + panel.w - x1 + 0.5, band.h), 0.0, AURORA[AURORA.len() - 1], s);
+    a.gfx.fill_rect_hstops(Rc::new(x0, band.y, x1 - x0, band.h), &AURORA, s);
+    // Black from the top fades out toward the bottom edge, leaving the colour only below.
+    a.gfx.fill_rrect_vgrad(band, 0.0, (0x000000, 1.0), (0x000000, 0.0));
+    a.gfx.pop_clip()
 }
 
 /// A single moving, edgeless highlight above the dimmed shelf content.
@@ -1371,8 +1933,9 @@ fn drag_bloom(a: &mut App, area: Rc) {
     let x = a.blob.0.x.clamp(area.x + 12.0, area.x + area.w - 12.0);
     let y = a.blob.1.x.clamp(area.y + 12.0, area.y + area.h - 12.0);
     let strength = 0.72 + 0.28 * a.drag_energy;
-    a.gfx.glow_ellipse(x, y, 52.0, 35.0, 0xECECF1, 0.26 * strength);
-    a.gfx.glow_ellipse(x, y + 4.0, 79.0, 50.0, 0xAEB2C1, 0.14 * strength);
+    // Measured on the Nusa recording: a broad, faint grey lift (peak ≈ +0x20 over the frame).
+    a.gfx.glow_ellipse(x, y + 10.0, 90.0, 52.0, 0xB4B8C6, 0.16 * strength);
+    a.gfx.glow_ellipse(x, y + 6.0, 48.0, 30.0, 0xD0D2DA, 0.08 * strength);
 }
 
 /// The bright charge left at the drop point, after the drag cursor disappears.
@@ -1397,24 +1960,45 @@ fn drop_bloom(a: &mut App, area: Rc) {
     a.gfx.glow_ellipse(x, y, 25.0 + t * 4.0, 14.0 + t * 3.0, 0xE5E6ED, 0.16 * linger);
 }
 
+/// Brightening on top of the aurora, in its own colours: under the cursor while dragging (stronger
+/// the nearer the bottom edge), and widening from the drop point after a drop.
+fn aurora_highlight(a: &mut App, x: f32, s: f32) {
+    if s <= 0.95 {
+        return;
+    }
+    let panel = Rc::new(crate::WIN_W / 2.0 - a.sw.x / 2.0, 0.0, a.sw.x, a.sh.x);
+    let f = ((x - panel.x) / panel.w).clamp(0.0, 1.0);
+    let p = ((f * 525.0 - 12.5) / 40.0).clamp(0.0, (AURORA.len() - 1) as f32);
+    let k = (p.floor() as usize).min(AURORA.len() - 2);
+    let base = mix(AURORA[k], AURORA[k + 1], p - k as f32);
+    // Same hue, more light: scale the channels instead of mixing in white.
+    let lift = |c: u32, k: f32| {
+        let ch = |sh: u32| ((((c >> sh) & 255) as f32 * k).min(255.0) as u32) << sh;
+        ch(16) | ch(8) | ch(0)
+    };
+    let bright = lift(base, 2.6);
+    let hot = lift(base, 3.6);
+    let spread = a.ripple.filter(|_| !a.drag_over).map(|r| 1.0 + 1.6 * (r.0.elapsed().as_secs_f32() / 1.2).min(1.0)).unwrap_or(1.0);
+    let bottom = panel.y + panel.h;
+    // Only the part above the normal level lights up: far from the edge it looks exactly like Nusa.
+    let amt = ((s - 0.95) / 0.65).clamp(0.0, 1.0);
+    a.gfx.glow_ellipse(x, bottom + 6.0, panel.w * 0.30 * spread, panel.h * 0.70, bright, 0.95 * amt);
+    a.gfx.glow_ellipse(x, bottom + 4.0, panel.w * 0.15 * spread, panel.h * 0.42, hot, 0.8 * amt);
+}
+
 /// Aurora strength and focus for the shelf.  A drag retains a bright baseline
 /// even while the cursor is motionless; movement only adds a little energy.
 fn aurora_state(a: &App) -> (f32, f32, f32) {
-    if a.drag_over {
-        return (a.blob.0.x, a.blob.1.x, 0.78 + 0.22 * a.drag_energy);
-    }
+    let lvl = a.aurora_lvl.x.clamp(0.0, 1.6);
     match a.ripple {
-        Some((start, x, y)) => {
-            let t = start.elapsed().as_secs_f32();
-            (x, y, a.drop_energy * (1.0 - (t - 0.5).max(0.0) / 2.5).clamp(0.0, 1.0).powf(1.3))
-        }
-        None => (0.0, 0.0, 0.0),
+        Some((_, x, y)) if !a.drag_over => (x, y, lvl),
+        _ => (a.blob.0.x, a.blob.1.x, lvl),
     }
 }
 
-/// After a drop, a packet of flat concentric bands runs out from the drop point across the
-/// panel. Measured on the Nusa screenshot: six ~10 u bands, brightness stepping up to a peak one
-/// third in from the leading edge and down again (alphas below, over a lavender-grey).
+/// After a drop, water-like ripples spread from the drop point. Timed on Nusa's recording
+/// (effectvid/new4, frames 263–269): a packet of six rings ~14 u apart leads a disc that grows to
+/// ~240 u in about 0.25 s and is gone by 0.3 s; the bottom light then simply fades.
 fn drop_wave(a: &mut App) {
     let Some((start, x, y)) = a.ripple else { return };
     let t = start.elapsed().as_secs_f32();
@@ -1422,40 +2006,23 @@ fn drop_wave(a: &mut App) {
         a.ripple = None;
         return;
     }
-    let panel = Rc::new(crate::WIN_W / 2.0 - a.sw.x / 2.0, 0.0, a.sw.x, a.sh.x);
-    let reach = ((x - panel.x).max(panel.x + panel.w - x).powi(2) + (y.max(panel.h - y)).powi(2)).sqrt() + 70.0;
-    // A coloured afterglow remains when the wave reaches the shelf edge.
-    // Nusa visibly charges the drop location; it does not leave only rings.
-    let linger = (1.0 - t / 2.65).clamp(0.0, 1.0).powf(1.35);
-    let pos = ((x - panel.x) / panel.w).clamp(0.0, 1.0);
-    let tint = if pos < 0.5 {
-        mix(0x0B6179, 0x727787, pos * 2.0)
-    } else {
-        mix(0x727787, 0x5A348B, (pos - 0.5) * 2.0)
-    };
-    let spread = (1.0 - linger) * 76.0;
-    // Coloured afterglow is deliberately broader than the rings and survives
-    // after the leading wave has passed the panel edge.
-    a.gfx.glow_ellipse(x, y, 132.0 + t * 16.0, 42.0 + t * 7.0, tint, 0.20 * linger);
-    a.gfx.glow_ellipse(x - spread * 0.5, y + 2.0, 100.0, 26.0, 0x0B6179, 0.13 * linger);
-    a.gfx.glow_ellipse(x + spread * 0.5, y - 2.0, 102.0, 29.0, 0x5A348B, 0.16 * linger);
-    a.gfx.glow_ellipse(x, y, 58.0 + t * 7.0, 27.0 + t * 5.0, tint, 0.34 * linger);
-    a.gfx.glow_ellipse(x, y, 28.0 + t * 4.0, 15.0 + t * 3.0, 0xE2E3EB, 0.10 * linger);
-
-    let q = (t / 1.6).clamp(0.0, 1.0);
-    if q < 1.0 {
-        // Inner to outer, subordinate to the coloured afterglow.
-        const BANDS: [f32; 6] = [0.03, 0.08, 0.15, 0.10, 0.045, 0.02];
-        const BW: f32 = 10.0;
-        let front = 20.0 + (reach + BW * 6.0) * (1.0 - (1.0 - q).powf(1.6));
-        let fade = 1.0 - q.powf(2.2);
-        for (k, al) in BANDS.iter().enumerate() {
-            let r = front - (BANDS.len() - 1 - k) as f32 * BW - BW / 2.0;
-            if r <= BW / 2.0 {
-                continue;
-            }
-            a.gfx.stroke_circle(x, y, r, BW, 0xC8CCEB, al * fade);
-        }
+    let q = t / 0.75;
+    if q >= 1.0 {
+        return;
+    }
+    let front = 30.0 + 210.0 * (1.0 - (1.0 - q).powf(1.4));
+    let fade = (1.0 - q).powf(1.2);
+    const GAP: f32 = 13.0;
+    let mut r = front;
+    let mut rings = 0;
+    while r > 4.0 && rings < 6 {
+        rings += 1;
+        let k = r / front;
+        let al = (0.15 + 0.15 * k) * fade;
+        // Soft, wide bands (a lit band with a brighter middle), as on the recording.
+        a.gfx.stroke_circle(x, y, r, 9.0, 0xC9CDE6, al * 0.75);
+        a.gfx.stroke_circle(x, y, r, 4.0, 0xE2E5F3, al * 0.6);
+        r -= GAP;
     }
 }
 
@@ -1532,8 +2099,14 @@ fn todo(a: &mut App, lx: f32) {
         if time.is_empty() {
             a.gfx.ui(&t, Rc::new(card.x + 29.6, y, card.w - 60.0, 26.0), 13.0, 400, tcol, 1.0, Align::L);
         } else {
-            a.gfx.ui(&t, Rc::new(card.x + 29.6, y + 1.0, card.w - 60.0, 15.0), 13.0, 400, tcol, 1.0, Align::L);
-            a.gfx.ui(&time, Rc::new(card.x + 29.6, y + 14.6, card.w - 60.0, 11.0), 9.5, 400, GREY, 1.0, Align::L);
+            // Two lines with clear space between them: title, then the time span.
+            let span = match time.split_once('-') {
+                Some((start, end)) if !end.is_empty() && end != "00:00" => format!("{start} – {end}"),
+                Some((start, _)) => start.to_string(),
+                None => time.clone(),
+            };
+            a.gfx.ui(&t, Rc::new(card.x + 29.6, y + 0.5, card.w - 60.0, 14.0), 12.5, 400, tcol, 1.0, Align::L);
+            a.gfx.ui(&span, Rc::new(card.x + 29.6, y + 17.0, card.w - 60.0, 10.0), 9.5, 400, GREY, 1.0, Align::L);
         }
         a.gfx.unzoom();
         hit(a, rr, Act::TodoToggle(i));

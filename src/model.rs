@@ -80,6 +80,10 @@ pub struct Settings {
     pub minimal: bool,
     /// Lyrics text size in the expanded view (15 = about five lines, 26 = one large line).
     pub lyric_size: f32,
+    /// Turn off Windows' corner banners for apps whose notifications Islet shows.
+    pub hide_banners: bool,
+    /// Show the text of chat messages (off: sender only).
+    pub show_content: bool,
 }
 
 impl Settings {
@@ -89,6 +93,8 @@ impl Settings {
             pet: num(&m, "pet", 1u8) == 1,
             minimal: num(&m, "minimal", 0u8) == 1,
             lyric_size: num(&m, "lyric_size", 15.0f32).clamp(15.0, 26.0),
+            hide_banners: num(&m, "hide_banners", 1u8) == 1,
+            show_content: num(&m, "show_content", 1u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -98,6 +104,8 @@ impl Settings {
                 ("pet", (self.pet as u8).to_string()),
                 ("minimal", (self.minimal as u8).to_string()),
                 ("lyric_size", self.lyric_size.to_string()),
+                ("hide_banners", (self.hide_banners as u8).to_string()),
+                ("show_content", (self.show_content as u8).to_string()),
             ],
         );
     }
@@ -424,7 +432,8 @@ impl Pomo {
         if self.ends_at.is_none() || self.left() > 0.0 {
             return None;
         }
-        self.advance(true)
+        // The next phase is prepared but waits: the end-of-phase toast asks to start it.
+        self.advance(false)
     }
     pub fn advance(&mut self, auto_start_break: bool) -> Option<Phase> {
         let next = if self.phase == Phase::Focus {

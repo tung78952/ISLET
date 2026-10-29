@@ -74,6 +74,10 @@ pub struct Gfx {
     brush: ID2D1SolidColorBrush,
     round: ID2D1StrokeStyle,
     formats: HashMap<(u32, u32, Align, Font), IDWriteTextFormat>,
+    /// Radial glow brushes per colour (re-centred and re-scaled per use) and measured text
+    /// widths: creating these every frame caused render spikes.
+    glows: std::cell::RefCell<HashMap<u32, ID2D1RadialGradientBrush>>,
+    widths: HashMap<(String, u32, u32), f32>,
     icon_family: HSTRING,
     mem_dc: HDC,
     dib: HBITMAP,
@@ -99,7 +103,9 @@ impl Gfx {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
         let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            // Software rendering: the hardware target reads every frame back from the GPU, which
+            // stalled for up to ~30 ms (and on power-source changes); software stays under ~9 ms.
+            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
@@ -144,6 +150,8 @@ impl Gfx {
             brush,
             round,
             formats: HashMap::new(),
+            glows: Default::default(),
+            widths: HashMap::new(),
             icon_family,
             mem_dc,
             dib: HBITMAP::default(),
@@ -349,6 +357,19 @@ impl Gfx {
     }
 
     pub fn measure(&mut self, s: &str, size: f32, weight: u32) -> f32 {
+        let key = (s.to_string(), (size * 10.0) as u32, weight);
+        if let Some(w) = self.widths.get(&key) {
+            return *w;
+        }
+        let w = self.measure_uncached(s, size, weight);
+        if self.widths.len() > 2000 {
+            self.widths.clear();
+        }
+        self.widths.insert(key, w);
+        w
+    }
+
+    fn measure_uncached(&mut self, s: &str, size: f32, weight: u32) -> f32 {
         let Some(f) = self.format(size, weight, Align::L, Font::Ui) else { return 0.0 };
         let wide: Vec<u16> = s.encode_utf16().collect();
         unsafe {
@@ -465,6 +486,28 @@ impl Gfx {
         true
     }
 
+    /// Runs `draw` with drawing clipped to a circle.
+    pub fn clip_circle(&self, cx: f32, cy: f32, r: f32, draw: impl FnOnce()) {
+        unsafe {
+            let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: r, radiusY: r };
+            let (Ok(g), Ok(layer)) = (self.factory.CreateEllipseGeometry(&e), self.rt.CreateLayer(None)) else { return draw() };
+            let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(&g) else { return draw() };
+            let mut params = D2D1_LAYER_PARAMETERS {
+                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
+                geometricMask: std::mem::ManuallyDrop::new(Some(mask)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.rt.PushLayer(&params, &layer);
+            std::mem::ManuallyDrop::drop(&mut params.geometricMask);
+            draw();
+            self.rt.PopLayer();
+        }
+    }
+
     pub fn pop_layer(&self) {
         unsafe { self.rt.PopLayer() };
     }
@@ -578,6 +621,27 @@ impl Gfx {
         }
     }
 
+    /// Draws a bitmap keeping its aspect ratio: `cover` fills `r` (cropping), otherwise it fits
+    /// inside `r`, centred.
+    pub fn image_fit(&self, bmp: &ID2D1Bitmap, r: Rc, rad: f32, a: f32, cover: bool) {
+        let size = unsafe { bmp.GetSize() };
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return;
+        }
+        let (sx, sy) = (r.w / size.width, r.h / size.height);
+        let k = if cover { sx.max(sy) } else { sx.min(sy) };
+        let (w, h) = (size.width * k, size.height * k);
+        let img = Rc::new(r.cx() - w / 2.0, r.y + (r.h - h) / 2.0, w, h);
+        let shape = if cover { r } else { img };
+        unsafe {
+            let Ok(brush) = self.rt.CreateBitmapBrush(bmp, None, None) else { return };
+            brush.SetTransform(&(Matrix3x2::scale(k, k) * Matrix3x2::translation(img.x, img.y)));
+            brush.SetOpacity((a * self.alpha).clamp(0.0, 1.0));
+            let rr = D2D1_ROUNDED_RECT { rect: shape.d2d(), radiusX: rad, radiusY: rad };
+            self.rt.FillRoundedRectangle(&rr, &brush);
+        }
+    }
+
     /// Vertical gradient fill of a rounded rectangle.
     pub fn fill_rrect_vgrad(&self, r: Rc, rad: f32, top: (u32, f32), bottom: (u32, f32)) {
         self.fill_rrect_grad(r, rad, (r.x, r.y), (r.x, r.y + r.h), top, bottom);
@@ -613,17 +677,49 @@ impl Gfx {
 
     /// Elliptical soft light: `hex` at alpha `a` in the centre, fading out at the radii.
     pub fn glow_ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, hex: u32, a: f32) {
+        let op = (a * self.alpha).clamp(0.0, 1.0);
+        if op <= 0.002 || rx <= 0.0 || ry <= 0.0 {
+            return;
+        }
         unsafe {
-            let stops = [
-                D2D1_GRADIENT_STOP { position: 0.0, color: rgba(hex, a * self.alpha) },
-                D2D1_GRADIENT_STOP { position: 0.55, color: rgba(hex, a * 0.45 * self.alpha) },
-                D2D1_GRADIENT_STOP { position: 1.0, color: rgba(hex, 0.0) },
-            ];
-            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
-            let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(cx, cy), gradientOriginOffset: v2(0.0, 0.0), radiusX: rx, radiusY: ry };
-            let Ok(brush) = self.rt.CreateRadialGradientBrush(&props, None, &coll) else { return };
+            let mut cache = self.glows.borrow_mut();
+            if !cache.contains_key(&hex) {
+                let stops = [
+                    D2D1_GRADIENT_STOP { position: 0.0, color: rgba(hex, 1.0) },
+                    D2D1_GRADIENT_STOP { position: 0.55, color: rgba(hex, 0.45) },
+                    D2D1_GRADIENT_STOP { position: 1.0, color: rgba(hex, 0.0) },
+                ];
+                let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+                let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(0.0, 0.0), gradientOriginOffset: v2(0.0, 0.0), radiusX: 1.0, radiusY: 1.0 };
+                let Ok(brush) = self.rt.CreateRadialGradientBrush(&props, None, &coll) else { return };
+                if cache.len() > 128 {
+                    cache.clear();
+                }
+                cache.insert(hex, brush);
+            }
+            let brush = &cache[&hex];
+            brush.SetCenter(v2(cx, cy));
+            brush.SetRadiusX(rx);
+            brush.SetRadiusY(ry);
+            brush.SetOpacity(op);
             let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: rx, radiusY: ry };
-            self.rt.FillEllipse(&e, &brush);
+            self.rt.FillEllipse(&e, brush);
+        }
+    }
+
+    /// Fills `r` with a left-to-right gradient through evenly spaced `colors`.
+    pub fn fill_rect_hstops(&self, r: Rc, colors: &[u32], a: f32) {
+        if colors.len() < 2 {
+            return;
+        }
+        unsafe {
+            let n = (colors.len() - 1) as f32;
+            let stops: Vec<D2D1_GRADIENT_STOP> =
+                colors.iter().enumerate().map(|(i, c)| D2D1_GRADIENT_STOP { position: i as f32 / n, color: rgba(*c, a * self.alpha) }).collect();
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(r.x, 0.0), endPoint: v2(r.x + r.w, 0.0) };
+            let Ok(brush) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            self.rt.FillRectangle(&r.d2d(), &brush);
         }
     }
 
@@ -705,6 +801,29 @@ impl Gfx {
         }
     }
 
+    /// Round-capped arc (clockwise, radians from 3 o'clock) with a top-left → bottom-right gradient.
+    pub fn arc_diag(&self, cx: f32, cy: f32, r: f32, from: f32, to: f32, width: f32, tl: (u32, f32), br: (u32, f32)) {
+        if to - from <= 0.001 {
+            return;
+        }
+        let p = |t: f32| v2(cx + r * t.cos(), cy + r * t.sin());
+        let g = self.path(|s| unsafe {
+            s.BeginFigure(p(from), D2D1_FIGURE_BEGIN_HOLLOW);
+            s.AddArc(&D2D1_ARC_SEGMENT {
+                point: p(to),
+                size: D2D_SIZE_F { width: r, height: r },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: if to - from > std::f32::consts::PI { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+            });
+            s.EndFigure(D2D1_FIGURE_END_OPEN);
+        });
+        let Some(brush) = self.linear((cx - r, cy - r), (cx + r, cy + r), tl, br) else { return };
+        if let Some(g) = g {
+            unsafe { self.rt.DrawGeometry(&g, &brush, width, &self.round) };
+        }
+    }
+
     /// Polyline with round caps and joins (icons drawn from strokes).
     pub fn polyline(&self, pts: &[(f32, f32)], width: f32, hex: u32, a: f32) {
         if pts.len() < 2 {
@@ -748,6 +867,12 @@ impl Gfx {
     /// Scales subsequent drawing by `s` about (cx, cy), on top of the current offset.
     pub fn zoom(&self, cx: f32, cy: f32, s: f32) {
         let about = Matrix3x2::translation(-cx, -cy) * Matrix3x2::scale(s, s) * Matrix3x2::translation(cx, cy);
+        unsafe { self.rt.SetTransform(&(about * Matrix3x2::translation(self.off.0, self.off.1) * self.base())) };
+    }
+
+    /// Rotates subsequent drawing by `rad` about (cx, cy), on top of the current offset.
+    pub fn rotate(&self, cx: f32, cy: f32, rad: f32) {
+        let about = Matrix3x2::translation(-cx, -cy) * Matrix3x2::rotation_around(rad.to_degrees(), windows_numerics::Vector2 { X: 0.0, Y: 0.0 }) * Matrix3x2::translation(cx, cy);
         unsafe { self.rt.SetTransform(&(about * Matrix3x2::translation(self.off.0, self.off.1) * self.base())) };
     }
 

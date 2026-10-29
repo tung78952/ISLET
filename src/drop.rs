@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use windows::core::{implement, Ref, Result, HSTRING};
 use windows::Win32::Foundation::{HWND, POINTL};
 use windows::Win32::Foundation::SIZE;
-use windows::Win32::Graphics::Gdi::{DeleteObject, GetDC, GetDIBits, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+use windows::Win32::Graphics::Gdi::{DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
 use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL, TYMED_ISTREAM};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::*;
@@ -172,11 +172,18 @@ pub fn shell_image(path: &Path, px: i32) -> Option<(u32, u32, Vec<u8>)> {
     unsafe {
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
         let hbmp = factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK).ok()?;
+        // Fitted thumbnails keep their aspect ratio, so read the bitmap at its own size.
+        let mut bm = BITMAP::default();
+        if GetObjectW(hbmp.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as _)) == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+            let _ = DeleteObject(hbmp.into());
+            return None;
+        }
+        let (w, h) = (bm.bmWidth, bm.bmHeight);
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: px,
-                biHeight: -px,
+                biWidth: w,
+                biHeight: -h,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -184,9 +191,9 @@ pub fn shell_image(path: &Path, px: i32) -> Option<(u32, u32, Vec<u8>)> {
             },
             ..Default::default()
         };
-        let mut buf = vec![0u8; (px * px * 4) as usize];
+        let mut buf = vec![0u8; (w * h * 4) as usize];
         let dc = GetDC(None);
-        let rows = GetDIBits(dc, hbmp, 0, px as u32, Some(buf.as_mut_ptr() as _), &mut bmi, DIB_RGB_COLORS);
+        let rows = GetDIBits(dc, hbmp, 0, h as u32, Some(buf.as_mut_ptr() as _), &mut bmi, DIB_RGB_COLORS);
         ReleaseDC(None, dc);
         let _ = DeleteObject(hbmp.into());
         if rows == 0 {
@@ -203,7 +210,7 @@ pub fn shell_image(path: &Path, px: i32) -> Option<(u32, u32, Vec<u8>)> {
                 }
             }
         }
-        Some((px as u32, px as u32, buf))
+        Some((w as u32, h as u32, buf))
     }
 }
 

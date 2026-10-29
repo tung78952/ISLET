@@ -35,6 +35,10 @@ pub fn start(hwnd: HWND) {
             }
         }
     });
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        let _ = windows::Win32::System::Threading::SetThreadDescription(windows::Win32::Foundation::HANDLE(handle.as_raw_handle()), windows::core::w!("islet-pump"));
+    }
     let _ = WORKER.set(handle.thread().clone());
 }
 
@@ -52,4 +56,15 @@ pub fn pause() {
 /// Called by the UI thread when it handles WM_FRAME.
 pub fn consumed() {
     PENDING.store(false, Ordering::Release);
+}
+
+/// Restarts frames after a stall: clears a pending frame that never arrived and wakes the worker.
+pub fn unstick() {
+    PENDING.store(false, Ordering::Release);
+    resume();
+}
+
+/// (running, frame pending) for diagnostics.
+pub fn state() -> (bool, bool) {
+    (RUNNING.load(Ordering::Acquire), PENDING.load(Ordering::Acquire))
 }

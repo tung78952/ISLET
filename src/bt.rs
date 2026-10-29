@@ -12,6 +12,7 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_collections::IIterable;
 
+use crate::devices::DeviceKind;
 use crate::WM_BLUETOOTH;
 
 const CONNECTED: &str = "System.Devices.Aep.IsConnected";
@@ -26,6 +27,30 @@ pub struct Change {
     pub name: String,
     pub connected: bool,
     pub battery: Option<u8>,
+    pub kind: DeviceKind,
+}
+
+/// Category of the device ("Audio.Headphone", "Input.Mouse", ...), the value Settings uses
+/// for its icon. The container object itself does not expose it; the device nodes in the
+/// container carry it as DEVPKEY_DeviceContainer_Category.
+fn kind_of(container: windows::core::GUID) -> DeviceKind {
+    const CATEGORY: &str = "{78C34FC8-104A-4ACA-9EA4-524D52996E57} 90";
+    let aqs = HSTRING::from(format!("System.Devices.ContainerId:=\"{{{container:?}}}\""));
+    let props = IIterable::<HSTRING>::from(vec![HSTRING::from(CATEGORY)]);
+    let Ok(list) = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::Device).and_then(|op| op.join()) else {
+        return DeviceKind::Other;
+    };
+    for d in list {
+        let Some(v) = d.Properties().ok().and_then(|p| p.Lookup(&HSTRING::from(CATEGORY)).ok()) else { continue };
+        let Ok(pv) = v.cast::<windows::Foundation::IPropertyValue>() else { continue };
+        let mut cats = windows::core::Array::<HSTRING>::new();
+        if pv.GetStringArray(&mut cats).is_ok() {
+            if let Some(k) = cats.iter().find_map(|c| DeviceKind::from_category(&c.to_string())) {
+                return k;
+            }
+        }
+    }
+    DeviceKind::Other
 }
 
 struct Device {
@@ -65,6 +90,7 @@ fn connected(props: windows_collections::IMapView<HSTRING, windows::core::IInspe
 pub fn spawn(hwnd: HWND) {
     let target = hwnd.0 as isize;
     std::thread::spawn(move || unsafe {
+        crate::sys::name_thread("islet-bluetooth");
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
         let Ok(watcher) = watch(target) else { return };
         // The watcher lives as long as the process; this thread only keeps it referenced.
@@ -81,15 +107,27 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     let devices: Arc<Mutex<HashMap<String, Device>>> = Arc::default();
     // Devices already connected at startup are recorded silently.
     let ready = Arc::new(AtomicBool::new(false));
+    let kinds: Arc<Mutex<HashMap<windows::core::GUID, DeviceKind>>> = Arc::default();
     let post = move |name: String, connected: bool, container: Option<windows::core::GUID>| {
         let battery = if connected { container.and_then(battery) } else { None };
-        let change = Box::into_raw(Box::new(Change { name, connected, battery }));
+        let kind = container
+            .map(|c| {
+                if let Some(k) = kinds.lock().unwrap().get(&c) {
+                    return *k;
+                }
+                let k = kind_of(c);
+                kinds.lock().unwrap().insert(c, k);
+                k
+            })
+            .unwrap_or_default();
+        let change = Box::into_raw(Box::new(Change { name, connected, battery, kind }));
         let hwnd = HWND(target as *mut _);
         if unsafe { PostMessageW(Some(hwnd), WM_BLUETOOTH, WPARAM(0), LPARAM(change as isize)) }.is_err() {
             drop(unsafe { Box::from_raw(change) });
         }
     };
 
+    let post_updated = post.clone();
     let (d, r) = (devices.clone(), ready.clone());
     w.Added(&TypedEventHandler::new(move |_: Ref<DeviceWatcher>, info: Ref<DeviceInformation>| {
         if let Some(info) = info.as_ref() {
@@ -117,7 +155,7 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
             };
             // Posted outside the lock: the battery lookup may wait for the device to report.
             if let (Some((name, cont)), true) = (changed, r.load(Ordering::Acquire)) {
-                post(name, on, cont);
+                post_updated(name, on, cont);
             }
         }
         Ok(())
@@ -136,4 +174,19 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     }))?;
     w.Start()?;
     Ok(w)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Reads a real device's kind: `ISLET_TEST_CONTAINER={guid} cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn kind_of_real_container() {
+        let Ok(g) = std::env::var("ISLET_TEST_CONTAINER") else { return };
+        let g = windows::core::GUID::try_from(g.trim_matches(|c| c == '{' || c == '}')).unwrap();
+        unsafe {
+            let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);
+        }
+        println!("kind = {:?}", super::kind_of(g));
+    }
 }

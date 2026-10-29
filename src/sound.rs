@@ -56,7 +56,13 @@ fn synth(c: Chime) -> Vec<u8> {
     wav
 }
 
+/// Set while an automated test drives the app, so it does not chime at the user.
+pub static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn play(c: Chime) {
+    if MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     static SOFT: OnceLock<Vec<u8>> = OnceLock::new();
     static ALERT: OnceLock<Vec<u8>> = OnceLock::new();
     let wav = match c {

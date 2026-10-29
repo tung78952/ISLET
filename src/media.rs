@@ -4,8 +4,8 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{Interface, HSTRING};
-use windows::Foundation::Uri;
+use windows::core::{Interface, Ref, HSTRING};
+use windows::Foundation::{TypedEventHandler, Uri};
 use windows_future::IAsyncOperation;
 use windows::Media::Control::*;
 use windows::Storage::Streams::DataReader;
@@ -74,6 +74,50 @@ pub enum Cmd {
     Prev,
     /// Jump to a position in seconds.
     Seek(f64),
+    /// A media session reported a change: read it again.
+    Refresh,
+}
+
+/// Change subscriptions on the session being shown; removed when another session takes over.
+struct Watched {
+    session: GlobalSystemMediaTransportControlsSession,
+    tokens: [i64; 3],
+}
+
+impl Watched {
+    fn new(session: GlobalSystemMediaTransportControlsSession, tx: &Sender<Cmd>) -> Self {
+        let t = tx.clone();
+        let props = session
+            .MediaPropertiesChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSession>, _: Ref<MediaPropertiesChangedEventArgs>| {
+                let _ = t.send(Cmd::Refresh);
+                Ok(())
+            }))
+            .unwrap_or_default();
+        let t = tx.clone();
+        let playback = session
+            .PlaybackInfoChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSession>, _: Ref<PlaybackInfoChangedEventArgs>| {
+                let _ = t.send(Cmd::Refresh);
+                Ok(())
+            }))
+            .unwrap_or_default();
+        let t = tx.clone();
+        let timeline = session
+            .TimelinePropertiesChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSession>, _: Ref<TimelinePropertiesChangedEventArgs>| {
+                let _ = t.send(Cmd::Refresh);
+                Ok(())
+            }))
+            .unwrap_or_default();
+        Watched { session, tokens: [props, playback, timeline] }
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        let [p, b, t] = self.tokens;
+        let _ = self.session.RemoveMediaPropertiesChanged(p);
+        let _ = self.session.RemovePlaybackInfoChanged(b);
+        let _ = self.session.RemoveTimelinePropertiesChanged(t);
+    }
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -118,7 +162,9 @@ fn filetime_now() -> i64 {
 
 pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>>) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
+    let events = tx.clone();
     std::thread::spawn(move || {
+        crate::sys::name_thread("islet-media");
         unsafe {
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
@@ -134,20 +180,39 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
         // After a seek the session keeps reporting the old position for a moment; hold the
         // requested one until it catches up so the UI doesn't jump back and forth.
         let mut hold: Option<(f64, Instant)> = None;
+        // Sessions report their own changes, so this thread sleeps until one does. The playing
+        // position is extrapolated on the UI side; a slow safety read covers players whose
+        // events are unreliable.
+        let t = events.clone();
+        let _ = mgr.CurrentSessionChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSessionManager>, _: Ref<CurrentSessionChangedEventArgs>| {
+            let _ = t.send(Cmd::Refresh);
+            Ok(())
+        }));
+        let mut watched: Option<Watched> = None;
+        let mut first = true;
         loop {
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            let wait = if std::mem::take(&mut first) { Duration::ZERO } else { Duration::from_secs(5) };
+            match rx.recv_timeout(wait) {
+                Ok(Cmd::Refresh) => {
+                    // Events come in bursts (title, art, playback, timeline): read once.
+                    std::thread::sleep(Duration::from_millis(60));
+                    while let Ok(Cmd::Refresh) = rx.try_recv() {}
+                }
                 Ok(cmd) => {
                     if let Cmd::Seek(t) = cmd {
                         hold = Some((t, Instant::now()));
                     }
                     if let Ok(s) = mgr.GetCurrentSession() {
                         let r = match cmd {
-                            Cmd::Toggle => s.TryTogglePlayPauseAsync(),
-                            Cmd::Next => s.TrySkipNextAsync(),
-                            Cmd::Prev => s.TrySkipPreviousAsync(),
-                            Cmd::Seek(secs) => s.TryChangePlaybackPositionAsync((secs.max(0.0) * 1e7) as i64),
+                            Cmd::Toggle => Some(s.TryTogglePlayPauseAsync()),
+                            Cmd::Next => Some(s.TrySkipNextAsync()),
+                            Cmd::Prev => Some(s.TrySkipPreviousAsync()),
+                            Cmd::Seek(secs) => Some(s.TryChangePlaybackPositionAsync((secs.max(0.0) * 1e7) as i64)),
+                            Cmd::Refresh => None,
                         };
-                        let _ = r.and_then(|op| op.join());
+                        if let Some(r) = r {
+                            let _ = r.and_then(|op| op.join());
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -155,7 +220,11 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
             }
 
             let mut next = MediaInfo::default();
-            if let Ok(s) = mgr.GetCurrentSession() {
+            let current = mgr.GetCurrentSession().ok();
+            if current.as_ref() != watched.as_ref().map(|w| &w.session) {
+                watched = current.map(|s| Watched::new(s, &events));
+            }
+            if let Some(s) = watched.as_ref().map(|w| w.session.clone()) {
                 next.has = true;
                 let props = s.TryGetMediaPropertiesAsync().and_then(|op| op.join()).ok();
                 if let Some(p) = &props {
@@ -271,6 +340,7 @@ fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: Str
     }
     post(hwnd, WM_LYRICS);
     std::thread::spawn(move || {
+        crate::sys::name_thread("islet-lyrics");
         unsafe {
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }

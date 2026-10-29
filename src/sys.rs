@@ -44,7 +44,8 @@ pub fn power() -> Option<Power> {
 
 /// Asks Windows to send WM_POWERBROADCAST when the power source or battery level changes.
 pub fn subscribe_power(hwnd: HWND) {
-    for guid in [GUID_ACDC_POWER_SOURCE, GUID_BATTERY_PERCENTAGE_REMAINING] {
+    use windows::Win32::System::SystemServices::GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS;
+    for guid in [GUID_ACDC_POWER_SOURCE, GUID_BATTERY_PERCENTAGE_REMAINING, GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS] {
         unsafe {
             let _ = RegisterPowerSettingNotification(HANDLE(hwnd.0), &guid, DEVICE_NOTIFY_WINDOW_HANDLE);
         }
@@ -65,23 +66,301 @@ fn net_status() -> usize {
     }
 }
 
+/// A network change, boxed into the LPARAM of WM_NET.
+pub struct NetChange {
+    /// 0 = disconnected, 1 = no internet, 2 = internet.
+    pub status: usize,
+    /// Wi-Fi network name, or None for wired connections.
+    pub ssid: Option<String>,
+    /// Signal strength in bars 0–5, when the adapter reports it.
+    pub bars: Option<u8>,
+}
+
+fn wifi_details() -> (Option<String>, Option<u8>) {
+    let Ok(p) = NetworkInformation::GetInternetConnectionProfile() else { return (None, None) };
+    let ssid = if p.IsWlanConnectionProfile().unwrap_or(false) {
+        p.WlanConnectionProfileDetails().and_then(|d| d.GetConnectedSsid()).map(|s| s.to_string()).ok().filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let bars = p.GetSignalBars().and_then(|r| r.Value()).ok();
+    (ssid, bars)
+}
+
 pub fn spawn_network(hwnd: isize) {
     std::thread::spawn(move || {
+        name_thread("islet-network");
         unsafe {
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
         let mut last = net_status();
+        let mut last_ssid = wifi_details().0;
+        // Woken by Windows on any network change; nothing runs in between.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handler = windows::Networking::Connectivity::NetworkStatusChangedEventHandler::new(move |_| {
+            let _ = tx.send(());
+            Ok(())
+        });
+        if NetworkInformation::NetworkStatusChanged(&handler).is_err() {
+            return;
+        }
         loop {
-            std::thread::sleep(Duration::from_secs(4));
+            if rx.recv().is_err() {
+                return;
+            }
+            // A change arrives as a burst while the link settles.
+            std::thread::sleep(Duration::from_millis(400));
+            while rx.try_recv().is_ok() {}
             let now = net_status();
             if now != last {
                 last = now;
+                let (ssid, bars) = if now > 0 { wifi_details() } else { (last_ssid.clone(), None) };
+                if now > 0 {
+                    last_ssid = ssid.clone();
+                }
+                let b = Box::into_raw(Box::new(NetChange { status: now, ssid, bars }));
                 unsafe {
-                    let _ = PostMessageW(Some(HWND(hwnd as _)), WM_NET, WPARAM(now), LPARAM(0));
+                    if PostMessageW(Some(HWND(hwnd as _)), WM_NET, WPARAM(0), LPARAM(b as isize)).is_err() {
+                        drop(Box::from_raw(b));
+                    }
                 }
             }
         }
     });
+}
+
+/// Names the calling thread (shown by debuggers and process tools when profiling).
+pub fn name_thread(name: &str) {
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetThreadDescription(windows::Win32::System::Threading::GetCurrentThread(), &HSTRING::from(name));
+    }
+}
+
+// ---------------------------------------------------------------- screenshots
+
+/// A screenshot file found for a Snipping Tool notification, posted as WM_SHOT.
+pub struct Shot {
+    pub id: u32,
+    pub path: std::path::PathBuf,
+    pub img: Option<(u32, u32, Vec<u8>)>,
+    pub size: String,
+}
+
+/// Opens a file, folder, URL or shell: path with its default handler.
+pub fn shell_open(target: &std::ffi::OsStr) {
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
+    }
+}
+
+/// Looks (on a worker thread) for the image the Snipping Tool just saved in the Screenshots folder
+/// and posts it with a thumbnail. Snipping Tool saves right around its notification, so it waits
+/// briefly; with saving turned off (clipboard only) nothing is posted.
+pub fn find_screenshot(hwnd: HWND, id: u32, px: i32) {
+    let target = hwnd.0 as isize;
+    std::thread::spawn(move || unsafe {
+        name_thread("islet-screenshot");
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        let Ok(dir) = windows::Win32::UI::Shell::SHGetKnownFolderPath(&windows::Win32::UI::Shell::FOLDERID_Screenshots, windows::Win32::UI::Shell::KF_FLAG_DEFAULT, None) else { return };
+        let folder = std::path::PathBuf::from(dir.to_string().unwrap_or_default());
+        windows::Win32::System::Com::CoTaskMemFree(Some(dir.0 as _));
+        for _ in 0..8 {
+            let newest = std::fs::read_dir(&folder).ok().and_then(|it| {
+                it.flatten()
+                    .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                    .filter(|(t, _)| t.elapsed().is_ok_and(|d| d < Duration::from_secs(15)))
+                    .max_by_key(|(t, _)| *t)
+            });
+            if let Some((_, path)) = newest {
+                let img = crate::drop::shell_image(&path, px);
+                let size = std::fs::metadata(&path).map(|m| crate::size_label(m.len())).unwrap_or_default();
+                let b = Box::into_raw(Box::new(Shot { id, path, img, size }));
+                if PostMessageW(Some(HWND(target as _)), crate::WM_SHOT, WPARAM(0), LPARAM(b as isize)).is_err() {
+                    drop(Box::from_raw(b));
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    });
+}
+
+// ---------------------------------------------------------------- browser chat tabs
+
+/// Facebook doesn't send desktop notifications while its tab is open; it retitles the tab
+/// instead ("Denis đã nhắn tin cho bạn" / "Denis sent you a message"). Chromium reports tab title
+/// changes as accessibility name-change events once an accessibility client has looked at its
+/// tab strip, so this watcher touches each browser's tab strip once (never page contents) and
+/// then just listens: nothing runs until some title changes. New senders are posted as
+/// WM_TABMSG with a boxed (sender, text).
+static TAB_TARGET: AtomicIsize = AtomicIsize::new(0);
+static TAB_RECENT: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
+
+unsafe extern "system" fn on_name_change(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
+    use windows::Win32::UI::Accessibility::*;
+    // Cheap filter first: only Chromium browser windows.
+    let root = GetAncestor(hwnd, GA_ROOT);
+    let mut cls = [0u16; 32];
+    let n = GetClassNameW(root, &mut cls) as usize;
+    if String::from_utf16_lossy(&cls[..n]) != "Chrome_WidgetWin_1" {
+        return;
+    }
+    // Pages rename their own elements constantly (timestamps, players); only tabs matter. Each
+    // element's role is asked once (a cross-process call) and remembered, so page churn costs a
+    // lookup instead of two calls per event.
+    thread_local! {
+        static IS_TAB: std::cell::RefCell<std::collections::HashMap<(isize, i32), bool>> = Default::default();
+    }
+    let key = (root.0 as isize, id_child);
+    if IS_TAB.with(|m| m.borrow().get(&key) == Some(&false)) {
+        return;
+    }
+    let mut acc: Option<IAccessible> = None;
+    let mut child = windows::Win32::System::Variant::VARIANT::default();
+    if AccessibleObjectFromEvent(hwnd, id_object as u32, id_child as u32, &mut acc, &mut child).is_err() {
+        return;
+    }
+    let Some(acc) = acc else { return };
+    let known = IS_TAB.with(|m| m.borrow().get(&key).copied());
+    if known.is_none() {
+        const ROLE_SYSTEM_PAGETAB: i32 = 0x25;
+        let tab = acc.get_accRole(&child).ok().and_then(|v| i32::try_from(&v).ok()) == Some(ROLE_SYSTEM_PAGETAB);
+        IS_TAB.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() > 20_000 {
+                m.clear();
+            }
+            m.insert(key, tab);
+        });
+        if !tab {
+            return;
+        }
+    }
+    let Some(name) = acc.get_accName(&child).ok().map(|b| b.to_string()) else { return };
+    let Some((sender, text)) = chat_title(&name) else { return };
+    let now = std::time::Instant::now();
+    let mut recent = TAB_RECENT.lock().unwrap();
+    recent.retain(|(_, t)| now.duration_since(*t) < Duration::from_secs(45));
+    // Facebook flips the title back and forth while a message is unread: report once.
+    let fresh = !recent.iter().any(|(s, _)| *s == sender);
+    if let Some(e) = recent.iter_mut().find(|(s, _)| *s == sender) {
+        e.1 = now;
+    } else {
+        recent.push((sender.clone(), now));
+    }
+    if fresh {
+        let b = Box::into_raw(Box::new((sender, text)));
+        let own = HWND(TAB_TARGET.load(Ordering::Relaxed) as *mut _);
+        if PostMessageW(Some(own), crate::WM_TABMSG, WPARAM(0), LPARAM(b as isize)).is_err() {
+            drop(Box::from_raw(b));
+        }
+    }
+}
+
+pub fn spawn_tab_watch(hwnd: isize) {
+    TAB_TARGET.store(hwnd, Ordering::Relaxed);
+    std::thread::spawn(move || unsafe {
+        name_thread("islet-tab-watch");
+        use windows::Win32::UI::Accessibility::*;
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        let hook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, None, Some(on_name_change), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        if hook.is_invalid() {
+            return;
+        }
+        let uia = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok();
+        let walker = uia.as_ref().and_then(|u| u.ControlViewWalker().ok());
+        let mut touched: Vec<isize> = Vec::new();
+        // A timer wakes the message loop every 10 s to touch newly opened browser windows.
+        let _ = SetTimer(None, 1, 10_000, None);
+        let mut msg = MSG::default();
+        loop {
+            if let (Some(u), Some(w)) = (&uia, &walker) {
+                let wins = chromium_windows();
+                touched.retain(|h| wins.iter().any(|w| w.0 as isize == *h));
+                for win in wins {
+                    if !touched.contains(&(win.0 as isize)) {
+                        if let Ok(root) = u.ElementFromHandle(win) {
+                            let _ = find_tab_strip(w, &root);
+                        }
+                        touched.push(win.0 as isize);
+                    }
+                }
+            }
+            if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                break;
+            }
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+/// The element whose children are the browser's tabs (breadth-first over the frame, skipping
+/// web documents).
+unsafe fn find_tab_strip(
+    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+    root: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+) -> Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
+    use windows::Win32::UI::Accessibility::*;
+    let mut queue = std::collections::VecDeque::from([(root.clone(), 0u32)]);
+    let mut visited = 0;
+    while let Some((el, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 400 {
+            return None;
+        }
+        let ct = el.CurrentControlType().unwrap_or_default();
+        if ct == UIA_TabItemControlTypeId {
+            return walker.GetParentElement(&el).ok();
+        }
+        if ct == UIA_DocumentControlTypeId || depth > 9 {
+            continue;
+        }
+        let mut child = walker.GetFirstChildElement(&el).ok();
+        while let Some(c) = child {
+            child = walker.GetNextSiblingElement(&c).ok();
+            queue.push_back((c, depth + 1));
+        }
+    }
+    None
+}
+
+/// Sender and message line from a Facebook/Messenger chat tab title.
+fn chat_title(name: &str) -> Option<(String, String)> {
+    let n = name.trim();
+    for (pat, text) in [
+        (" đã nhắn tin cho bạn", "đã nhắn tin cho bạn"),
+        (" đã gửi tin nhắn cho bạn", "đã gửi tin nhắn cho bạn"),
+        (" sent you a message", "sent you a message"),
+        (" messaged you", "messaged you"),
+    ] {
+        if let Some(i) = n.find(pat) {
+            let sender = n[..i].trim().trim_start_matches(|c: char| c == '(' || c.is_ascii_digit() || c == ')' || c == ' ');
+            if !sender.is_empty() {
+                return Some((sender.to_string(), text.to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn chromium_windows() -> Vec<HWND> {
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let out = &mut *(lp.0 as *mut Vec<HWND>);
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(h, &mut cls) as usize;
+        if IsWindowVisible(h).as_bool() && String::from_utf16_lossy(&cls[..n]) == "Chrome_WidgetWin_1" && GetWindowTextLengthW(h) > 0 {
+            out.push(h);
+        }
+        true.into()
+    }
+    let mut v: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+    }
+    v.truncate(6);
+    v
 }
 
 // ---------------------------------------------------------------- volume
@@ -115,9 +394,21 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeWatch_Impl {
     }
 }
 
+thread_local! {
+    /// The volume subscription on the current default output; replaced when the default changes.
+    static VOLUME_SUB: std::cell::RefCell<Option<(IAudioEndpointVolume, IAudioEndpointVolumeCallback)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// WM_VOLUME carries the level in thousandths (low 16 bits) and the mute flag (bit 16).
+/// Called again when the default output changes (headphones plugged in, Bluetooth connected), so
+/// the toast follows the device that is actually playing.
 pub fn watch_volume(hwnd: HWND) {
     unsafe {
+        VOLUME_SUB.with(|s| {
+            if let Some((vol, cb)) = s.borrow_mut().take() {
+                let _ = vol.UnregisterControlChangeNotify(&cb);
+            }
+        });
         let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return };
         let Ok(dev) = en.GetDefaultAudioEndpoint(eRender, eMultimedia) else { return };
         let Ok(vol) = dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) else { return };
@@ -126,8 +417,92 @@ pub fn watch_volume(hwnd: HWND) {
         }
         let cb: IAudioEndpointVolumeCallback = VolumeWatch(hwnd.0 as isize).into();
         if vol.RegisterControlChangeNotify(&cb).is_ok() {
-            // Registered for the life of the process.
-            std::mem::forget((vol, cb));
+            VOLUME_SUB.with(|s| *s.borrow_mut() = Some((vol, cb)));
+        }
+    }
+}
+
+/// An output endpoint that became active (plugged in) or went away, posted as WM_AUDIODEV.
+pub struct AudioChange {
+    pub name: String,
+    pub active: bool,
+    /// Endpoint form factor: 1 speakers, 3 headphones, 5 headset (others are ignored).
+    pub form_factor: u32,
+    pub bluetooth: bool,
+}
+
+/// Default output changes re-target the volume watch; endpoint state changes become cards.
+#[implement(windows::Win32::Media::Audio::IMMNotificationClient)]
+struct AudioDevices(isize);
+
+impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for AudioDevices_Impl {
+    fn OnDeviceStateChanged(&self, id: &PCWSTR, state: windows::Win32::Media::Audio::DEVICE_STATE) -> windows::core::Result<()> {
+        use windows::Win32::Media::Audio::{DEVICE_STATE_ACTIVE, DEVICE_STATE_NOTPRESENT, DEVICE_STATE_UNPLUGGED};
+        let active = state == DEVICE_STATE_ACTIVE;
+        if !active && state != DEVICE_STATE_UNPLUGGED && state != DEVICE_STATE_NOTPRESENT {
+            return Ok(());
+        }
+        let Ok(id) = (unsafe { id.to_string() }) else { return Ok(()) };
+        let hwnd = self.0;
+        // Property reads go to the audio service: off this callback thread.
+        std::thread::spawn(move || unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            if let Some(mut c) = endpoint(&id) {
+                c.active = active;
+                let b = Box::into_raw(Box::new(c));
+                if PostMessageW(Some(HWND(hwnd as _)), crate::WM_AUDIODEV, WPARAM(0), LPARAM(b as isize)).is_err() {
+                    drop(Box::from_raw(b));
+                }
+            }
+        });
+        Ok(())
+    }
+    fn OnDeviceAdded(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnDeviceRemoved(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnDefaultDeviceChanged(&self, flow: windows::Win32::Media::Audio::EDataFlow, role: windows::Win32::Media::Audio::ERole, _: &PCWSTR) -> windows::core::Result<()> {
+        if flow == eRender && role == eMultimedia {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(self.0 as _)), crate::WM_AUDIODEV, WPARAM(1), LPARAM(0));
+            }
+        }
+        Ok(())
+    }
+    fn OnPropertyValueChanged(&self, _: &PCWSTR, _: &windows::Win32::Foundation::PROPERTYKEY) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Name, form factor and bus of a render endpoint (None for capture endpoints).
+unsafe fn endpoint(id: &str) -> Option<AudioChange> {
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::Media::Audio::{IMMEndpoint, PKEY_AudioEndpoint_FormFactor};
+    use windows::Win32::System::Com::STGM_READ;
+    const PKEY_DEVICE_DESC: PROPERTYKEY = PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 2 };
+    /// The endpoint's device instance path ("{1}.BTHENUM\...").
+    const PKEY_DEVICE_PATH: PROPERTYKEY = PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xb3f8fa53_0004_438e_9003_51a46e139bfc), pid: 2 };
+    let en = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let dev = en.GetDevice(&HSTRING::from(id)).ok()?;
+    if windows::core::Interface::cast::<IMMEndpoint>(&dev).ok()?.GetDataFlow().ok()? != eRender {
+        return None;
+    }
+    let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+    let text = |k: &PROPERTYKEY| store.GetValue(k).ok().map(|v| v.to_string()).unwrap_or_default();
+    let form_factor = store.GetValue(&PKEY_AudioEndpoint_FormFactor).ok().and_then(|v| u32::try_from(&v).ok()).unwrap_or(0);
+    let path = text(&PKEY_DEVICE_PATH).to_ascii_uppercase();
+    Some(AudioChange { name: text(&PKEY_DEVICE_DESC), active: false, form_factor, bluetooth: path.contains("BTHENUM") || path.contains("BTHHFENUM") || path.contains("BTHLE") })
+}
+
+/// Registers for audio endpoint changes for the life of the process.
+pub fn watch_audio_devices(hwnd: HWND) {
+    unsafe {
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return };
+        let cb: windows::Win32::Media::Audio::IMMNotificationClient = AudioDevices(hwnd.0 as isize).into();
+        if en.RegisterEndpointNotificationCallback(&cb).is_ok() {
+            std::mem::forget((en, cb));
         }
     }
 }
@@ -144,11 +519,24 @@ fn held(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) < 0 }
 }
 
+/// Tick count (ms) of the last key press anywhere; lets the notch notice typing beneath it.
+static LAST_KEY: AtomicIsize = AtomicIsize::new(0);
+
+/// Milliseconds since the last key press.
+pub fn key_idle_ms() -> u32 {
+    let last = LAST_KEY.load(Ordering::Relaxed) as u32;
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount() }.wrapping_sub(last)
+}
+
 unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let k = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let msg = wparam.0 as u32;
         let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        if down {
+            // Injected keys can carry time 0; stamp with the clock instead.
+            LAST_KEY.store(windows::Win32::System::SystemInformation::GetTickCount() as isize, Ordering::Relaxed);
+        }
         let vk = VIRTUAL_KEY(k.vkCode as u16);
         let hwnd = Some(HWND(HOOK_HWND.load(Ordering::Relaxed) as _));
         // Volume keys only matter at the ends of the range, where no change notification comes.
@@ -232,9 +620,6 @@ pub fn set_autostart(on: bool) {
 
 // ---------------------------------------------------------------- fullscreen
 
-const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
-const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
-const OBJID_WINDOW: i32 = 0;
 static FG_TARGET: AtomicIsize = AtomicIsize::new(0);
 
 /// Posts WM_FOREGROUND whenever the foreground window changes or moves/resizes
@@ -242,15 +627,169 @@ static FG_TARGET: AtomicIsize = AtomicIsize::new(0);
 pub fn hook_foreground(hwnd: HWND) {
     FG_TARGET.store(hwnd.0 as isize, Ordering::Relaxed);
     unsafe {
+        // Location changes are not hooked: the system sends one for every cursor and caret move,
+        // all delivered to the UI thread. A window going fullscreen in place is caught by the tick.
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, None, Some(on_move_size), 0, 0, WINEVENT_OUTOFCONTEXT);
     }
 }
 
-unsafe extern "system" fn on_win_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
-    if event == EVENT_OBJECT_LOCATIONCHANGE && (id_object != OBJID_WINDOW || hwnd != GetForegroundWindow()) {
+const EVENT_SYSTEM_MOVESIZESTART: u32 = 0x000A;
+const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
+/// The window being moved or resized by the user, if any.
+static MOVING: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn on_move_size(_: HWINEVENTHOOK, event: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+    MOVING.store(if event == EVENT_SYSTEM_MOVESIZESTART { hwnd.0 as isize } else { 0 }, Ordering::Relaxed);
+}
+
+/// Screen rectangle of the window the user is currently dragging or resizing.
+pub fn moving_rect() -> Option<RECT> {
+    let h = MOVING.load(Ordering::Relaxed);
+    if h == 0 {
+        return None;
+    }
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(HWND(h as *mut _), &mut r) }.ok()?;
+    Some(r)
+}
+
+/// Screen rectangle of the text caret in the foreground window, if that app reports one.
+pub fn caret_rect() -> Option<RECT> {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() {
+            return None;
+        }
+        let tid = GetWindowThreadProcessId(fg, None);
+        let mut gi = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        GetGUIThreadInfo(tid, &mut gi).ok()?;
+        if gi.hwndCaret.is_invalid() {
+            return None;
+        }
+        let r = gi.rcCaret;
+        let mut a = POINT { x: r.left, y: r.top };
+        let mut b = POINT { x: r.right, y: r.bottom };
+        let _ = ClientToScreen(gi.hwndCaret, &mut a);
+        let _ = ClientToScreen(gi.hwndCaret, &mut b);
+        Some(RECT { left: a.x, top: a.y, right: b.x.max(a.x + 1), bottom: b.y })
+    }
+}
+
+thread_local! {
+    static UIA: Option<windows::Win32::UI::Accessibility::IUIAutomation> = unsafe {
+        CoCreateInstance(&windows::Win32::UI::Accessibility::CUIAutomation, None, CLSCTX_ALL).ok()
+    };
+}
+
+static FOCUS_RECT: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
+
+/// Last focused-field rectangle found by the background focus watcher (see `spawn_focus_watch`).
+pub fn focused_rect() -> Option<RECT> {
+    *FOCUS_RECT.lock().unwrap()
+}
+
+/// UI Automation calls go to other processes and can block, so they run here, only while the user
+/// is typing, never on the UI thread.
+pub fn spawn_focus_watch() {
+    std::thread::spawn(|| unsafe {
+        name_thread("islet-focus-watch");
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            // Only fields without a Win32 caret, in a window that reaches the top of the screen,
+            // can sit under the notch; anything else skips the cross-process query.
+            let wanted = key_idle_ms() < 1200 && caret_rect().is_none() && {
+                let mut r = RECT::default();
+                GetWindowRect(GetForegroundWindow(), &mut r).is_ok() && r.top < 240
+            };
+            let r = if wanted { focused_rect_now() } else { None };
+            *FOCUS_RECT.lock().unwrap() = r;
+        }
+    });
+}
+
+/// Screen rectangle of the keyboard-focused element (via UI Automation), for apps whose text
+/// fields have no Win32 caret (browsers, Electron apps such as VS Code). Ignores whole windows.
+fn focused_rect_now() -> Option<RECT> {
+    UIA.with(|u| unsafe {
+        let el = u.as_ref()?.GetFocusedElement().ok()?;
+        let r = el.CurrentBoundingRectangle().ok()?;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        // A focused field is small; a focused document or window would match everything.
+        (w > 0 && h > 0 && h < 200).then_some(r)
+    })
+}
+
+// ---------------------------------------------------------------- notification banners
+
+const NOTIF_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings";
+
+fn banner_backup_path() -> std::path::PathBuf {
+    crate::model::data_dir().join("banners.txt")
+}
+
+fn read_banner_backup() -> Vec<(String, Option<u32>)> {
+    std::fs::read_to_string(banner_backup_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.rsplit_once('\t'))
+        .map(|(id, v)| (id.to_string(), v.parse().ok()))
+        .collect()
+}
+
+fn show_banner_value(aumid: &str) -> Option<u32> {
+    let key = HSTRING::from(format!("{NOTIF_KEY}\\{aumid}"));
+    let mut v = 0u32;
+    let mut n = 4u32;
+    let ok = unsafe { RegGetValueW(HKEY_CURRENT_USER, &key, w!("ShowBanner"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as _), Some(&mut n)) };
+    (ok == ERROR_SUCCESS).then_some(v)
+}
+
+/// Turns off Windows' corner banner for `aumid` (Islet shows its notifications instead), recording
+/// the previous setting so `restore_banners` can put it back. Notifications still reach the
+/// notification centre, where Islet reads them.
+pub fn hide_banner(aumid: &str) {
+    if aumid.is_empty() {
         return;
     }
+    let mut backup = read_banner_backup();
+    if !backup.iter().any(|(id, _)| id == aumid) {
+        backup.push((aumid.to_string(), show_banner_value(aumid)));
+        let text: String = backup.iter().map(|(id, v)| format!("{id}\t{}\n", v.map(|v| v.to_string()).unwrap_or_else(|| "-".into()))).collect();
+        let _ = std::fs::write(banner_backup_path(), text);
+    }
+    let key = HSTRING::from(format!("{NOTIF_KEY}\\{aumid}"));
+    let zero = 0u32;
+    unsafe {
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &key, w!("ShowBanner"), REG_DWORD.0, Some(&zero as *const u32 as _), 4);
+    }
+}
+
+/// Whether Islet has already turned off `aumid`'s banner.
+pub fn banner_hidden(aumid: &str) -> bool {
+    show_banner_value(aumid) == Some(0) && read_banner_backup().iter().any(|(id, _)| id == aumid)
+}
+
+/// Puts every banner setting Islet changed back the way it was.
+pub fn restore_banners() {
+    for (aumid, old) in read_banner_backup() {
+        let key = HSTRING::from(format!("{NOTIF_KEY}\\{aumid}"));
+        unsafe {
+            match old {
+                Some(v) => {
+                    let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &key, w!("ShowBanner"), REG_DWORD.0, Some(&v as *const u32 as _), 4);
+                }
+                None => {
+                    let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &key, w!("ShowBanner"));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(banner_backup_path());
+}
+
+unsafe extern "system" fn on_win_event(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _: i32, _: u32, _: u32) {
     let own = HWND(FG_TARGET.load(Ordering::Relaxed) as *mut _);
     let _ = PostMessageW(Some(own), WM_FOREGROUND, WPARAM(0), LPARAM(0));
 }

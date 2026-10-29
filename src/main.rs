@@ -2,6 +2,7 @@
 //! Islet: a living notch for Windows.
 
 mod bt;
+mod devices;
 mod drop;
 mod gfx;
 mod media;
@@ -9,6 +10,7 @@ mod model;
 mod notify;
 mod sound;
 mod pump;
+mod storm;
 mod sys;
 mod ui;
 
@@ -47,12 +49,21 @@ pub const WM_FOREGROUND: u32 = WM_APP + 9;
 pub const WM_BLUETOOTH: u32 = WM_APP + 10;
 pub const WM_NOTICE: u32 = WM_APP + 11;
 pub const WM_VOLKEY: u32 = WM_APP + 12;
+pub const WM_TABMSG: u32 = WM_APP + 13;
+pub const WM_ICON: u32 = WM_APP + 14;
+pub const WM_SHOT: u32 = WM_APP + 15;
+pub const WM_AUDIODEV: u32 = WM_APP + 16;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const T_TICK: usize = 2;
 const T_LANG: usize = 5;
 const T_HOVER: usize = 6;
+const T_DRAGZONE: usize = 8;
+/// Collects a device's several interfaces into one card before showing it.
+const T_DEVICE: usize = 9;
+/// Demo-only event storm driver (see storm.rs).
+const T_STORM: usize = 10;
 
 /// Logical window size (layout units); pixels = units × DPI scale.
 pub const WIN_W: f32 = 640.0;
@@ -68,6 +79,12 @@ pub const TOAST: [f32; 2] = [320.0, 36.0];
 /// Two-line toasts (Bluetooth devices, app notifications); the water reminder adds buttons.
 pub const TALL_TOAST: [f32; 2] = [320.0, 56.0];
 pub const WATER_TOAST: [f32; 2] = [372.0, 56.0];
+/// End-of-phase Pomodoro toast, measured from the Nusa screenshot (386×76 px at 125 %).
+pub const PHASE_TOAST: [f32; 2] = [310.0, 61.0];
+/// Chat message toast: icon, sender and two lines of text.
+pub const MESSAGE_TOAST: [f32; 2] = [360.0, 78.0];
+/// A notification grown into its detail view (hovered or clicked).
+pub const NOTICE_OPEN: [f32; 2] = [420.0, 160.0];
 const MINIMAL: [f32; 2] = [44.8, 4.0];
 
 /// Damped spring stepped with semi-implicit Euler, as in the reference app.
@@ -100,7 +117,7 @@ impl Spring {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToastKind {
     Volume(bool),
     Caps(bool),
@@ -113,12 +130,34 @@ pub enum ToastKind {
     Break,
     Task,
     Bluetooth(bool),
+    /// A wired device plugged in (true) or out: USB mouse/keyboard/receiver, phone, drive, audio.
+    Device(bool),
     Notice,
+    /// A chat message (iPhone lock-screen style): sender in `value`, message in `title`.
+    Message,
+    /// Screen brightness bar.
+    Brightness,
+    /// Water goal reached.
+    Goal,
 }
 
 impl ToastKind {
     pub fn tall(self) -> bool {
-        matches!(self, ToastKind::Bluetooth(_) | ToastKind::Notice | ToastKind::Water)
+        matches!(
+            self,
+            ToastKind::Bluetooth(_)
+                | ToastKind::Device(_)
+                | ToastKind::Notice
+                | ToastKind::Message
+                | ToastKind::Water
+                | ToastKind::Focus
+                | ToastKind::Break
+                | ToastKind::Task
+                | ToastKind::Charging(_)
+                | ToastKind::Battery
+                | ToastKind::Net(_)
+                | ToastKind::Goal
+        )
     }
 }
 
@@ -147,11 +186,91 @@ pub struct Demo {
     pub date: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Compact,
     Peek,
     Expanded,
+}
+
+/// One Bluetooth or wired-device card, kept whole while it waits for its turn.
+pub struct DeviceCard {
+    pub kind: ToastKind,
+    pub name: String,
+    pub sub: String,
+    pub level: Option<f32>,
+    pub device: devices::DeviceKind,
+    pub root: Option<String>,
+}
+
+/// How long each device card shows while others are waiting.
+const DEVICE_TURN: Duration = Duration::from_millis(1500);
+
+/// Where a notification came from; decides its badge and what "Open" does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum NoticeKind {
+    /// A chat message (Facebook/Messenger), from a notification or a browser tab title.
+    Chat,
+    /// A website's notification shown by a browser.
+    Browser,
+    /// Snipping Tool / Win+Shift+S / Print Screen.
+    Screenshot,
+    App,
+}
+
+/// The notification behind the current Notice/Message toast, for the hover detail view.
+pub struct NoticeInfo {
+    pub kind: NoticeKind,
+    pub app: String,
+    pub aumid: String,
+    pub site: Option<String>,
+    /// Windows notification id (0 when it came from a tab title).
+    pub id: u32,
+    pub title: String,
+    pub body: String,
+    pub born: Instant,
+    /// Screenshot file and its thumbnail, once found.
+    pub file: Option<PathBuf>,
+    pub thumb: Option<ID2D1Bitmap>,
+    pub file_size: String,
+}
+
+impl NoticeInfo {
+    fn of(n: &notify::Notice) -> Self {
+        let a = n.aumid.to_lowercase();
+        let kind = if n.source == Some("facebook") {
+            NoticeKind::Chat
+        } else if a.contains("screensketch") || a.contains("screenclipping") || n.app.to_lowercase().contains("snipping") {
+            NoticeKind::Screenshot
+        } else if n.site.is_some() {
+            NoticeKind::Browser
+        } else {
+            NoticeKind::App
+        };
+        NoticeInfo {
+            kind,
+            app: n.app.clone(),
+            aumid: n.aumid.clone(),
+            site: n.site.clone(),
+            id: n.id,
+            title: n.title.clone(),
+            body: n.body.clone(),
+            born: Instant::now(),
+            file: None,
+            thumb: None,
+            file_size: String::new(),
+        }
+    }
+
+    /// Whether "Open" can do something for this notification.
+    pub fn openable(&self) -> bool {
+        match self.kind {
+            NoticeKind::Screenshot => self.file.is_some(),
+            NoticeKind::Chat => true,
+            NoticeKind::Browser => self.site.is_some(),
+            NoticeKind::App => !self.aumid.is_empty(),
+        }
+    }
 }
 
 pub struct App {
@@ -183,6 +302,15 @@ pub struct App {
     /// Rubber-band stretch when volume is pushed past either endpoint. The
     /// toast silhouette takes the impulse while the meter keeps its width.
     pub vol_stretch: Spring,
+    /// Brightness sun rotation (degrees); each change turns it by the change, as Nusa does.
+    pub sun_rot: Spring,
+    pub sun_target: f32,
+    /// Pending brightness rubber band (+1 right at 100 %, -1 left at 0 %), played on arrival.
+    bright_bounce: Option<f32>,
+    /// What the current notification toast came from, for the hover detail view.
+    pub notice: Option<NoticeInfo>,
+    /// The notification toast is grown into its detail view (hovered or clicked).
+    pub toast_open: bool,
     /// Timeline fill, eased toward the playback (or dragged) position.
     pub tl_frac: Spring,
     /// Caps Lock icon: 0 = outline arrow, 1 = filled arrow with a bright bar.
@@ -224,7 +352,6 @@ pub struct App {
     animating: bool,
     /// Whether any spring moved on the last frame (as opposed to only looping visuals).
     springs_moving: bool,
-    trimmed: bool,
     pub lyrics_on: bool,
     pub page: Page,
     pub water_sub: u8,
@@ -233,6 +360,28 @@ pub struct App {
     pub form: Option<Form>,
     pub toast: Option<Toast>,
     queue: VecDeque<Toast>,
+    /// A notification that arrived while the widgets were open; shown when they close.
+    held_notice: Option<Toast>,
+    /// Clock minute last drawn by the idle tick.
+    drawn_minute: u32,
+    /// Current period of the pointer/yield poll (ms).
+    zone_every: u32,
+    /// Capture exclusion stays on until this moment after the last message card.
+    private_until: Option<Instant>,
+    /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
+    pub device_kind: devices::DeviceKind,
+    pub device_root: Option<String>,
+    devices: Option<devices::Tracker>,
+    /// Device cards waiting their turn (see `present_device`).
+    device_queue: VecDeque<DeviceCard>,
+    /// Last Bluetooth card: audio endpoints of the same device appear with it and are not shown.
+    last_bt: Option<Instant>,
+    /// Audio endpoint name and when it was last announced (one jack reports several endpoints).
+    last_audio: Option<(String, bool, Instant)>,
+    /// Demo-only event storm under test.
+    storm: Option<Box<storm::Storm>>,
+    /// Times the frame pump had to be restarted (reported by the storm test).
+    pump_stalls: u32,
     pub mouse: (f32, f32),
     mouse_in: bool,
     pub down: Option<(f32, f32, Option<Act>)>,
@@ -256,6 +405,38 @@ pub struct App {
     pub blob: (Spring, Spring),
     /// Drag light builds up with cursor movement (0.3 → 1) and settles back when still.
     pub drag_energy: f32,
+    /// While a mouse button is held near the notch the whole window takes hits, so a file
+    /// dragged into its surroundings (not only onto the notch) opens the shelf, like Nusa.
+    pub catch_all: bool,
+    /// Box of the looping indicator (equalizer / timer) drawn in the last frame.
+    pub loop_rect: Option<gfx::Rc>,
+    /// Last screen brightness reported, and the last chat sender shown.
+    brightness: Option<u32>,
+    last_chat: Option<(String, Instant)>,
+    /// Tasks whose start-time reminder already fired today: (title, day).
+    task_fired: std::collections::HashSet<(String, u32)>,
+    task_snooze: Option<(String, Instant)>,
+    /// Water goal reached toast shown for this day.
+    goal_day: u32,
+    /// Whether the current button press began outside the window (a drag coming in).
+    press_known: bool,
+    press_outside: bool,
+    /// The notch has stepped aside (minimal sliver) because the user is working right below it.
+    pub yielded: bool,
+    /// Last moment a reason to stay out of the way was seen, and since when the cursor has been
+    /// working in the zone next to the notch.
+    yield_seen: Instant,
+    near_since: Option<Instant>,
+    /// Previous left/right button state, to catch fresh clicks.
+    buttons_down: bool,
+    /// The last click landed in the zone next to the notch (likely focusing a field there).
+    click_in_zone: bool,
+    /// Cursor position when the hover timer was armed (expand only once the cursor rests).
+    hover_anchor: (f32, f32),
+    /// Screen capture exclusion currently applied (message privacy).
+    private: bool,
+    /// Bottom light level, eased; rises as a dragged file nears the notch's bottom edge.
+    pub aurora_lvl: Spring,
     /// Light level at the moment of the drop.
     pub drop_energy: f32,
     /// Burst played where files were dropped: start time and position.
@@ -267,6 +448,7 @@ pub struct App {
     pub art: Option<(u64, ID2D1Bitmap, u32)>,
     /// Shell icons and size labels for shelf items; a None icon caches a failed lookup.
     shelf_icons: std::collections::HashMap<PathBuf, (Option<ID2D1Bitmap>, String)>,
+    icons_pending: std::collections::HashSet<PathBuf>,
     pub lyrics: Arc<Mutex<Lyrics>>,
     pub power: Option<sys::Power>,
     layout: isize,
@@ -328,6 +510,11 @@ impl App {
             roll_t: Spring::new(1.0, 1100.0, 66.0),
             vol_level: Spring::new(0.0, 260.0, 30.0),
             vol_stretch: Spring::new(0.0, 520.0, 9.0),
+            sun_rot: Spring::new(0.0, 900.0, 60.0),
+            sun_target: 0.0,
+            bright_bounce: None,
+            notice: None,
+            toast_open: false,
             tl_frac: Spring::new(0.0, 420.0, 40.0),
             caps_mix: Spring::new(0.0, 700.0, 52.0),
             lyr_user: Spring::new(0.0, 260.0, 32.0),
@@ -353,7 +540,6 @@ impl App {
             last_frame: Instant::now(),
             animating: false,
             springs_moving: false,
-            trimmed: false,
             lyrics_on: false,
             page: Page::Music,
             water_sub: 0,
@@ -362,6 +548,18 @@ impl App {
             form: None,
             toast: None,
             queue: VecDeque::new(),
+            held_notice: None,
+            drawn_minute: u32::MAX,
+            zone_every: 50,
+            private_until: None,
+            device_kind: devices::DeviceKind::Other,
+            device_root: None,
+            devices: None,
+            last_bt: None,
+            device_queue: VecDeque::new(),
+            last_audio: None,
+            storm: None,
+            pump_stalls: 0,
             mouse: (-1.0, -1.0),
             mouse_in: false,
             down: None,
@@ -379,6 +577,23 @@ impl App {
             drag_pt: (0.0, 0.0),
             blob: (Spring::new(0.0, 120.0, 18.0), Spring::new(0.0, 120.0, 18.0)),
             drag_energy: 0.3,
+            catch_all: false,
+            loop_rect: None,
+            brightness: None,
+            last_chat: None,
+            task_fired: Default::default(),
+            task_snooze: None,
+            goal_day: 0,
+            press_known: false,
+            press_outside: false,
+            yielded: false,
+            yield_seen: Instant::now(),
+            near_since: None,
+            buttons_down: false,
+            click_in_zone: false,
+            hover_anchor: (0.0, 0.0),
+            private: false,
+            aurora_lvl: Spring::new(0.0, 60.0, 15.0),
             drop_energy: 1.0,
             ripple: None,
             demo_drop_at: None,
@@ -386,6 +601,7 @@ impl App {
             media_tx,
             art: None,
             shelf_icons: Default::default(),
+            icons_pending: Default::default(),
             lyrics,
             power: sys::power(),
             layout: sys::current_layout().0,
@@ -399,6 +615,7 @@ impl App {
     }
 
     unsafe fn init(&mut self) {
+        notify::HIDE_BANNERS.store(self.settings.hide_banners, std::sync::atomic::Ordering::Relaxed);
         self.lyr_font.x = self.settings.lyric_size;
         self.lyr_font_target = self.settings.lyric_size;
         self.place();
@@ -410,7 +627,11 @@ impl App {
             sys::watch_volume(self.hwnd);
             sys::hook_foreground(self.hwnd);
             bt::spawn(self.hwnd);
+            self.devices = Some(devices::Tracker::start(self.hwnd));
+            sys::watch_audio_devices(self.hwnd);
             notify::spawn(self.hwnd);
+            sys::spawn_tab_watch(self.hwnd.0 as isize);
+            sys::spawn_focus_watch();
             self.poll_power();
         }
         // This timer owns coarse state (clock, reminder eligibility and toast
@@ -418,6 +639,9 @@ impl App {
         // Two ticks a second keeps those states prompt without repainting an
         // otherwise idle notch four times a second.
         SetTimer(Some(self.hwnd), T_TICK, 500, None);
+        if self.demo.is_none() {
+            SetTimer(Some(self.hwnd), T_DRAGZONE, 50, None);
+        }
         self.snap();
         // Starts the drop-in / grow-in intro.
         self.kick();
@@ -508,6 +732,16 @@ impl App {
 
     /// Target notch size for the current state.
     pub fn target(&self) -> [f32; 2] {
+        // Stepping aside: only reminders that need an answer keep their size.
+        let urgent = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break));
+        if self.yielded && self.mode == Mode::Compact && !urgent {
+            return MINIMAL;
+        }
+        self.base_target()
+    }
+
+    /// Target size ignoring any yield.
+    fn base_target(&self) -> [f32; 2] {
         match self.mode {
             Mode::Expanded => {
                 if self.lyrics_on && self.page == Page::Music {
@@ -518,8 +752,18 @@ impl App {
             }
             Mode::Peek => PEEK,
             Mode::Compact => {
-                if let Some(t) = &self.toast {
-                    if t.kind == ToastKind::Water {
+                if self.toast_open && self.notice_toast() {
+                    NOTICE_OPEN
+                } else if let Some(t) = &self.toast {
+                    if t.kind == ToastKind::Message {
+                        MESSAGE_TOAST
+                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break | ToastKind::Task) {
+                        PHASE_TOAST
+                    } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
+                        WATER_TOAST
+                    } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal) {
+                        TALL_TOAST
+                    } else if t.kind == ToastKind::Water {
                         WATER_TOAST
                     } else if t.kind.tall() {
                         TALL_TOAST
@@ -552,7 +796,7 @@ impl App {
         let mut cx = WIN_W / 2.0;
         let mut w = self.sw.x;
         if self.mode == Mode::Compact
-            && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Volume(_)))
+            && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Volume(_) | ToastKind::Brightness))
         {
             let s = self.vol_stretch.x;
             let grow = w * 0.08 * s.abs();
@@ -570,15 +814,28 @@ impl App {
     }
 
     /// Shell icon (None if unavailable) and a size label for a shelf item, cached per path.
+    /// Shell icons are slow to fetch (~100 ms), so they load on a worker thread; until one arrives
+    /// the tile shows its placeholder.
     pub fn shelf_icon(&mut self, p: &std::path::Path) -> (Option<ID2D1Bitmap>, String) {
         if let Some(c) = self.shelf_icons.get(p) {
             return c.clone();
         }
-        let px = (40.0 * self.gfx.scale).round() as i32;
-        let b = drop::shell_image(p, px).and_then(|(w, h, buf)| self.gfx.bitmap(w, h, &buf));
-        let size = std::fs::metadata(p).map(|m| size_label(m.len())).unwrap_or_default();
-        self.shelf_icons.insert(p.to_path_buf(), (b.clone(), size.clone()));
-        (b, size)
+        if self.icons_pending.insert(p.to_path_buf()) {
+            let px = (40.0 * self.gfx.scale).round() as i32;
+            let path = p.to_path_buf();
+            let hwnd = self.hwnd.0 as isize;
+            std::thread::spawn(move || unsafe {
+                crate::sys::name_thread("islet-shelf-icon");
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+                let img = drop::shell_image(&path, px);
+                let size = std::fs::metadata(&path).map(|m| size_label(m.len())).unwrap_or_default();
+                let b = Box::into_raw(Box::new((path, img, size)));
+                if PostMessageW(Some(HWND(hwnd as *mut _)), WM_ICON, WPARAM(0), LPARAM(b as isize)).is_err() {
+                    drop(Box::from_raw(b));
+                }
+            });
+        }
+        (None, String::new())
     }
 
     pub fn kick(&mut self) {
@@ -609,6 +866,15 @@ impl App {
         if m == Mode::Expanded {
             self.toast = None;
             self.queue.clear();
+        }
+        if self.mode == Mode::Expanded && m != Mode::Expanded {
+            // Notifications are never lost to an open notch: the latest one plays now.
+            if let Some(mut t) = self.held_notice.take().filter(|t| t.born.elapsed() < Duration::from_secs(120)) {
+                let life = t.until.saturating_duration_since(t.born);
+                t.born = Instant::now();
+                t.until = t.born + life;
+                self.toast = Some(t);
+            }
         }
         self.mode = m;
         self.kick();
@@ -650,6 +916,7 @@ impl App {
             moving |= self.intro.step(0.0, sub);
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
+            moving |= self.sun_rot.step(self.sun_target, sub);
             moving |= self.lyr_user.step(self.lyr_user_target, sub);
             moving |= self.lyr_zoom.step(1.0, sub);
             let caps_on = matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Caps(true)));
@@ -665,9 +932,15 @@ impl App {
             moving |= self.tl_frac.step(tl, sub);
             moving |= self.toast_swap.step(1.0, sub);
             moving |= self.roll_t.step(1.0, sub);
-            let vol = self.toast.as_ref().filter(|t| matches!(t.kind, ToastKind::Volume(_))).and_then(|t| t.level);
+            let vol = self.toast.as_ref().filter(|t| matches!(t.kind, ToastKind::Volume(_) | ToastKind::Brightness)).and_then(|t| t.level);
             if let Some(v) = vol {
                 moving |= self.vol_level.step(v, sub);
+                let bright = self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Brightness);
+                if let Some(dir) = self.bright_bounce.filter(|_| bright && (self.vol_level.x - v).abs() < 0.02) {
+                    self.bright_bounce = None;
+                    self.vol_stretch.v += 7.0 * dir;
+                    moving = true;
+                }
             }
             moving |= self.lyr_mix.step(if self.lyrics_on && self.page == Page::Music && self.has_media() { 1.0 } else { 0.0 }, sub);
             moving |= self.toggle_x.step(if self.water.on { 1.0 } else { 0.0 }, sub);
@@ -682,6 +955,7 @@ impl App {
                 // to keep it alive.
                 self.drag_energy = (self.drag_energy - sub * 0.35).max(0.75);
             }
+            moving |= self.aurora_lvl.step(self.aurora_target(), sub);
             moving |= self.blob.0.step(self.drag_pt.0, sub);
             moving |= self.blob.1.step(self.drag_pt.1, sub);
         }
@@ -695,7 +969,9 @@ impl App {
 
     /// Looping visuals (the equalizer) that need frames even when no spring moves.
     fn continuous(&self) -> bool {
-        self.effects() || !self.hidden && self.playing() && !self.pomo.running() && !(self.minimal() && self.mode == Mode::Compact)
+        self.effects()
+            || !self.hidden && self.pomo.running()
+            || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
     }
 
     /// Time-driven animations in progress (as opposed to the idle equalizer loop).
@@ -705,7 +981,7 @@ impl App {
         let effects = recent(self.lyr_anim.map(|x| x.0), 1100)
             || recent(self.pill_prev.as_ref().map(|x| x.0), 450)
             || self.toast.as_ref().is_some_and(|t| t.kind.tall() || fresh(t))
-            || self.drag_over || self.ripple.is_some_and(|r| r.0.elapsed() < Duration::from_millis(3100));
+            || self.drag_over || self.ripple.is_some_and(|r| r.0.elapsed() < Duration::from_millis(3800));
         effects
     }
 
@@ -722,7 +998,15 @@ impl App {
             // Everything is drawn inside the notch (plus its ears) or the minimal hover pad.
             let (cx, w) = self.notch_geometry();
             let half = (w / 2.0 + 24.0).max(72.0);
-            let area = gfx::Rc::new(cx - half, 0.0, half * 2.0, self.sh.x.max(18.0) + 4.0);
+            let only_loop = !self.springs_moving && !self.effects() && self.mouse_in == false;
+            let area = if self.catch_all {
+                gfx::Rc::new(0.0, 0.0, WIN_W, WIN_H)
+            } else if let (true, Some(r)) = (only_loop, self.loop_rect) {
+                // Idle with only the equalizer/timer moving: redraw just its box.
+                r
+            } else {
+                gfx::Rc::new(cx - half, 0.0, half * 2.0, self.sh.x.max(18.0) + 4.0)
+            };
             self.gfx.lift = self.intro.x;
             self.gfx.grow = self.intro_grow.x;
             self.gfx.center_x = WIN_W / 2.0;
@@ -734,13 +1018,13 @@ impl App {
     }
 
     pub fn toast(&mut self, kind: ToastKind, title: &str, value: &str, level: Option<f32>) {
-        if self.expanded() {
-            return;
-        }
         // Device and reminder toasts linger (Nusa keeps them ~4 s / until answered).
         let life = match kind {
             ToastKind::Water => 12_000,
-            ToastKind::Bluetooth(_) | ToastKind::Notice => 4_000,
+            ToastKind::Focus | ToastKind::Break | ToastKind::Task => 60_000,
+            ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal => 2_600,
+            ToastKind::Bluetooth(_) | ToastKind::Device(_) | ToastKind::Notice => 4_000,
+            ToastKind::Message => 5_000,
             _ => 1_800,
         };
         let now = Instant::now();
@@ -752,9 +1036,15 @@ impl App {
             level,
             until: now + Duration::from_millis(life),
         };
+        if self.expanded() {
+            if matches!(kind, ToastKind::Notice | ToastKind::Message) {
+                self.held_notice = Some(t);
+            }
+            return;
+        }
         let same = |a: ToastKind, b: ToastKind| std::mem::discriminant(&a) == std::mem::discriminant(&b);
         match self.toast.take() {
-            Some(cur) if same(cur.kind, kind) && self.toast_mix.x > 0.5 => {
+            Some(cur) if same(cur.kind, kind) && self.toast_mix.x > 0.5 && !(matches!(kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && cur.title != title) => {
                 // Same toast updating: keep its entrance time; roll the value if it changed.
                 t.born = cur.born;
                 if cur.value != t.value {
@@ -776,7 +1066,7 @@ impl App {
             }
             None => {
                 self.roll = None;
-                if let (ToastKind::Volume(_), Some(v)) = (kind, level) {
+                if let (ToastKind::Volume(_) | ToastKind::Brightness, Some(v)) = (kind, level) {
                     self.vol_level.x = v;
                 }
             }
@@ -841,6 +1131,366 @@ impl App {
         self.kick();
     }
 
+    /// Bottom light: half strength anywhere over the shelf, full near its bottom edge; after a
+    /// drop it holds, then fades slowly (the notch may already be closing).
+    fn aurora_target(&self) -> f32 {
+        if self.drag_over {
+            let bottom = self.sh.x;
+            let near = (1.0 - ((bottom - self.drag_pt.1).abs() / 70.0)).clamp(0.0, 1.0);
+            return 1.0 + 0.6 * near;
+        }
+        match self.ripple {
+            Some((start, ..)) => {
+                let t = start.elapsed().as_secs_f32();
+                1.5 * (1.0 - (t - 1.0).max(0.0) / 2.6).clamp(0.0, 1.0)
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Polled every 50 ms: arms the window-wide drop zone while a button is held near the notch,
+    /// and closes the shelf once the cursor has left after a drop.
+    /// Notch footprint ignoring any yield, with a working margin around it, in layout units.
+    fn yield_zone(&self) -> (f32, f32, f32, f32) {
+        let [w, h] = self.base_target();
+        let cx = WIN_W / 2.0;
+        let m = 24.0;
+        (cx - w / 2.0 - m, 0.0, cx + w / 2.0 + m, h + m)
+    }
+
+    /// Steps the notch aside while the user works right below it (click, pointer work, typing into
+    /// a field under it, dragging a window to the top), and brings it back a second after.
+    fn poll_yield(&mut self, pt: POINT) {
+        if self.expanded() || self.drag_over || self.form.is_some() || self.demo.is_some() {
+            self.near_since = None;
+            return;
+        }
+        let s = self.gfx.scale;
+        let (wx, wy) = (self.pos.0 as f32, self.pos.1 as f32);
+        let to_u = |x: i32, y: i32| ((x as f32 - wx) / s, (y as f32 - wy) / s);
+        let (x0, y0, x1, y1) = self.yield_zone();
+        let in_zone = |(x, y): (f32, f32)| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        let cur = to_u(pt.x, pt.y);
+        let now = Instant::now();
+        let mut reason = false;
+
+        // 1. A fresh click near the notch that went to the app below. The low bit of
+        // GetAsyncKeyState catches quick taps that start and end between two polls.
+        let (l, r) = unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32), GetAsyncKeyState(VK_RBUTTON.0 as i32)) };
+        let down = l < 0 || r < 0;
+        let clicked = (down && !self.buttons_down) || (l & 1) != 0 || (r & 1) != 0;
+        if clicked {
+            self.click_in_zone = in_zone(cur) && !self.mouse_in;
+            if self.click_in_zone {
+                reason = true;
+            }
+        }
+        self.buttons_down = down;
+        // 2. The pointer working next to the notch (not on it) for a moment.
+        if in_zone(cur) && !self.mouse_in {
+            let since = *self.near_since.get_or_insert(now);
+            if now.duration_since(since) > Duration::from_millis(600) {
+                reason = true;
+            }
+        } else {
+            self.near_since = None;
+        }
+        // 3. Typing into a field that sits under the notch.
+        if sys::key_idle_ms() < 1000 {
+            match sys::caret_rect() {
+                Some(r) => {
+                    if in_zone(to_u(r.left, r.top)) || in_zone(to_u(r.right, r.bottom)) {
+                        reason = true;
+                    }
+                }
+                // Chromium/Electron apps report no Win32 caret: ask UI Automation for the focused
+                // field, else assume it is where the last click landed.
+                None => match sys::focused_rect() {
+                    Some(r) => {
+                        let (l, t) = to_u(r.left, r.top);
+                        let (rr, b) = to_u(r.right, r.bottom);
+                        if l <= x1 && rr >= x0 && t <= y1 && b >= y0 {
+                            reason = true;
+                        }
+                    }
+                    None => reason |= self.click_in_zone,
+                },
+            }
+        }
+        // 4. A window being dragged or resized up into the notch.
+        if let Some(r) = sys::moving_rect() {
+            let (l, t) = to_u(r.left, r.top);
+            let (rt, _) = to_u(r.right, r.bottom);
+            if t <= y1 && rt >= x0 && l <= x1 {
+                reason = true;
+            }
+        }
+
+        if reason {
+            self.yield_seen = now;
+            if !self.yielded {
+                self.yielded = true;
+                if self.mode != Mode::Compact {
+                    self.set_mode(Mode::Compact);
+                }
+                self.kick();
+            }
+        } else if self.yielded && now.duration_since(self.yield_seen) > Duration::from_millis(1000) && !(in_zone(cur) && !self.mouse_in) {
+            self.yielded = false;
+            self.kick();
+        }
+    }
+
+    fn poll_drag_zone(&mut self) {
+        let mut pt = POINT::default();
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        self.poll_yield(pt);
+        // Fast polling only matters with the pointer near the notch, a button held or typing;
+        // otherwise four checks a second are enough.
+        let s = self.gfx.scale;
+        let near = (pt.y as f32) < self.pos.1 as f32 + (WIN_H + 160.0) * s
+            && (pt.x as f32 - (self.pos.0 as f32 + WIN_W * s / 2.0)).abs() < (WIN_W / 2.0 + 160.0) * s;
+        let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500;
+        let every = if busy { 50 } else { 250 };
+        if every != self.zone_every {
+            self.zone_every = every;
+            unsafe { SetTimer(Some(self.hwnd), T_DRAGZONE, every, None) };
+        }
+        self.update_privacy();
+        let s = self.gfx.scale;
+        let (wx, wy) = (self.pos.0, self.pos.1);
+        let inside = pt.x >= wx && pt.x < wx + (WIN_W * s) as i32 && pt.y >= wy && pt.y < wy + (WIN_H * s) as i32;
+        // Only a drag that started outside the notch's window arms the drop zone; a plain click
+        // near the notch (pressed inside it) must reach the app below untouched.
+        if down && !self.press_known {
+            self.press_known = true;
+            self.press_outside = !inside;
+        } else if !down {
+            self.press_known = false;
+        }
+        let want = down && inside && self.press_outside;
+        if want != self.catch_all {
+            self.catch_all = want;
+            self.render();
+        }
+        if !down && !self.drag_over && !self.mouse_in && self.expanded() && self.form.is_none() && self.ripple.is_some() {
+            let (cx, w) = self.notch_geometry();
+            let ux = (pt.x - wx) as f32 / s;
+            let uy = (pt.y - wy) as f32 / s;
+            let over = ux >= cx - w / 2.0 && ux <= cx + w / 2.0 && uy >= 0.0 && uy <= self.sh.x;
+            if !over {
+                self.set_mode(Mode::Compact);
+            }
+        }
+    }
+
+    /// Keeps chat messages out of screen shares and recordings while one is on screen.
+    /// Only message cards are hidden from captures (other notifications, such as the screenshot
+    /// one, stay visible). Each switch makes DWM recompose the window, so it is switched off only
+    /// once the card has been gone for a moment, never between cards of a burst.
+    fn update_privacy(&mut self) {
+        let message = [self.toast.as_ref(), self.last_toast.as_ref()]
+            .iter()
+            .flatten()
+            .any(|t| t.kind == ToastKind::Message)
+            && self.toast_mix.x > 0.01;
+        if message {
+            self.private_until = Some(Instant::now() + Duration::from_millis(300));
+        }
+        let showing = message || self.private_until.is_some_and(|t| Instant::now() < t);
+        if showing != self.private && (self.demo.is_none() || self.storm.is_some()) {
+            self.private = showing;
+            let mode = if showing { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+            unsafe {
+                let _ = SetWindowDisplayAffinity(self.hwnd, mode);
+            }
+        }
+    }
+
+    /// "Task Time!" when a to-do with a start time is due (or its Later snooze ends).
+    fn check_tasks(&mut self, now: u32) {
+        let day = self.water.day;
+        if let Some((t, at)) = self.task_snooze.clone() {
+            if Instant::now() >= at {
+                self.task_snooze = None;
+                sound::play(sound::Chime::Soft);
+                self.toast(ToastKind::Task, "Task Time!", &t, None);
+            }
+        }
+        let due: Vec<String> = self
+            .todo
+            .tasks
+            .iter()
+            .filter(|t| t.done_day != day)
+            .filter_map(|t| {
+                let start = t.time.split('-').next()?.trim();
+                let (h, m) = start.split_once(':')?;
+                let min = h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?;
+                (min == now).then(|| t.title.clone())
+            })
+            .filter(|title| !self.task_fired.contains(&(title.clone(), day)))
+            .collect();
+        for title in due {
+            self.task_fired.insert((title.clone(), day));
+            sound::play(sound::Chime::Soft);
+            self.toast(ToastKind::Task, "Task Time!", &title, None);
+        }
+    }
+
+    /// Brightness toast; the first report after start-up is the current value, not a change.
+    fn brightness_changed(&mut self, v: u32) {
+        let first = self.brightness.is_none();
+        let old = self.brightness;
+        let changed = self.brightness != Some(v);
+        self.brightness = Some(v);
+        if !first && changed {
+            // Further presses at an end are never reported (the laptop handles the Fn keys), so
+            // the rubber band plays once when the bar arrives at 0 or 100.
+            if v == 0 || v == 100 {
+                self.bright_bounce = Some(if v == 100 { 1.0 } else { -1.0 });
+            }
+            // Nusa turns the sun about 1.15° per percent: clockwise brighter, back when dimmer.
+            if let Some(o) = old {
+                self.sun_target += (v as f32 - o as f32) * 1.15;
+            }
+            let fresh = !matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Brightness));
+            self.toast(ToastKind::Brightness, "Brightness", &format!("{v}%"), Some(v as f32 / 100.0));
+            if fresh {
+                // Slide from where it was, like the volume bar does.
+                if let Some(o) = old {
+                    self.vol_level.x = o as f32 / 100.0;
+                }
+            }
+        }
+    }
+
+    /// A chat message from a browser tab title; skipped if the same sender just arrived as a
+    /// Windows notification.
+    pub fn chat_message(&mut self, sender: &str, text: &str) {
+        if self.last_chat.as_ref().is_some_and(|(s, t)| s == sender && t.elapsed() < Duration::from_secs(20)) {
+            return;
+        }
+        self.last_chat = Some((sender.to_string(), Instant::now()));
+        sound::play(sound::Chime::Soft);
+        self.toast(ToastKind::Message, text, sender, None);
+        self.notice = Some(NoticeInfo {
+            kind: NoticeKind::Chat,
+            app: "Messenger".into(),
+            aumid: String::new(),
+            site: Some("www.facebook.com".into()),
+            id: 0,
+            title: sender.to_string(),
+            body: text.to_string(),
+            born: Instant::now(),
+            file: None,
+            thumb: None,
+            file_size: String::new(),
+        });
+    }
+
+    fn show_device(&mut self, card: devices::Card) {
+        let sub = if !card.detail.is_empty() {
+            card.detail
+        } else if card.connected {
+            "Connected".into()
+        } else {
+            "Disconnected".into()
+        };
+        self.present_device(DeviceCard {
+            kind: ToastKind::Device(card.connected),
+            name: card.name,
+            sub,
+            level: None,
+            device: card.kind,
+            root: card.root,
+        });
+    }
+
+    /// Device cards never replace each other: one arriving while another is still fresh (or
+    /// while the widgets are open) waits its turn, and waiting cards play 1.5 s each.
+    fn present_device(&mut self, c: DeviceCard) {
+        let fresh = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && t.born.elapsed() < DEVICE_TURN);
+        if self.mode == Mode::Expanded || fresh || !self.device_queue.is_empty() {
+            // The same device changing again: only its latest state is worth showing.
+            self.device_queue.retain(|q| q.name != c.name);
+            self.device_queue.push_back(c);
+            // A flood (a hub or dock with many devices) keeps only the latest few.
+            while self.device_queue.len() > 4 {
+                self.device_queue.pop_front();
+            }
+            if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_))) {
+                t.until = t.until.min(t.born + DEVICE_TURN);
+            }
+            return;
+        }
+        self.show_device_now(c);
+    }
+
+    fn show_device_now(&mut self, c: DeviceCard) {
+        self.device_kind = c.device;
+        self.device_root = c.root;
+        self.toast(c.kind, &c.name, &c.sub, c.level);
+        if !self.device_queue.is_empty() {
+            if let Some(t) = self.toast.as_mut() {
+                t.until = t.until.min(t.born + DEVICE_TURN);
+            }
+        }
+    }
+
+    /// A headphone jack, USB audio device or speaker endpoint became available or went away.
+    fn audio_changed(&mut self, c: sys::AudioChange) {
+        use devices::DeviceKind;
+        let kind = match c.form_factor {
+            3 => DeviceKind::Headphones,
+            5 => DeviceKind::Headset,
+            1 => DeviceKind::Speaker,
+            _ => return,
+        };
+        // Bluetooth audio has its own card; its endpoints come and go with it.
+        if c.bluetooth || self.last_bt.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+            return;
+        }
+        if self.last_audio.as_ref().is_some_and(|(n, on, t)| *n == c.name && *on == c.active && t.elapsed() < Duration::from_secs(2)) {
+            return;
+        }
+        self.last_audio = Some((c.name.clone(), c.active, Instant::now()));
+        self.show_device(devices::Card { connected: c.active, kind, name: c.name, root: None, detail: String::new() });
+    }
+
+    /// The current toast is a notification that can grow into its detail view.
+    pub fn notice_toast(&self) -> bool {
+        self.notice.is_some() && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Notice | ToastKind::Message))
+    }
+
+    fn open_notice(&mut self) {
+        let Some(n) = &self.notice else { return };
+        match n.kind {
+            NoticeKind::Screenshot => {
+                if let Some(f) = &n.file {
+                    sys::shell_open(f.as_os_str());
+                }
+            }
+            NoticeKind::Chat => sys::shell_open(std::ffi::OsStr::new("https://www.facebook.com/messages/")),
+            NoticeKind::Browser => {
+                if let Some(site) = &n.site {
+                    let url = if site.contains("://") { site.clone() } else { format!("https://{site}") };
+                    sys::shell_open(std::ffi::OsStr::new(&url));
+                }
+            }
+            NoticeKind::App => sys::shell_open(std::ffi::OsStr::new(&format!("shell:AppsFolder\\{}", n.aumid))),
+        }
+        self.close_notice();
+    }
+
+    fn close_notice(&mut self) {
+        if let Some(n) = &self.notice {
+            notify::remove(n.id);
+        }
+        self.toast_open = false;
+        self.dismiss_toast();
+    }
+
     fn dismiss_toast(&mut self) {
         self.last_toast = self.toast.take();
         self.kick();
@@ -849,7 +1499,7 @@ impl App {
 
     /// A toast with its own buttons stays put under the cursor instead of opening the notch.
     fn interactive_toast(&self) -> bool {
-        self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Water)
+        self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Task))
     }
 
     /// Tracks the cursor during a drag (screen pixels).
@@ -997,6 +1647,33 @@ impl App {
                 self.water_pulse.v += 7.5;
                 self.kick();
             }
+            Act::ToastStartPhase => {
+                self.pomo.start();
+                self.dismiss_toast();
+            }
+            Act::ToastDismiss => self.dismiss_toast(),
+            Act::NoticeOpen => self.open_notice(),
+            Act::DeviceOpen => {
+                if let Some(root) = self.device_root.take() {
+                    sys::shell_open(std::ffi::OsStr::new(&root));
+                }
+                self.dismiss_toast();
+            }
+            Act::NoticeClose => self.close_notice(),
+            Act::TaskLater => {
+                if let Some(t) = self.toast.as_ref().map(|t| t.value.clone()) {
+                    self.task_snooze = Some((t, Instant::now() + Duration::from_secs(10 * 60)));
+                }
+                self.dismiss_toast();
+            }
+            Act::TaskStart => {
+                if let Some(t) = self.toast.as_ref().map(|t| t.value.clone()) {
+                    self.pomo.set_phase(Phase::Focus);
+                    self.pomo.task = Some(t);
+                    self.pomo.start();
+                }
+                self.dismiss_toast();
+            }
             Act::ToastDrank => {
                 self.water.drank(clock.hour as usize);
                 self.water_pulse.v += 7.5;
@@ -1087,13 +1764,19 @@ impl App {
     fn announce_phase(&mut self, p: Phase) {
         sound::play(sound::Chime::Soft);
         match p {
-            Phase::Focus => self.toast(ToastKind::Focus, "Focus Time!", "25 min", None),
-            Phase::Short => self.toast(ToastKind::Break, "Break Time!", "5 min", None),
-            Phase::Long => self.toast(ToastKind::Break, "Long Break!", "15 min", None),
+            Phase::Focus => self.toast(ToastKind::Focus, "Focus Time!", "Back to work, 25 min", None),
+            Phase::Short => self.toast(ToastKind::Break, "Break Time!", "5 minute short break", None),
+            Phase::Long => self.toast(ToastKind::Break, "Long Break!", "15 min, you earned it", None),
         }
     }
 
     fn tick(&mut self) {
+        // An animation must get frames; one stalled mid-way in a storm test (frozen half-size
+        // notch), so a missing frame for this long restarts the pump.
+        if self.animating && self.last_frame.elapsed() > Duration::from_millis(400) {
+            self.pump_stalls += 1;
+            pump::unstick();
+        }
         if self.demo_drop_at.is_some_and(|t| Instant::now() >= t) {
             self.demo_drop_at = None;
             self.sw.v += 460.0;
@@ -1108,13 +1791,8 @@ impl App {
         if self.continuous() {
             self.kick();
         }
-        // Startup (WinRT, fonts, Direct2D) touches far more memory than steady state needs;
-        // hand those pages back once things have settled.
-        if !self.trimmed && self.born.elapsed() > Duration::from_secs(8) {
-            self.trimmed = true;
-            unsafe {
-                let _ = windows::Win32::System::ProcessStatus::K32EmptyWorkingSet(windows::Win32::System::Threading::GetCurrentProcess());
-            }
+        if self.demo.is_none() {
+            self.watch();
         }
         if let Some(p) = self.pomo.tick() {
             self.announce_phase(p);
@@ -1127,6 +1805,14 @@ impl App {
             sound::play(sound::Chime::Soft);
             self.toast(ToastKind::Water, "Time to Drink", &format!("Stay hydrated! · {ml} ml"), None);
         }
+        if self.demo.is_none() {
+            self.check_tasks(clock.minutes());
+            if self.water.goal > 0 && self.water.taken >= self.water.goal && self.goal_day != self.water.day && self.water.taken > 0 {
+                self.goal_day = self.water.day;
+                let l = self.water.taken as f32 / 1000.0;
+                self.toast(ToastKind::Goal, "Goal reached", &format!("{l:.1} L today"), Some(1.0));
+            }
+        }
         if self.demo.is_none() && idle_seconds() < 300 {
             match self.water.check_due(clock.minutes()) {
                 Some(WaterAlert::Drink(ml)) => {
@@ -1135,12 +1821,31 @@ impl App {
                 }
                 Some(WaterAlert::Refill) => {
                     sound::play(sound::Chime::Soft);
-                    self.toast(ToastKind::Water, "Time to Refill", "Your bottle is empty", None);
+                    self.toast(ToastKind::Water, "Time to Refill", "Your bottle is probably empty", None);
                 }
                 None => {}
             }
         }
-        if let Some(t) = &self.toast {
+        if !self.notice_toast() {
+            self.toast_open = false;
+        }
+        // While the notch steps aside (or a fullscreen app hides it) notifications wait to be seen.
+        if self.yielded || self.hidden {
+            if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Notice | ToastKind::Message)) {
+                t.until = t.until.max(Instant::now() + Duration::from_secs(2));
+            }
+        }
+        // Waiting device cards play once the current card is done (or the widgets closed).
+        let device_done = match &self.toast {
+            None => true,
+            Some(t) => matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && Instant::now() >= t.until,
+        };
+        if device_done && self.mode != Mode::Expanded {
+            if let Some(c) = self.device_queue.pop_front() {
+                self.show_device_now(c);
+            }
+        }
+        if let Some(t) = self.toast.as_ref().filter(|_| !self.toast_open) {
             if Instant::now() >= t.until {
                 self.last_toast = self.toast.take();
                 self.toast = self.queue.pop_front().map(|mut t| {
@@ -1167,7 +1872,12 @@ impl App {
         if (t[0] - self.sw.x).abs() > 0.5 || (t[1] - self.sh.x).abs() > 0.5 {
             self.kick();
         }
-        self.render();
+        // Anything that moves is drawn by the frame pump; at rest only the clock text changes, once
+        // a minute (a full redraw twice a second was most of Islet's idle CPU).
+        if clock.minutes() != self.drawn_minute {
+            self.drawn_minute = clock.minutes();
+            self.render();
+        }
     }
 
     fn poll_power(&mut self) {
@@ -1177,18 +1887,18 @@ impl App {
                 let lv = Some(p.pct as f32 / 100.0);
                 if p.ac != old.ac {
                     if p.ac {
-                        self.toast(ToastKind::Charging(true), "Charging", &format!("{}%", p.pct), lv);
+                        self.toast(ToastKind::Charging(true), "Charging", "Charger connected", lv);
                     } else {
-                        self.toast(ToastKind::Charging(false), "Charger unplugged", &format!("{}%", p.pct), lv);
+                        self.toast(ToastKind::Charging(false), "Charger unplugged", &format!("{}% remaining", p.pct), lv);
                     }
                 } else if !p.ac && old.pct > 20 && p.pct <= 20 && p.pct > 10 {
                     sound::play(sound::Chime::Alert);
-                    self.toast(ToastKind::Battery, "Low battery", &format!("{}%", p.pct), lv);
+                    self.toast(ToastKind::Battery, "Low battery", "Plug in soon", lv);
                 } else if !p.ac && old.pct > 10 && p.pct <= 10 {
                     sound::play(sound::Chime::Alert);
-                    self.toast(ToastKind::Battery, "Battery critical", &format!("{}%", p.pct), lv);
+                    self.toast(ToastKind::Battery, "Battery critical", "Plug in now", lv);
                 } else if p.ac && old.pct < 100 && p.pct == 100 {
-                    self.toast(ToastKind::Charging(true), "Fully charged", "100%", Some(1.0));
+                    self.toast(ToastKind::Charging(true), "Fully charged", "You can unplug", Some(1.0));
                 }
             }
         }
@@ -1222,8 +1932,18 @@ impl App {
             unsafe {
                 let _ = TrackMouseEvent(&mut tme);
             }
-            if self.mode == Mode::Compact && !self.interactive_toast() {
+            if self.yielded {
+                // Resting on the sliver brings the notch back.
+                self.yielded = false;
+                self.kick();
+            }
+            if self.mode == Mode::Compact && self.notice_toast() {
+                // A resting cursor grows the notification instead of opening the widgets.
+                self.hover_anchor = (x, y);
+                unsafe { SetTimer(Some(self.hwnd), T_HOVER, 90, None) };
+            } else if self.mode == Mode::Compact && !self.interactive_toast() {
                 self.set_mode(Mode::Peek);
+                self.hover_anchor = (x, y);
                 unsafe { SetTimer(Some(self.hwnd), T_HOVER, 90, None) };
             }
         }
@@ -1252,6 +1972,13 @@ impl App {
         }
         if self.form.is_none() && !self.drag_over {
             self.set_mode(Mode::Compact);
+        }
+        if self.toast_open {
+            // Shrink back and leave the notification a moment before it goes.
+            self.toast_open = false;
+            if let Some(t) = self.toast.as_mut() {
+                t.until = Instant::now() + Duration::from_secs(3);
+            }
         }
         self.kick();
         self.render();
@@ -1282,6 +2009,18 @@ impl App {
             return;
         }
         if !self.expanded() {
+            if self.notice_toast() {
+                if !self.toast_open {
+                    self.toast_open = true;
+                    self.kick();
+                } else if let (Some(a), Some(b)) = (pressed, self.hit(x, y)) {
+                    if a == b {
+                        self.act(a);
+                    }
+                }
+                self.render();
+                return;
+            }
             if self.interactive_toast() {
                 if let (Some(a), Some(b)) = (pressed, self.hit(x, y)) {
                     if a == b {
@@ -1337,6 +2076,8 @@ impl App {
         let _ = AppendMenuW(m, MF_STRING | check(sys::autostart_enabled()), 1, w!("Start with Windows"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.pet), 2, w!("Islet Mascot"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.minimal), 3, w!("Minimal notch"));
+        let _ = AppendMenuW(m, MF_STRING | check(self.settings.hide_banners), 6, w!("Hide Windows banners"));
+        let _ = AppendMenuW(m, MF_STRING | check(self.settings.show_content), 7, w!("Show message content"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING, 4, w!("About Islet"));
         let _ = AppendMenuW(m, MF_STRING, 5, w!("Exit"));
@@ -1355,6 +2096,18 @@ impl App {
                 self.settings.minimal = !self.settings.minimal;
                 self.minimal_armed = true;
                 self.settings.save();
+            }
+            7 => {
+                self.settings.show_content = !self.settings.show_content;
+                self.settings.save();
+            }
+            6 => {
+                self.settings.hide_banners = !self.settings.hide_banners;
+                self.settings.save();
+                notify::HIDE_BANNERS.store(self.settings.hide_banners, std::sync::atomic::Ordering::Relaxed);
+                if !self.settings.hide_banners {
+                    sys::restore_banners();
+                }
             }
             4 => {
                 MessageBoxW(
@@ -1400,16 +2153,48 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_FRAME => {
             pump::consumed();
             if a.animating && a.frame_due() {
+                let t0 = Instant::now();
                 a.step();
                 a.render();
+                let animating = a.animating;
+                if let Some(s) = a.storm.as_mut() {
+                    s.frame(t0.elapsed(), animating);
+                }
             }
         }
         WM_TIMER => match wp.0 {
             T_TICK => a.tick(),
+            T_DRAGZONE => a.poll_drag_zone(),
+            T_STORM => a.storm_tick(),
+            T_DEVICE => {
+                let _ = KillTimer(Some(hwnd), T_DEVICE);
+                let cards = a.devices.as_mut().map(|t| t.flush()).unwrap_or_default();
+                for card in cards {
+                    a.show_device(card);
+                }
+            }
             T_HOVER => {
                 let _ = KillTimer(Some(hwnd), T_HOVER);
-                if a.mouse_in && a.mode == Mode::Peek {
-                    a.set_mode(Mode::Expanded);
+                if a.mouse_in && a.mode == Mode::Compact && a.notice_toast() && !a.toast_open {
+                    let (ax, ay) = a.hover_anchor;
+                    if ((a.mouse.0 - ax).powi(2) + (a.mouse.1 - ay).powi(2)).sqrt() < 6.0 {
+                        a.toast_open = true;
+                        a.kick();
+                        a.render();
+                    } else {
+                        a.hover_anchor = a.mouse;
+                        SetTimer(Some(hwnd), T_HOVER, 90, None);
+                    }
+                } else if a.mouse_in && a.mode == Mode::Peek {
+                    // Only open once the cursor rests; a quick pass across does nothing.
+                    let (ax, ay) = a.hover_anchor;
+                    let moved = ((a.mouse.0 - ax).powi(2) + (a.mouse.1 - ay).powi(2)).sqrt();
+                    if moved < 6.0 {
+                        a.set_mode(Mode::Expanded);
+                    } else {
+                        a.hover_anchor = a.mouse;
+                        SetTimer(Some(hwnd), T_HOVER, 90, None);
+                    }
                 }
             }
             T_LANG => {
@@ -1456,11 +2241,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_LANG => {
             SetTimer(Some(hwnd), T_LANG, 180, None);
         }
-        WM_NET => match wp.0 {
-            2 => a.toast(ToastKind::Net(true), "Connected", "Online", None),
-            1 => a.toast(ToastKind::Net(false), "No internet access", "Limited", None),
-            _ => a.toast(ToastKind::Net(false), "Disconnected", "Offline", None),
-        },
+        WM_NET => {
+            let n = Box::from_raw(lp.0 as *mut sys::NetChange);
+            let name = n.ssid.clone().unwrap_or_else(|| "Network".into());
+            let state = match n.status {
+                2 => "Connected",
+                1 => "No internet access",
+                _ => "Disconnected",
+            };
+            a.toast(ToastKind::Net(n.status > 0), &name, state, n.bars.map(|b| b as f32 / 5.0));
+        }
+        WM_SHOT => {
+            let b = Box::from_raw(lp.0 as *mut sys::Shot);
+            let sys::Shot { id, path, img, size } = *b;
+            if let Some(n) = a.notice.as_mut().filter(|n| n.id == id) {
+                n.thumb = img.and_then(|(w, h, px)| a.gfx.bitmap(w, h, &px));
+                n.file = Some(path);
+                n.file_size = size;
+                a.render();
+            }
+        }
+        WM_ICON => {
+            let b = Box::from_raw(lp.0 as *mut (PathBuf, Option<(u32, u32, Vec<u8>)>, String));
+            let (path, img, size) = *b;
+            let bmp = img.and_then(|(w, h, px)| a.gfx.bitmap(w, h, &px));
+            a.icons_pending.remove(&path);
+            a.shelf_icons.insert(path, (bmp, size));
+            a.render();
+        }
+        WM_TABMSG => {
+            let m = Box::from_raw(lp.0 as *mut (String, String));
+            a.chat_message(&m.0, &m.1);
+        }
         WM_TRAY => match (lp.0 & 0xFFFF) as u32 {
             WM_LBUTTONUP => {
                 let m = if a.expanded() { Mode::Compact } else { Mode::Expanded };
@@ -1470,7 +2282,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_RBUTTONUP | WM_CONTEXTMENU => a.menu(),
             _ => {}
         },
-        WM_POWERBROADCAST => a.poll_power(),
+        WM_POWERBROADCAST => {
+            const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+            if wp.0 == PBT_POWERSETTINGCHANGE && lp.0 != 0 {
+                let ps = &*(lp.0 as *const windows::Win32::System::Power::POWERBROADCAST_SETTING);
+                if ps.PowerSetting == windows::Win32::System::SystemServices::GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS && ps.DataLength >= 4 {
+                    let v = std::ptr::read_unaligned(ps.Data.as_ptr() as *const u32).min(100);
+                    a.brightness_changed(v);
+                }
+            }
+            a.poll_power();
+            a.render();
+        }
         WM_FOREGROUND => a.watch(),
         WM_VOLKEY => {
             let up = wp.0 != 0;
@@ -1492,13 +2315,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_NOTICE => {
             let n = Box::from_raw(lp.0 as *mut notify::Notice);
-            a.toast(ToastKind::Notice, &n.text, &n.app, None);
+            // Title row: sender (or app); second row: the message, else the app name.
+            let body = if n.body.is_empty() { n.app.clone() } else { n.body.clone() };
+            let info = NoticeInfo::of(&n);
+            if info.kind == NoticeKind::Screenshot {
+                sys::find_screenshot(a.hwnd, n.id, (240.0 * a.gfx.scale) as i32);
+            }
+            if n.source == Some("facebook") {
+                a.last_chat = None;
+                a.chat_message(&n.title, &body);
+            } else {
+                sound::play(sound::Chime::Soft);
+                a.toast(ToastKind::Notice, &body, &n.title, None);
+            }
+            // The Windows notification carries the id (and, for chats, the content).
+            a.notice = Some(info);
+            if a.settings.hide_banners {
+                sys::hide_banner(&n.aumid);
+            }
         }
         WM_BLUETOOTH => {
             let c = Box::from_raw(lp.0 as *mut bt::Change);
             let state = if c.connected { "Connected" } else { "Disconnected" };
             let level = c.battery.filter(|_| c.connected).map(|b| b as f32 / 100.0);
-            a.toast(ToastKind::Bluetooth(c.connected), &c.name, state, level);
+            a.last_bt = Some(Instant::now());
+            a.present_device(DeviceCard { kind: ToastKind::Bluetooth(c.connected), name: c.name.clone(), sub: state.into(), level, device: c.kind, root: None });
+        }
+        WM_DEVICECHANGE => {
+            if let Some(t) = a.devices.as_mut() {
+                if let Some(card) = t.on_change(wp.0, lp.0) {
+                    a.show_device(card);
+                } else if t.has_pending() {
+                    SetTimer(Some(hwnd), T_DEVICE, 700, None);
+                }
+            }
+            return LRESULT(1);
+        }
+        WM_AUDIODEV => {
+            if lp.0 == 0 {
+                // The default output changed: follow its volume.
+                sys::watch_volume(hwnd);
+            } else {
+                let b = Box::from_raw(lp.0 as *mut sys::AudioChange);
+                a.audio_changed(*b);
+            }
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
             a.place();
@@ -1597,6 +2457,16 @@ fn demo_setup(a: &mut App, spec: &str) {
     if let Some(s) = kv.get("watersub") {
         a.water_sub = s.parse().unwrap_or(0);
     }
+    // "todos=go@16:54-00:00~Read~Gym@18:00-19:30": tasks for screenshots.
+    if let Some(list) = kv.get("todos") {
+        a.todo.tasks = list
+            .split('~')
+            .map(|t| {
+                let (title, time) = t.split_once('@').unwrap_or((t, ""));
+                model::Task { title: title.to_string(), done_day: 0, time: time.to_string() }
+            })
+            .collect();
+    }
     if let Some(ml) = kv.get("water") {
         a.toast = Some(Toast {
             born: Instant::now() - Duration::from_secs(5),
@@ -1607,15 +2477,88 @@ fn demo_setup(a: &mut App, spec: &str) {
             until: Instant::now() + Duration::from_secs(3600),
         });
     }
+    if let Some((who, text)) = kv.get("msg").and_then(|v| v.split_once('|')) {
+        a.toast = Some(Toast {
+            born: Instant::now(),
+            kind: ToastKind::Message,
+            title: text.to_string(),
+            value: who.to_string(),
+            level: None,
+            until: Instant::now() + Duration::from_secs(3600),
+        });
+    }
+    for (key, kind, title, value) in [
+        ("chg_toast", ToastKind::Charging(true), "Charging", "Charger connected"),
+        ("unplugged", ToastKind::Charging(false), "Charger unplugged", "95% remaining"),
+        ("wifi_on", ToastKind::Net(true), "Phong 2_5G", "Connected"),
+        ("wifi_off", ToastKind::Net(false), "Phong 2_5G", "Disconnected"),
+        ("bright", ToastKind::Brightness, "Brightness", "70%"),
+        ("task", ToastKind::Task, "Task Time!", "Học từ vựng"),
+        ("goal", ToastKind::Goal, "Goal reached", "2.0 L today"),
+    ] {
+        if let Some(v) = kv.get(key).and_then(|v| v.parse::<f32>().ok()) {
+            a.toast = Some(Toast {
+                born: Instant::now(),
+                kind,
+                title: title.into(),
+                value: value.into(),
+                level: Some(v),
+                until: Instant::now() + Duration::from_secs(3600),
+            });
+            a.vol_level.x = v;
+        }
+    }
+    if kv.get("phase_end") == Some(&"1") {
+        a.toast = Some(Toast {
+            born: Instant::now() - Duration::from_secs(5),
+            kind: ToastKind::Focus,
+            title: "Focus Time!".into(),
+            value: "Back to work, 25 min".into(),
+            level: None,
+            until: Instant::now() + Duration::from_secs(3600),
+        });
+    }
+    if kv.get("pomo_run") == Some(&"1") {
+        a.pomo.remaining = kv.get("pomo_left").and_then(|v| v.parse().ok()).unwrap_or(1408.0);
+        a.pomo.start();
+    }
+    // "bt=Name" with "bt_kind=mouse|keyboard|speaker|headset|phone|gamepad" and "bt_batt=0.02".
+    let kind_of = |k: &str| match k {
+        "mouse" => devices::DeviceKind::Mouse,
+        "keyboard" => devices::DeviceKind::Keyboard,
+        "speaker" => devices::DeviceKind::Speaker,
+        "headset" => devices::DeviceKind::Headset,
+        "phone" => devices::DeviceKind::Phone,
+        "gamepad" => devices::DeviceKind::Gamepad,
+        "drive" => devices::DeviceKind::Drive,
+        "headphones" => devices::DeviceKind::Headphones,
+        _ => devices::DeviceKind::Other,
+    };
     if let Some(name) = kv.get("bt") {
+        a.device_kind = kv.get("bt_kind").map(|k| kind_of(k)).unwrap_or_default();
         a.toast = Some(Toast {
             born: Instant::now(),
             kind: ToastKind::Bluetooth(true),
             title: name.to_string(),
             value: "Connected".into(),
-            level: Some(1.0),
+            level: Some(kv.get("bt_batt").and_then(|v| v.parse().ok()).unwrap_or(1.0)),
             until: Instant::now() + Duration::from_secs(3600),
         });
+    }
+    // "device=kind|Name|1|detail|E:" (connected flag, optional detail line and drive root).
+    if let Some(v) = kv.get("device") {
+        let p: Vec<&str> = v.split('|').collect();
+        let card = devices::Card {
+            kind: kind_of(p.first().unwrap_or(&"")),
+            name: p.get(1).unwrap_or(&"USB device").to_string(),
+            connected: p.get(2) != Some(&"0"),
+            detail: p.get(3).unwrap_or(&"").to_string(),
+            root: p.get(4).filter(|r| !r.is_empty()).map(|r| format!("{r}\\")),
+        };
+        a.show_device(card);
+        if let Some(t) = a.toast.as_mut() {
+            t.until = Instant::now() + Duration::from_secs(3600);
+        }
     }
     if let Some(t) = kv.get("caps") {
         a.toast = Some(Toast {
@@ -1640,6 +2583,48 @@ fn demo_setup(a: &mut App, spec: &str) {
     // Capture-only control for verifying the endpoint rubber-band geometry.
     // It is accepted solely by the existing ISLET_DEMO fixture and does not
     // participate in normal volume input.
+    // "notice=App|Title|Body|site" (+ "notice_open=1", "shot=<image>"): notification detail view.
+    if let Some(v) = kv.get("notice") {
+        let p: Vec<&str> = v.split('|').collect();
+        let n = notify::Notice {
+            app: p.first().unwrap_or(&"App").to_string(),
+            title: p.get(1).unwrap_or(&"").to_string(),
+            body: p.get(2).unwrap_or(&"").to_string(),
+            aumid: if kv.contains_key("shot") { "Microsoft.ScreenSketch_8wekyb3d8bbwe!App".into() } else { String::new() },
+            source: None,
+            site: p.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            id: 0,
+        };
+        a.toast = Some(Toast {
+            born: Instant::now() - Duration::from_secs(5),
+            kind: ToastKind::Notice,
+            title: if n.body.is_empty() { n.app.clone() } else { n.body.clone() },
+            value: n.title.clone(),
+            level: None,
+            until: Instant::now() + Duration::from_secs(3600),
+        });
+        let mut info = NoticeInfo::of(&n);
+        if let Some(path) = kv.get("shot") {
+            let p = PathBuf::from(path);
+            info.thumb = drop::shell_image(&p, (240.0 * a.gfx.scale) as i32).and_then(|(w, h, px)| a.gfx.bitmap(w, h, &px));
+            info.file_size = std::fs::metadata(&p).map(|m| size_label(m.len())).unwrap_or_default();
+            info.file = Some(p);
+        }
+        a.notice = Some(info);
+        a.toast_open = kv.get("notice_open") == Some(&"1");
+    }
+    // "storm=120;seed=7;stormlog=<file>": event-storm test (storm.rs); writes the report and exits.
+    if let Some(secs) = kv.get("storm").and_then(|v| v.parse::<u64>().ok()) {
+        let seed = kv.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
+        let log = kv.get("stormlog").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("islet_storm.txt"));
+        sound::MUTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        a.storm = Some(Box::new(storm::Storm::new(secs, seed, log)));
+        storm::timer(a.hwnd);
+    }
+    if let Some(deg) = kv.get("sun").and_then(|v| v.parse::<f32>().ok()) {
+        a.sun_rot.x = deg;
+        a.sun_target = deg;
+    }
     if let Some(stretch) = kv.get("stretch").and_then(|v| v.parse::<f32>().ok()) {
         a.vol_stretch.x = stretch.clamp(-1.0, 1.0);
     }

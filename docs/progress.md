@@ -118,6 +118,102 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   builds with cursor movement (drag_energy); drop ripple is a packet of six flat 10 u bands with
   alphas [.04 .11 .23 .15 .07 .03] of #C8CCEB, measured from the screenshot's banding.
 
+- Round 9 (effectvid/new4 are 800×238 screen recordings = pixel-exact references):
+  - Pomodoro: compact timer is a sloshing red liquid bubble (icon::liquid, gfx.clip_circle);
+    expanded ring shows time left (gfx.arc_diag) opening clockwise from 12; a finished phase no
+    longer auto-starts — the 310×61 "Focus Time! / Back to work, 25 min" toast offers ✕ and
+    Focus/Break (Act::ToastStartPhase / ToastDismiss), lasting 60 s. Demo keys phase_end=1,
+    pomo_run=1, pomo_left=secs.
+  - Shelf drag light: AURORA palette sampled from the recording's bottom row (13 stops, seamless
+    gfx.fill_rect_hstops + black top fade) — matches within ±3 per channel; drop frame is a grey
+    translucent vgrad; Clear chip stays during drag; drop ripple: six soft bands 13 u apart,
+    0.3 s, items appear in 0.12 s and the empty frame fades in 0.16 s (frames 263–269).
+
+- Round 10: app notifications fixed (unpackaged senders have no AppInfo — describe() now falls
+  back; verified with a real Windows toast) and shown as a ringing-bell two-line toast; tall
+  toasts shake (ring_angle), pulse and show a countdown bar; liquid timer redrawn (glass, rim,
+  meniscus, highlight) and animated continuously while running; window-wide drop zone while a
+  button is held over the 800×238 window (T_DRAGZONE poll + 1.5/255 layer) so files dragged near
+  the notch open the shelf; bottom light level follows how close the dragged file is to the
+  notch's bottom edge (aurora_lvl) and survives the collapse after a drop, ripples 0.75 s.
+
+- Round 11: notch steps aside to a sliver (App.yielded, poll_yield on the 50 ms timer) on a click
+  next to it, pointer work beside it > 0.6 s, typing into a field under it (GetGUIThreadInfo caret,
+  else last click position) and window move/size into it (EVENT_SYSTEM_MOVESIZE*); returns 1 s
+  after; resting on the sliver reopens. Hover expands only once the cursor rests (< 6 u in 90 ms).
+  Drop zone arms only for drags that started outside the window (plain clicks near the notch no
+  longer open it). Same-hue bottom-light highlight near the edge (aurora_highlight, level up to
+  1.6). Facebook (browser) notifications → iPhone-style ToastKind::Message with drawn Messenger
+  icon; message toasts excluded from screen capture (WDA_EXCLUDEFROMCAPTURE); Windows banners
+  turned off per sender AUMID (ShowBanner=0, backup %APPDATA%\Isletanners.txt, tray item
+  "Hide Windows banners" restores). Test: scratch yieldtest.ps1 (own WinForms window).
+
+- Round 12 (effectvid/new5 + Nusa string table): Facebook messages also detected from Chromium
+  tab titles via UI Automation (tab strip only, sys::spawn_tab_watch, WM_TABMSG) because Facebook
+  sends no desktop notification while its tab is open; status toasts 312×60 for charging /
+  unplugged / low / full (count-up ring + big %), Wi-Fi with SSID, pulsing arcs and signal bars,
+  brightness bar via GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS; Nusa's exact strings ("Plug in
+  soon", "You can unplug", "5 minute short break", "15 min, you earned it", "Your bottle is
+  probably empty"); "Task Time!" reminder at a to-do's start time with Later (10 min) / Start
+  (focus session); "Goal reached" water toast. Demo keys chg_toast=, unplugged=, wifi_on=,
+  wifi_off=, bright=, task=.
+
+- Round 13 (smoothness + unified cards): software D2D render target (hardware readback stalled
+  up to 31 ms; software p99 6.4 ms, max 8.8 ms); shell icons load on a worker thread (WM_ICON;
+  removed a 135 ms hitch); no EmptyWorkingSet; cached radial glow brushes and text widths;
+  UIA focused-field lookup moved to a background thread (spawn_focus_watch); partial redraw of
+  the right indicator (loop_rect). Brightness bar slides from the previous level. Tab watcher is
+  event driven (MSAA EVENT_OBJECT_NAMECHANGE on Chrome_WidgetWin_1, no polling). Tray item "Show
+  message content". All status toasts share ui::card (Bluetooth layout: badge, title/sub, ring
+  with ripples; Wi-Fi bars appear one by one, centred glyph). To-do rows: title and time on
+  separate lines, "-00:00" end hidden. Demo keys goal=, todos=title@HH:MM-HH:MM~title.
+
+- Round 14 (level icons + notification detail): sun rays lengthen/brighten with the eased level
+  and turn ~1.15° per percent (sun_rot); speaker waves appear per third of the range, cross at
+  0/mute. Brightness rubber band plays once when the bar arrives at 0/100 (bright_bounce): the
+  laptop reports no further Fn presses at the ends (checked with power broadcasts, the keyboard
+  hook and WmiMonitorBrightnessEvent). Notifications keep a NoticeInfo (kind Chat/Browser/
+  Screenshot/App, site, Windows id); resting the cursor on (or clicking) a Notice/Message toast
+  grows it to NOTICE_OPEN 420x160 with source row, title, wrapped body or a screenshot thumbnail
+  (newest file in FOLDERID_Screenshots, worker thread, WM_SHOT) and Open / Close (Close also
+  removes it from the Action Center). shell_image returns the thumbnail's real size; shelf draws
+  with image_fit. Demo keys notice=App|Title|Body|site, notice_open=1, shot=<image>, sun=.
+
+- Round 15 (idle cost, measured per named thread over 60 s): idle CPU 1.0-1.8 % -> 0.36-0.39 % of
+  one core (Nusa 0.26-1.67 % in the same conditions); private memory 12 MB (Nusa ~66 MB).
+  Changes: notification list read only when %LOCALAPPDATA%\Microsoft\Windows\Notifications
+  changes (FindFirstChangeNotification, 15 s safety) instead of every 500 ms; media via SMTC
+  change events (5 s safety read); network via NetworkStatusChanged; tab watcher remembers each
+  element's role so page renames skip the cross-process calls; no EVENT_OBJECT_LOCATIONCHANGE hook
+  (fullscreen checked in the tick); idle tick redraws only when the clock minute changes;
+  pointer/yield poll 50 ms near the notch or while typing, else 250 ms; focus watch queries UIA
+  only without a Win32 caret in a window reaching the top. Notifications arriving while the
+  widgets are open are held and shown on close; while yielded or hidden they wait. Threads are
+  named (islet-*) for profiling.
+
+- Round 16 (devices, privacy, storm test): capture exclusion only for Message cards, held 300 ms
+  after the last one (it had covered every notification and flickered the window on each
+  switch); notification list re-read 300 ms after a store change. Message card centred (its
+  slide-in ended 10 u high). Bluetooth cards show the device kind from
+  DEVPKEY_DeviceContainer_Category of the container's device nodes (headphones, headset,
+  speaker, mouse, keyboard, gamepad, phone) and "Low battery" in red at <= 20 %. New
+  devices.rs: WM_DEVICECHANGE for keyboard/mouse/WPD interfaces (receiver interfaces merged per
+  container, built-in devices of the PC's own container ignored, Bluetooth skipped) and volumes
+  (drive card with Open); IMMNotificationClient for headphone jacks/USB audio (Bluetooth
+  endpoints skipped) and to follow the default output's volume. ToastKind::Device. Demo keys
+  bt_kind=, bt_batt=, device=kind|Name|1|detail|E:. storm.rs: storm=<s>;seed=;stormlog= drives
+  real handlers with random events and checks invariants; 3x120 s runs pass (render p99 ~2.8
+  ms). One earlier run froze mid-animation once (not reproduced); the tick now restarts the
+  frame pump after 400 ms without frames and the storm report counts restarts (0 since).
+
+- Round 17 (device queue, battery colours): Bluetooth/Device cards go through present_device;
+  one arriving while another is under 1.5 s old (or while the widgets are open) waits in
+  device_queue (latest state per name, at most 4) and plays 1.5 s each from the tick. A
+  different device crossfades as a new card instead of updating the old one. battery_tone:
+  > 50 % green, 21-50 % amber, <= 20 % red, applied to Bluetooth cards with a battery and to
+  "Charger unplugged" (follows the counting-up level). Storm gains a 3-device burst and a check
+  that no device card is left unshown; 2x120 s pass.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.
