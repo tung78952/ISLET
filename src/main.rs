@@ -527,7 +527,14 @@ impl App {
                         TOAST
                     }
                 } else if self.minimal() {
-                    MINIMAL
+                    // Minimal playback still needs to expose the current line
+                    // when lyric mode is active; only ordinary playback uses
+                    // the four-unit minimal sliver.
+                    if self.playing() && self.lyric_line().is_some() {
+                        LYRIC_PILL
+                    } else {
+                        MINIMAL
+                    }
                 } else if self.playing() && self.lyric_line().is_some() {
                     LYRIC_PILL
                 } else {
@@ -632,7 +639,7 @@ impl App {
         let mut moving = false;
         let fade_target = if self.expanded() { 1.0 } else { 0.0 };
         let toast_target = if self.toast.is_some() { 1.0 } else { 0.0 };
-        let pill_target = if self.toast.is_none() && !self.minimal() && self.playing() && self.lyric_line().is_some() { 1.0 } else { 0.0 };
+        let pill_target = if self.toast.is_none() && self.playing() && self.lyric_line().is_some() { 1.0 } else { 0.0 };
         for _ in 0..n {
             moving |= self.sw.step(t[0], sub);
             moving |= self.sh.step(t[1], sub);
