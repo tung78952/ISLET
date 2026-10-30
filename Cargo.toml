@@ -5,6 +5,9 @@ edition = "2021"
 description = "A living notch for Windows: music, lyrics, focus timer, water reminder, to-do and file shelf."
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 windows-core = "0.62"
 windows-numerics = "0.3"
@@ -42,6 +45,7 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Variant",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",

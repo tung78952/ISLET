@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
@@ -84,6 +83,8 @@ pub struct Settings {
     pub hide_banners: bool,
     /// Show the text of chat messages (off: sender only).
     pub show_content: bool,
+    /// The separate Luma app was turned off (Islet runs its reminders now).
+    pub luma_app_off: bool,
 }
 
 impl Settings {
@@ -95,6 +96,7 @@ impl Settings {
             lyric_size: num(&m, "lyric_size", 15.0f32).clamp(15.0, 26.0),
             hide_banners: num(&m, "hide_banners", 1u8) == 1,
             show_content: num(&m, "show_content", 1u8) == 1,
+            luma_app_off: num(&m, "luma_app_off", 0u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -106,6 +108,7 @@ impl Settings {
                 ("lyric_size", self.lyric_size.to_string()),
                 ("hide_banners", (self.hide_banners as u8).to_string()),
                 ("show_content", (self.show_content as u8).to_string()),
+                ("luma_app_off", (self.luma_app_off as u8).to_string()),
             ],
         );
     }
@@ -113,179 +116,9 @@ impl Settings {
 
 // ---------------------------------------------------------------- water
 
-pub const BOTTLES: [u32; 5] = [250, 330, 500, 750, 1000];
+/// Cup sizes and daily goals (ml) the Water settings offer.
+pub const CUPS: [u32; 5] = [150, 200, 250, 330, 500];
 pub const GOALS: [u32; 4] = [1500, 2000, 2500, 3000];
-
-pub enum WaterAlert {
-    Drink(u32),
-    Refill,
-}
-
-pub struct Water {
-    pub bottle: u32,
-    pub goal: u32,
-    pub start: u32,
-    pub end: u32,
-    pub day: u32,
-    pub taken: u32,
-    pub inb: u32,
-    pub fired: u32,
-    pub hours: [u32; 24],
-    pub on: bool,
-    pub snooze_at: Option<u32>,
-}
-
-impl Water {
-    pub fn load() -> Self {
-        let m = read_kv("water.txt");
-        let mut hours = [0u32; 24];
-        if let Some(h) = m.get("hours") {
-            for (i, v) in h.split(',').take(24).enumerate() {
-                hours[i] = v.parse().unwrap_or(0);
-            }
-        }
-        let bottle = num(&m, "bottle", 500);
-        let mut w = Water {
-            bottle,
-            goal: num(&m, "goal", 2000),
-            start: num(&m, "start", 8 * 60),
-            end: num(&m, "end", 17 * 60),
-            day: num(&m, "day", 0),
-            taken: num(&m, "taken", 0),
-            inb: num(&m, "inb", bottle),
-            fired: num(&m, "fired", 0),
-            hours,
-            on: num(&m, "on", 1u8) == 1,
-            snooze_at: None,
-        };
-        w.roll_day();
-        w
-    }
-
-    pub fn save(&self) {
-        let hours = self.hours.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(",");
-        write_kv(
-            "water.txt",
-            &[
-                ("bottle", self.bottle.to_string()),
-                ("goal", self.goal.to_string()),
-                ("start", self.start.to_string()),
-                ("end", self.end.to_string()),
-                ("day", self.day.to_string()),
-                ("taken", self.taken.to_string()),
-                ("inb", self.inb.to_string()),
-                ("fired", self.fired.to_string()),
-                ("hours", hours),
-                ("on", (self.on as u8).to_string()),
-            ],
-        );
-    }
-
-    /// Resets daily counters when the local date changes. Returns true on rollover.
-    pub fn roll_day(&mut self) -> bool {
-        let today = now().ymd();
-        if self.day == today {
-            return false;
-        }
-        self.day = today;
-        self.taken = 0;
-        self.fired = 0;
-        self.hours = [0; 24];
-        self.inb = self.bottle;
-        self.snooze_at = None;
-        self.save();
-        true
-    }
-
-    /// Reminders fire every 15 minutes inside the active hours, offset by half an interval.
-    pub const INTERVAL: u32 = 15;
-
-    pub fn slots(&self) -> u32 {
-        (self.end.saturating_sub(self.start) / Self::INTERVAL).max(1)
-    }
-
-    fn slot_minute(&self, k: u32) -> u32 {
-        self.start + Self::INTERVAL / 2 + k * Self::INTERVAL
-    }
-
-    /// Millilitres to drink at each reminder.
-    pub fn each(&self) -> u32 {
-        (self.goal as f32 / self.slots() as f32).round().max(1.0) as u32
-    }
-
-    pub fn per_bottle(&self) -> u32 {
-        (self.bottle as f32 / self.each() as f32).round() as u32
-    }
-
-    pub fn refills(&self) -> u32 {
-        self.goal.div_ceil(self.bottle.max(1)).saturating_sub(1)
-    }
-
-    pub fn percent(&self) -> u32 {
-        (self.taken as f32 * 100.0 / self.goal.max(1) as f32).round() as u32
-    }
-
-    /// Next reminder time; after the last slot this is tomorrow's first one.
-    pub fn next_minute(&self, now_min: u32) -> u32 {
-        if let Some(s) = self.snooze_at {
-            return s;
-        }
-        (0..self.slots()).map(|k| self.slot_minute(k)).find(|&t| t > now_min && t <= self.end).unwrap_or(self.slot_minute(0))
-    }
-
-    pub fn check_due(&mut self, now_min: u32) -> Option<WaterAlert> {
-        if !self.on || self.taken >= self.goal {
-            return None;
-        }
-        let due = if let Some(s) = self.snooze_at {
-            if now_min >= s {
-                self.snooze_at = None;
-                true
-            } else {
-                false
-            }
-        } else {
-            let passed = (0..self.slots()).filter(|&k| self.slot_minute(k) <= now_min.min(self.end)).count() as u32;
-            if passed > self.fired {
-                self.fired = passed;
-                true
-            } else {
-                false
-            }
-        };
-        if !due {
-            return None;
-        }
-        self.save();
-        Some(if self.inb < self.each() { WaterAlert::Refill } else { WaterAlert::Drink(self.each()) })
-    }
-
-    pub fn drank(&mut self, hour: usize) {
-        let e = self.each();
-        self.taken += e;
-        self.inb = self.inb.saturating_sub(e);
-        self.hours[hour.min(23)] += e;
-        self.snooze_at = None;
-        self.save();
-    }
-
-    pub fn refilled(&mut self) {
-        self.inb = self.bottle;
-        self.save();
-    }
-
-    pub fn snooze(&mut self, now_min: u32) {
-        self.snooze_at = Some(now_min + 10);
-    }
-
-    pub fn reset(&mut self) {
-        self.taken = 0;
-        self.hours = [0; 24];
-        self.inb = self.bottle;
-        self.snooze_at = None;
-        self.save();
-    }
-}
 
 // ---------------------------------------------------------------- to-do
 
@@ -382,75 +215,6 @@ impl Phase {
             Phase::Short => "Short Break",
             Phase::Long => "Long Break",
         }
-    }
-}
-
-pub struct Pomo {
-    pub phase: Phase,
-    pub remaining: f64,
-    pub ends_at: Option<Instant>,
-    pub done_focus: u32,
-    pub task: Option<String>,
-}
-
-impl Pomo {
-    pub fn new() -> Self {
-        Pomo { phase: Phase::Focus, remaining: Phase::Focus.secs(), ends_at: None, done_focus: 0, task: None }
-    }
-    pub fn running(&self) -> bool {
-        self.ends_at.is_some()
-    }
-    pub fn left(&self) -> f64 {
-        match self.ends_at {
-            Some(t) => t.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => self.remaining,
-        }
-    }
-    pub fn label(&self) -> String {
-        let s = self.left().ceil() as u64;
-        format!("{:02}:{:02}", s / 60, s % 60)
-    }
-    pub fn start(&mut self) {
-        if self.ends_at.is_none() {
-            self.ends_at = Some(Instant::now() + std::time::Duration::from_secs_f64(self.remaining));
-        }
-    }
-    pub fn pause(&mut self) {
-        self.remaining = self.left();
-        self.ends_at = None;
-    }
-    pub fn set_phase(&mut self, p: Phase) {
-        self.phase = p;
-        self.remaining = p.secs();
-        self.ends_at = None;
-    }
-    pub fn reset(&mut self) {
-        self.set_phase(self.phase);
-    }
-    /// Advances when the current phase ends; returns the phase that just started.
-    pub fn tick(&mut self) -> Option<Phase> {
-        if self.ends_at.is_none() || self.left() > 0.0 {
-            return None;
-        }
-        // The next phase is prepared but waits: the end-of-phase toast asks to start it.
-        self.advance(false)
-    }
-    pub fn advance(&mut self, auto_start_break: bool) -> Option<Phase> {
-        let next = if self.phase == Phase::Focus {
-            self.done_focus += 1;
-            if self.done_focus % 4 == 0 {
-                Phase::Long
-            } else {
-                Phase::Short
-            }
-        } else {
-            Phase::Focus
-        };
-        self.set_phase(next);
-        if next != Phase::Focus && auto_start_break {
-            self.start();
-        }
-        Some(next)
     }
 }
 

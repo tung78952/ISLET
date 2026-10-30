@@ -5,6 +5,7 @@ mod bt;
 mod devices;
 mod drop;
 mod gfx;
+mod luma;
 mod media;
 mod model;
 mod notify;
@@ -34,7 +35,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use gfx::Gfx;
 use media::{Cmd, Lyrics, MediaInfo};
-use model::{Clock, Phase, Pomo, Settings, Shelf, Todo, Water, WaterAlert};
+use luma::config::Kind as CareKind;
+use luma::scheduler::{Due, Outcome};
+use model::{Clock, Phase, Settings, Shelf, Todo};
 use ui::{Act, Page};
 
 pub const WM_MEDIA: u32 = WM_APP + 1;
@@ -53,6 +56,9 @@ pub const WM_TABMSG: u32 = WM_APP + 13;
 pub const WM_ICON: u32 = WM_APP + 14;
 pub const WM_SHOT: u32 = WM_APP + 15;
 pub const WM_AUDIODEV: u32 = WM_APP + 16;
+pub const WM_NOTICEGONE: u32 = WM_APP + 18;
+/// Whether the separate Luma app is still active (WPARAM 1), checked once at start.
+pub const WM_LUMAAPP: u32 = WM_APP + 17;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -139,6 +145,14 @@ pub enum ToastKind {
     Brightness,
     /// Water goal reached.
     Goal,
+    /// Luma: a stretch, eye, breathing or bedtime break (Later / Done).
+    Remind(CareKind),
+    /// Luma: a reminder coming in a few seconds (Later / Now).
+    HeadsUp,
+    /// The separate Luma app is still running: offer to turn it off.
+    LumaApp,
+    /// Someone is calling (Accept / Decline): caller in `value`, app in `title`.
+    Call,
 }
 
 impl ToastKind {
@@ -157,6 +171,10 @@ impl ToastKind {
                 | ToastKind::Battery
                 | ToastKind::Net(_)
                 | ToastKind::Goal
+                | ToastKind::Remind(_)
+                | ToastKind::HeadsUp
+                | ToastKind::LumaApp
+                | ToastKind::Call
         )
     }
 }
@@ -171,8 +189,25 @@ pub struct Toast {
     pub until: Instant,
 }
 
+/// Where a to-do lives: a Luma reminder (has a time) or an untimed to-do of Islet's.
+#[derive(Clone, PartialEq, Debug)]
+pub enum TodoKey {
+    Timed(String),
+    Untimed(usize),
+}
+
+/// One row of the To-do page.
+pub struct TodoItem {
+    pub key: TodoKey,
+    pub title: String,
+    /// "HH:MM" or "HH:MM-HH:MM"; empty when untimed.
+    pub time: String,
+    pub done: bool,
+}
+
 pub struct Form {
-    pub index: Option<usize>,
+    /// The row being edited; None for a new one.
+    pub key: Option<TodoKey>,
     pub title: String,
     /// Up to 8 digits filling the "HH:MM-HH:MM" mask.
     pub digits: String,
@@ -203,6 +238,13 @@ pub struct DeviceCard {
     pub root: Option<String>,
 }
 
+/// Time on screen for a text: `base`, plus 40 ms per character past the first 40, at most 12 s.
+fn reading_ms(base: u64, text: &str) -> u64 {
+    (base + 40 * text.chars().count().saturating_sub(40) as u64).min(12_000)
+}
+
+const HISTORY_MAX: usize = 50;
+
 /// How long each device card shows while others are waiting.
 const DEVICE_TURN: Duration = Duration::from_millis(1500);
 
@@ -211,6 +253,8 @@ const DEVICE_TURN: Duration = Duration::from_millis(1500);
 pub enum NoticeKind {
     /// A chat message (Facebook/Messenger), from a notification or a browser tab title.
     Chat,
+    /// From the phone, through Phone Link.
+    Phone,
     /// A website's notification shown by a browser.
     Browser,
     /// Snipping Tool / Win+Shift+S / Print Screen.
@@ -218,7 +262,53 @@ pub enum NoticeKind {
     App,
 }
 
+/// A known app's own colour.
+fn brand_colour(name: &str) -> Option<u32> {
+    let n = name.to_lowercase();
+    const BRANDS: [(&str, u32); 17] = [
+        ("messenger", 0x7A5CFF), ("zalo", 0x0068FF), ("facebook", 0x1877F2), ("youtube", 0xFF0033), ("gmail", 0xEA4335),
+        ("shopee", 0xEE4D2D), ("chatgpt", 0x10A37F), ("claude", 0xD97757), ("telegram", 0x2AABEE), ("discord", 0x5865F2),
+        ("instagram", 0xE1306C), ("tiktok", 0xFE2C55), ("whatsapp", 0x25D366), ("spotify", 0x1DB954), ("github", 0x8957E5),
+        ("teams", 0x6264A7), ("outlook", 0x0F6CBD),
+    ];
+    BRANDS.iter().find(|(k, _)| n.contains(k)).map(|(_, c)| *c)
+}
+
+/// The most prominent colour of an icon (premultiplied BGRA): the average of its vivid pixels.
+fn icon_colour(px: &[u8]) -> Option<u32> {
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for p in px.chunks_exact(4) {
+        let (hi, lo) = (p[0].max(p[1]).max(p[2]) as u32, p[0].min(p[1]).min(p[2]) as u32);
+        if p[3] > 200 && hi > 60 && (hi - lo) * 10 > hi * 3 {
+            b += p[0] as u64;
+            g += p[1] as u64;
+            r += p[2] as u64;
+            n += 1;
+        }
+    }
+    (n > 0).then(|| ((r / n) << 16 | (g / n) << 8 | (b / n)) as u32)
+}
+
+/// The icon Phone Link keeps for an app on the phone, e.g. app_icon_com.vng.zalo1.0.jpg.
+fn phone_icon(app: &str) -> Option<PathBuf> {
+    let name: String = app.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    // Bundle ids that don't contain the app's name.
+    let name = match name.as_str() {
+        "zalo" => "zingalo".to_string(),
+        "chatgpt" => "openai".to_string(),
+        _ => name,
+    };
+    let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Packages\\Microsoft.YourPhone_8wekyb3d8bbwe\\TempState\\app_icons");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().to_lowercase().contains(&name))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+}
+
 /// The notification behind the current Notice/Message toast, for the hover detail view.
+#[derive(Clone)]
 pub struct NoticeInfo {
     pub kind: NoticeKind,
     pub app: String,
@@ -233,12 +323,18 @@ pub struct NoticeInfo {
     pub file: Option<PathBuf>,
     pub thumb: Option<ID2D1Bitmap>,
     pub file_size: String,
+    /// The app on the phone, for a phone notification.
+    pub phone_app: Option<String>,
+    /// Where its icon comes from.
+    pub icon: Option<PathBuf>,
 }
 
 impl NoticeInfo {
     fn of(n: &notify::Notice) -> Self {
         let a = n.aumid.to_lowercase();
-        let kind = if n.source == Some("facebook") {
+        let kind = if n.phone_app.is_some() {
+            NoticeKind::Phone
+        } else if n.source == Some("facebook") {
             NoticeKind::Chat
         } else if a.contains("screensketch") || a.contains("screenclipping") || n.app.to_lowercase().contains("snipping") {
             NoticeKind::Screenshot
@@ -259,14 +355,24 @@ impl NoticeInfo {
             file: None,
             thumb: None,
             file_size: String::new(),
+            phone_app: n.phone_app.clone(),
+            icon: match &n.phone_app {
+                Some(app) => phone_icon(app),
+                None => (!n.aumid.is_empty()).then(|| PathBuf::from(format!("shell:AppsFolder\\{}", n.aumid))),
+            },
         }
+    }
+
+    /// The name people know it by: the phone app, else the site, else the app.
+    pub fn source_name(&self) -> String {
+        self.phone_app.clone().or_else(|| self.site.as_ref().map(|s| s.trim_start_matches("www.").to_string())).unwrap_or_else(|| self.app.clone())
     }
 
     /// Whether "Open" can do something for this notification.
     pub fn openable(&self) -> bool {
         match self.kind {
             NoticeKind::Screenshot => self.file.is_some(),
-            NoticeKind::Chat => true,
+            NoticeKind::Chat | NoticeKind::Phone => true,
             NoticeKind::Browser => self.site.is_some(),
             NoticeKind::App => !self.aumid.is_empty(),
         }
@@ -331,7 +437,6 @@ pub struct App {
     /// Music ↔ lyrics layout morph (0 = music page, 1 = lyrics view).
     pub lyr_mix: Spring,
     /// Water reminder snoozed until this moment.
-    snooze_until: Option<Instant>,
     /// Timeline scrubbing: the bar being dragged (x, width in layout units) and the fraction.
     pub scrub: Option<(f32, f32, f32)>,
     /// Lyrics view: current line, the cascading scroll toward it (start, from, to, previous line)
@@ -378,6 +483,7 @@ pub struct App {
     last_bt: Option<Instant>,
     /// Audio endpoint name and when it was last announced (one jack reports several endpoints).
     last_audio: Option<(String, bool, Instant)>,
+    pending_audio: Option<(Instant, devices::Card)>,
     /// Demo-only event storm under test.
     storm: Option<Box<storm::Storm>>,
     /// Times the frame pump had to be restarted (reported by the storm test).
@@ -395,9 +501,14 @@ pub struct App {
     pub dot_pos: Spring,
     pub hits: Vec<(gfx::Rc, Act)>,
     pub settings: Settings,
-    pub water: Water,
+    /// Luma's reminders, water, focus/Pomodoro and timed tasks.
+    pub brain: luma::Brain,
+    /// Untimed to-dos (timed ones are Luma reminders).
     pub todo: Todo,
-    pub pomo: Pomo,
+    /// The Pomodoro page's chosen mode while nothing runs.
+    pub pomo_mode: Phase,
+    /// Ticks (500 ms) since start; the brain runs every fourth.
+    brain_ticks: u32,
     pub shelf: Shelf,
     pub drag_over: bool,
     /// Drag position in layout units and the glow that trails it.
@@ -414,15 +525,14 @@ pub struct App {
     brightness: Option<u32>,
     last_chat: Option<(String, Instant)>,
     /// Tasks whose start-time reminder already fired today: (title, day).
-    task_fired: std::collections::HashSet<(String, u32)>,
-    task_snooze: Option<(String, Instant)>,
     /// Water goal reached toast shown for this day.
-    goal_day: u32,
     /// Whether the current button press began outside the window (a drag coming in).
     press_known: bool,
     press_outside: bool,
     /// The notch has stepped aside (minimal sliver) because the user is working right below it.
     pub yielded: bool,
+    /// Hovering doesn't open the notch until then (just back from stepping aside).
+    no_hover_until: Option<Instant>,
     /// Last moment a reason to stay out of the way was seen, and since when the cursor has been
     /// working in the zone next to the notch.
     yield_seen: Instant,
@@ -449,6 +559,14 @@ pub struct App {
     /// Shell icons and size labels for shelf items; a None icon caches a failed lookup.
     shelf_icons: std::collections::HashMap<PathBuf, (Option<ID2D1Bitmap>, String)>,
     icons_pending: std::collections::HashSet<PathBuf>,
+    /// Icon colours, measured when an icon loads.
+    icon_tints: std::collections::HashMap<PathBuf, u32>,
+    /// Recent notifications, newest first; in memory only, gone when Islet closes.
+    pub history: VecDeque<NoticeInfo>,
+    pub history_unread: u32,
+    pub history_open: bool,
+    /// First row shown in the history list.
+    pub history_top: usize,
     pub lyrics: Arc<Mutex<Lyrics>>,
     pub power: Option<sys::Power>,
     layout: isize,
@@ -526,7 +644,6 @@ impl App {
             minimal_armed: false,
             lyr_user_at: None,
             lyr_mix: Spring::new(0.0, 170.0, 26.0),
-            snooze_until: None,
             scrub: None,
             lyr_idx: None,
             lyr_anim: None,
@@ -558,6 +675,7 @@ impl App {
             last_bt: None,
             device_queue: VecDeque::new(),
             last_audio: None,
+            pending_audio: None,
             storm: None,
             pump_stalls: 0,
             mouse: (-1.0, -1.0),
@@ -569,9 +687,10 @@ impl App {
             dot_pos: Spring::new(0.0, 230.0, 26.0),
             hits: Vec::new(),
             settings: Settings::load(),
-            water: Water::load(),
+            brain: if demo.is_none() { luma::Brain::open(chrono::Local::now()) } else { luma::Brain::demo(chrono::Local::now()) },
             todo: Todo::load(),
-            pomo: Pomo::new(),
+            pomo_mode: Phase::Focus,
+            brain_ticks: 0,
             shelf: Shelf::load(),
             drag_over: false,
             drag_pt: (0.0, 0.0),
@@ -581,12 +700,10 @@ impl App {
             loop_rect: None,
             brightness: None,
             last_chat: None,
-            task_fired: Default::default(),
-            task_snooze: None,
-            goal_day: 0,
             press_known: false,
             press_outside: false,
             yielded: false,
+            no_hover_until: None,
             yield_seen: Instant::now(),
             near_since: None,
             buttons_down: false,
@@ -602,6 +719,11 @@ impl App {
             art: None,
             shelf_icons: Default::default(),
             icons_pending: Default::default(),
+            icon_tints: Default::default(),
+            history: VecDeque::new(),
+            history_unread: 0,
+            history_open: false,
+            history_top: 0,
             lyrics,
             power: sys::power(),
             layout: sys::current_layout().0,
@@ -633,6 +755,7 @@ impl App {
             sys::spawn_tab_watch(self.hwnd.0 as isize);
             sys::spawn_focus_watch();
             self.poll_power();
+            self.take_over_from_luma();
         }
         // This timer owns coarse state (clock, reminder eligibility and toast
         // expiry); visual motion is driven separately by the vsync frame pump.
@@ -733,7 +856,7 @@ impl App {
     /// Target notch size for the current state.
     pub fn target(&self) -> [f32; 2] {
         // Stepping aside: only reminders that need an answer keep their size.
-        let urgent = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break));
+        let urgent = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Call));
         if self.yielded && self.mode == Mode::Compact && !urgent {
             return MINIMAL;
         }
@@ -756,14 +879,16 @@ impl App {
                     NOTICE_OPEN
                 } else if let Some(t) = &self.toast {
                     if t.kind == ToastKind::Message {
-                        MESSAGE_TOAST
-                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break | ToastKind::Task) {
+                        // A phone notification has one more line: the app's name.
+                        let phone = self.notice.as_ref().is_some_and(|n| n.phone_app.is_some());
+                        if phone { [MESSAGE_TOAST[0], MESSAGE_TOAST[1] + 12.0] } else { MESSAGE_TOAST }
+                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break) {
                         PHASE_TOAST
                     } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
                         WATER_TOAST
                     } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal) {
                         TALL_TOAST
-                    } else if t.kind == ToastKind::Water {
+                    } else if matches!(t.kind, ToastKind::Water | ToastKind::LumaApp | ToastKind::Call | ToastKind::Task | ToastKind::Remind(_) | ToastKind::HeadsUp) {
                         WATER_TOAST
                     } else if t.kind.tall() {
                         TALL_TOAST
@@ -860,6 +985,7 @@ impl App {
         self.sw.tune(k, c);
         self.sh.tune(k, c);
         if self.mode == Mode::Expanded && m != Mode::Expanded {
+            self.history_open = false;
             self.water_settings = false;
             self.todo_edit = false;
         }
@@ -943,7 +1069,7 @@ impl App {
                 }
             }
             moving |= self.lyr_mix.step(if self.lyrics_on && self.page == Page::Music && self.has_media() { 1.0 } else { 0.0 }, sub);
-            moving |= self.toggle_x.step(if self.water.on { 1.0 } else { 0.0 }, sub);
+            moving |= self.toggle_x.step(if self.brain.cfg.reminders.water.enabled { 1.0 } else { 0.0 }, sub);
             moving |= self.water_pulse.step(0.0, sub);
             moving |= self.dot_pos.step(self.dot_target, sub);
             for (sp, target) in self.hover.values_mut() {
@@ -970,17 +1096,22 @@ impl App {
     /// Looping visuals (the equalizer) that need frames even when no spring moves.
     fn continuous(&self) -> bool {
         self.effects()
-            || !self.hidden && self.pomo.running()
+            || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
     }
 
     /// Time-driven animations in progress (as opposed to the idle equalizer loop).
     fn effects(&self) -> bool {
-        let fresh = |t: &Toast| t.until.saturating_duration_since(Instant::now()) > Duration::from_millis(1300);
+        // A short toast animates while it has time left; a long-lived one (a card waiting for an
+        // answer) only while it arrives.
+        let fresh = |t: &Toast| t.until.saturating_duration_since(Instant::now()) > Duration::from_millis(1300) && t.born.elapsed() < Duration::from_secs(3);
         let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| t.elapsed() < Duration::from_millis(ms));
         let effects = recent(self.lyr_anim.map(|x| x.0), 1100)
             || recent(self.pill_prev.as_ref().map(|x| x.0), 450)
-            || self.toast.as_ref().is_some_and(|t| t.kind.tall() || fresh(t))
+            // Cards animate as they arrive (ripples, count-up, a few shakes); one left waiting for
+            // an answer then holds still instead of redrawing 60 times a second. The heads-up
+            // counts down to the end.
+            || self.toast.as_ref().is_some_and(|t| (t.kind.tall() && (t.born.elapsed() < Duration::from_secs(5) || t.kind == ToastKind::HeadsUp)) || fresh(t))
             || self.drag_over || self.ripple.is_some_and(|r| r.0.elapsed() < Duration::from_millis(3800));
         effects
     }
@@ -1012,7 +1143,9 @@ impl App {
             self.gfx.center_x = WIN_W / 2.0;
             if self.gfx.begin(area).is_ok() {
                 ui::draw(self);
-                let _ = self.gfx.end(self.hwnd, self.pos.0, self.pos.1);
+                if self.gfx.end(self.hwnd, self.pos.0, self.pos.1).is_err() {
+                    self.gfx.invalidate();
+                }
             }
         }
     }
@@ -1021,10 +1154,14 @@ impl App {
         // Device and reminder toasts linger (Nusa keeps them ~4 s / until answered).
         let life = match kind {
             ToastKind::Water => 12_000,
-            ToastKind::Focus | ToastKind::Break | ToastKind::Task => 60_000,
+            // Pomodoro phase notices (Luma moves on by itself); cards waiting for an answer are
+            // kept up by Luma instead (present_luma).
+            ToastKind::Focus | ToastKind::Break => 6_000,
+            ToastKind::Task | ToastKind::Call => 60_000,
             ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal => 2_600,
-            ToastKind::Bluetooth(_) | ToastKind::Device(_) | ToastKind::Notice => 4_000,
-            ToastKind::Message => 5_000,
+            ToastKind::Bluetooth(_) | ToastKind::Device(_) => 4_000,
+            ToastKind::Notice => reading_ms(6_000, title),
+            ToastKind::Message => reading_ms(8_000, title),
             _ => 1_800,
         };
         let now = Instant::now();
@@ -1093,6 +1230,12 @@ impl App {
 
     /// Mouse wheel over the lyrics view scrolls them; they glide back to the current line later.
     fn wheel(&mut self, notches: f32, ctrl: bool) {
+        if self.expanded() && self.history_open {
+            let last = self.history.len().saturating_sub(3);
+            self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
+            self.render();
+            return;
+        }
         if !(self.expanded() && self.page == Page::Music && self.lyr_mix.x > 0.5) {
             return;
         }
@@ -1235,10 +1378,17 @@ impl App {
                 }
                 self.kick();
             }
-        } else if self.yielded && now.duration_since(self.yield_seen) > Duration::from_millis(1000) && !(in_zone(cur) && !self.mouse_in) {
-            self.yielded = false;
-            self.kick();
+        } else if self.yielded && now.duration_since(self.yield_seen) > Duration::from_millis(1000) && !in_zone(cur) {
+            self.leave_yield();
         }
+    }
+
+    /// The notch comes back; a small overshoot right after must not open it.
+    fn leave_yield(&mut self) {
+        self.yielded = false;
+        self.no_hover_until = Some(Instant::now() + Duration::from_secs(2));
+        self.kick();
+        self.render();
     }
 
     fn poll_drag_zone(&mut self) {
@@ -1305,36 +1455,7 @@ impl App {
             unsafe {
                 let _ = SetWindowDisplayAffinity(self.hwnd, mode);
             }
-        }
-    }
-
-    /// "Task Time!" when a to-do with a start time is due (or its Later snooze ends).
-    fn check_tasks(&mut self, now: u32) {
-        let day = self.water.day;
-        if let Some((t, at)) = self.task_snooze.clone() {
-            if Instant::now() >= at {
-                self.task_snooze = None;
-                sound::play(sound::Chime::Soft);
-                self.toast(ToastKind::Task, "Task Time!", &t, None);
-            }
-        }
-        let due: Vec<String> = self
-            .todo
-            .tasks
-            .iter()
-            .filter(|t| t.done_day != day)
-            .filter_map(|t| {
-                let start = t.time.split('-').next()?.trim();
-                let (h, m) = start.split_once(':')?;
-                let min = h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?;
-                (min == now).then(|| t.title.clone())
-            })
-            .filter(|title| !self.task_fired.contains(&(title.clone(), day)))
-            .collect();
-        for title in due {
-            self.task_fired.insert((title.clone(), day));
-            sound::play(sound::Chime::Soft);
-            self.toast(ToastKind::Task, "Task Time!", &title, None);
+            self.gfx.invalidate();
         }
     }
 
@@ -1374,7 +1495,7 @@ impl App {
         self.last_chat = Some((sender.to_string(), Instant::now()));
         sound::play(sound::Chime::Soft);
         self.toast(ToastKind::Message, text, sender, None);
-        self.notice = Some(NoticeInfo {
+        self.keep_notice(NoticeInfo {
             kind: NoticeKind::Chat,
             app: "Messenger".into(),
             aumid: String::new(),
@@ -1386,7 +1507,22 @@ impl App {
             file: None,
             thumb: None,
             file_size: String::new(),
+            phone_app: None,
+            icon: None,
         });
+    }
+
+    /// The notification behind the current toast; it also goes into the history.
+    fn keep_notice(&mut self, info: NoticeInfo) {
+        self.history.push_front(info.clone());
+        self.history.truncate(HISTORY_MAX);
+        self.history_unread += 1;
+        self.notice = Some(info);
+    }
+
+    /// Highlight colour of a notification: the app's own, else its icon's.
+    pub fn notice_accent(&self, n: &NoticeInfo) -> u32 {
+        brand_colour(&n.source_name()).or_else(|| brand_colour(&n.app)).or_else(|| n.icon.as_ref().and_then(|p| self.icon_tints.get(p).copied())).unwrap_or(0x8E8E93)
     }
 
     fn show_device(&mut self, card: devices::Card) {
@@ -1410,6 +1546,8 @@ impl App {
     /// Device cards never replace each other: one arriving while another is still fresh (or
     /// while the widgets are open) waits its turn, and waiting cards play 1.5 s each.
     fn present_device(&mut self, c: DeviceCard) {
+        // Only another device card makes it wait; anything else (a reminder card comes back by
+        // itself) gives way.
         let fresh = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && t.born.elapsed() < DEVICE_TURN);
         if self.mode == Mode::Expanded || fresh || !self.device_queue.is_empty() {
             // The same device changing again: only its latest state is worth showing.
@@ -1440,6 +1578,7 @@ impl App {
 
     /// A headphone jack, USB audio device or speaker endpoint became available or went away.
     fn audio_changed(&mut self, c: sys::AudioChange) {
+        sys::timelog(&format!("audio name={:?} active={} form={} bluetooth={} path={:?}", c.name, c.active, c.form_factor, c.bluetooth, c.path));
         use devices::DeviceKind;
         let kind = match c.form_factor {
             3 => DeviceKind::Headphones,
@@ -1455,7 +1594,205 @@ impl App {
             return;
         }
         self.last_audio = Some((c.name.clone(), c.active, Instant::now()));
-        self.show_device(devices::Card { connected: c.active, kind, name: c.name, root: None, detail: String::new() });
+        // Held a moment: a Bluetooth device's own event may still be on its way.
+        self.pending_audio = Some((Instant::now(), devices::Card { connected: c.active, kind, name: c.name, root: None, detail: String::new() }));
+    }
+
+    // ------------------------------------------------------------ Luma
+
+    /// Islet's older data joins Luma's (once), and until the separate Luma app is off its
+    /// reminders wait, so nothing comes twice.
+    fn take_over_from_luma(&mut self) {
+        let dir = model::data_dir();
+        // Timed to-dos become Luma reminders; untimed ones stay to-dos.
+        let timed: Vec<(String, String)> = self.todo.tasks.iter().filter(|t| !t.time.is_empty() && t.done_day == 0).map(|t| (t.title.clone(), t.time.clone())).collect();
+        if !timed.is_empty() {
+            let _ = std::fs::copy(dir.join("todo.txt"), dir.join("todo.txt.bak"));
+            self.todo.tasks.retain(|t| t.time.is_empty());
+            self.todo.save();
+            for (title, time) in timed {
+                self.add_todo(&title, &time);
+            }
+        }
+        // Islet's own water counter is replaced by Luma's cups.
+        if dir.join("water.txt").exists() {
+            let _ = std::fs::rename(dir.join("water.txt"), dir.join("water.txt.bak"));
+        }
+        if self.settings.luma_app_off {
+            return;
+        }
+        self.brain.enabled = false;
+        let hwnd = self.hwnd.0 as isize;
+        std::thread::spawn(move || unsafe {
+            sys::name_thread("islet-luma-check");
+            let active = sys::luma_app_active();
+            let _ = PostMessageW(Some(HWND(hwnd as _)), WM_LUMAAPP, WPARAM(active as usize), LPARAM(0));
+        });
+    }
+
+    /// Runs Luma's ticker (every 2 s) and puts what it wants into the notch.
+    fn brain_tick(&mut self) {
+        let now = chrono::Local::now();
+        let idle = idle_seconds() as u64;
+        let window = unsafe { GetForegroundWindow() }.0 as isize;
+        let busy = self.demo.is_none() && (sys::busy() || sys::foreground_covers(self.monitor, self.hwnd));
+        let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
+        let events = self.brain.tick(now, idle, window, busy);
+        if !events.is_empty() {
+            self.kick();
+        }
+        for ev in events {
+            match ev {
+                luma::Event::HeadsUp(due, secs) => self.present_heads_up(&due, secs),
+                luma::Event::Show(due) => self.present_luma(&due),
+                luma::Event::Phase { resting, round, rounds, minutes } => {
+                    sound::play(sound::Chime::Soft);
+                    if resting {
+                        let sub = if minutes >= luma::focus::LONG_REST_MINUTES { "15 min, you earned it".to_string() } else { format!("{minutes} minute short break") };
+                        self.toast(ToastKind::Break, if minutes >= luma::focus::LONG_REST_MINUTES { "Long Break!" } else { "Break Time!" }, &sub, None);
+                    } else {
+                        self.toast(ToastKind::Focus, "Focus Time!", &format!("Back to work · round {round}/{rounds}"), None);
+                    }
+                }
+            }
+        }
+        if self.brain.timed_out(now) {
+            self.answer_luma(Outcome::Snooze, true);
+        }
+        // A reminder card covered by another toast (or the open widgets) comes back afterwards.
+        if self.toast.is_none() && self.mode != Mode::Expanded {
+            match self.brain.showing.as_ref().map(|s| (s.due.clone(), s.heads_up_until)) {
+                Some((due, Some(until))) => self.present_heads_up(&due, (until - now).num_seconds().max(1) as u32),
+                Some((due, None)) => self.present_luma(&due),
+                None => {}
+            }
+        }
+        if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
+            self.goal_toast();
+        }
+    }
+
+    fn goal_toast(&mut self) {
+        let l = self.brain.stats.water as f32 * self.brain.cfg.cup_ml as f32 / 1000.0;
+        self.toast(ToastKind::Goal, "Goal reached", &format!("{l:.1} L today"), Some(1.0));
+    }
+
+    /// The card for a reminder Luma wants answered. It stays until answered (or Luma's own
+    /// timeout), so its toast does not run out on its own.
+    pub fn present_luma(&mut self, due: &Due) {
+        let cfg = &self.brain.cfg;
+        let (kind, title, value) = match due {
+            Due::Builtin(CareKind::Water) => {
+                let sub = if self.brain.stats.water >= cfg.water_goal { "Only if you're thirsty".to_string() } else { format!("Stay hydrated! · {} ml", cfg.cup_ml) };
+                (ToastKind::Water, "Time to Drink".to_string(), sub)
+            }
+            Due::Builtin(CareKind::Stretch) => (ToastKind::Remind(CareKind::Stretch), "Stretch Time".into(), format!("3 moves · {} s", cfg.reminders.stretch.seconds * 3)),
+            Due::Builtin(CareKind::Eyes) => (ToastKind::Remind(CareKind::Eyes), "Rest Your Eyes".into(), format!("Look far away · {} s", cfg.reminders.eyes.seconds)),
+            Due::Builtin(CareKind::Breathe) => (ToastKind::Remind(CareKind::Breathe), "Breathe".into(), "4-4-4-4 · 1 min".into()),
+            Due::Builtin(CareKind::Sleep) => (ToastKind::Remind(CareKind::Sleep), "Bedtime".into(), format!("It's {} · time to rest", cfg.reminders.sleep.time)),
+            Due::Custom(id) => (ToastKind::Task, "Task Time!".into(), self.brain.task(id).map(|c| c.title.clone()).unwrap_or_default()),
+            Due::Focus(min) => (ToastKind::Focus, "Focus time's up!".into(), format!("{min} min · great work")),
+        };
+        if self.mode == Mode::Expanded {
+            return;
+        }
+        sound::play(sound::Chime::Soft);
+        self.toast(kind, &title, &value, None);
+        if let Some(t) = self.toast.as_mut().filter(|t| t.kind == kind) {
+            t.until = Instant::now() + Duration::from_secs(3600);
+            self.brain.card_shown(chrono::Local::now());
+        }
+    }
+
+    pub fn present_heads_up(&mut self, due: &Due, secs: u32) {
+        let what = match due {
+            Due::Builtin(CareKind::Water) => "Water".to_string(),
+            Due::Builtin(CareKind::Stretch) => "Stretch".to_string(),
+            Due::Builtin(CareKind::Eyes) => "Eye break".to_string(),
+            Due::Builtin(CareKind::Breathe) => "Breathing".to_string(),
+            Due::Builtin(CareKind::Sleep) => "Bedtime".to_string(),
+            Due::Custom(id) => self.brain.task(id).map(|c| c.title.clone()).unwrap_or_default(),
+            Due::Focus(_) => "Focus".to_string(),
+        };
+        if self.mode == Mode::Expanded {
+            return;
+        }
+        self.toast(ToastKind::HeadsUp, &what, "Coming up", None);
+        if let Some(t) = self.toast.as_mut().filter(|t| t.kind == ToastKind::HeadsUp) {
+            t.until = Instant::now() + Duration::from_secs(secs as u64 + 2);
+        }
+    }
+
+    /// The reminder card was answered. "Start" on a timed task begins its focus session.
+    fn answer_luma(&mut self, outcome: Outcome, timed_out: bool) {
+        let now = chrono::Local::now();
+        let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
+        let water = matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Builtin(CareKind::Water)));
+        if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
+            self.brain.start_focus(minutes, &label, now);
+        }
+        if self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus)) {
+            self.dismiss_toast();
+        }
+        if water && outcome == Outcome::Done {
+            self.water_pulse.v += 7.5;
+            if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
+                self.goal_toast();
+            }
+        }
+        self.kick();
+    }
+
+    /// The Focus-styled card is the time's-up card of a session (not a Pomodoro phase notice).
+    pub fn focus_end_card(&self) -> bool {
+        matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Focus(_)))
+    }
+
+    /// The Pomodoro page's view: (seconds left, seconds in this stretch, running, label).
+    pub fn pomo_view(&self) -> (f64, f64, bool, String) {
+        let now = chrono::Local::now();
+        match &self.brain.focus {
+            Some(f) => {
+                let left = f.left(now).num_milliseconds() as f64 / 1000.0;
+                let total = luma::scheduler::minutes(f.minutes).num_seconds() as f64;
+                let label = match f.pomodoro {
+                    Some(p) if p.resting && f.minutes >= luma::focus::LONG_REST_MINUTES => "Long break".to_string(),
+                    Some(p) if p.resting => "Short break".to_string(),
+                    Some(p) if p.rounds > 1 => format!("Focus · {}/{}", p.round, p.rounds),
+                    _ if !f.label.is_empty() => f.label.clone(),
+                    _ => "Focus time".to_string(),
+                };
+                (left, total.max(1.0), !f.paused(), label)
+            }
+            None => {
+                let secs = self.pomo_mode.secs();
+                (secs, secs, false, self.pomo_mode.label().to_string())
+            }
+        }
+    }
+
+    /// The To-do page's list: today's timed tasks (Luma reminders) and untimed to-dos, open
+    /// ones first.
+    pub fn todo_items(&self) -> Vec<TodoItem> {
+        let now = chrono::Local::now();
+        let today = model::now().ymd();
+        let mut v: Vec<TodoItem> = self
+            .brain
+            .tasks_today(now)
+            .into_iter()
+            .map(|(c, done)| {
+                let time = if c.start && c.minutes > 0 {
+                    let t = luma::scheduler::parse_hm(&c.time).map(|t| t + chrono::TimeDelta::minutes(c.minutes as i64));
+                    format!("{}-{}", c.time, t.map(|t| t.format("%H:%M").to_string()).unwrap_or_default())
+                } else {
+                    c.time.clone()
+                };
+                TodoItem { key: TodoKey::Timed(c.id.clone()), title: c.title.clone(), time, done }
+            })
+            .collect();
+        v.extend(self.todo.tasks.iter().enumerate().map(|(i, t)| TodoItem { key: TodoKey::Untimed(i), title: t.title.clone(), time: String::new(), done: t.done_day == today }));
+        v.sort_by_key(|t| t.done);
+        v
     }
 
     /// The current toast is a notification that can grow into its detail view.
@@ -1465,7 +1802,13 @@ impl App {
 
     fn open_notice(&mut self) {
         let Some(n) = &self.notice else { return };
+        Self::open_target(n);
+        self.close_notice();
+    }
+
+    fn open_target(n: &NoticeInfo) {
         match n.kind {
+            NoticeKind::Phone => notify::open_phone(n.id),
             NoticeKind::Screenshot => {
                 if let Some(f) = &n.file {
                     sys::shell_open(f.as_os_str());
@@ -1480,7 +1823,6 @@ impl App {
             }
             NoticeKind::App => sys::shell_open(std::ffi::OsStr::new(&format!("shell:AppsFolder\\{}", n.aumid))),
         }
-        self.close_notice();
     }
 
     fn close_notice(&mut self) {
@@ -1499,7 +1841,9 @@ impl App {
 
     /// A toast with its own buttons stays put under the cursor instead of opening the notch.
     fn interactive_toast(&self) -> bool {
-        self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Task))
+        self.toast.as_ref().is_some_and(|t| {
+            matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Task | ToastKind::Remind(_) | ToastKind::HeadsUp | ToastKind::LumaApp | ToastKind::Call)
+        })
     }
 
     /// Tracks the cursor during a drag (screen pixels).
@@ -1565,11 +1909,9 @@ impl App {
     }
 
     fn open_form(&mut self, index: Option<usize>) {
-        let (title, digits) = index
-            .and_then(|i| self.todo.tasks.get(i))
-            .map(|t| (t.title.clone(), t.time.chars().filter(char::is_ascii_digit).collect()))
-            .unwrap_or_default();
-        self.form = Some(Form { index, title, digits, field: 0 });
+        let item = index.and_then(|i| self.todo_items().into_iter().nth(i));
+        let (title, digits) = item.as_ref().map(|t| (t.title.clone(), t.time.chars().filter(char::is_ascii_digit).collect())).unwrap_or_default();
+        self.form = Some(Form { key: item.map(|t| t.key), title, digits, field: 0 });
         self.set_noactivate(false);
         unsafe {
             let _ = SetForegroundWindow(self.hwnd);
@@ -1583,17 +1925,35 @@ impl App {
             if save && !title.is_empty() {
                 let time = ui::time_mask(&f.digits).trim_end_matches(['_', ':', '-']).to_string();
                 let time = if f.digits.len() >= 4 { time } else { String::new() };
-                match f.index {
-                    Some(i) if i < self.todo.tasks.len() => {
-                        self.todo.tasks[i].title = title;
-                        self.todo.tasks[i].time = time;
+                // An edited row is replaced: it may move between timed and untimed.
+                match &f.key {
+                    Some(TodoKey::Timed(id)) => self.brain.delete_task(id),
+                    Some(TodoKey::Untimed(i)) if *i < self.todo.tasks.len() => {
+                        self.todo.tasks.remove(*i);
+                        self.todo.save();
                     }
-                    _ => self.todo.tasks.push(model::Task { title, done_day: 0, time }),
+                    _ => {}
                 }
-                self.todo.save();
+                self.add_todo(&title, &time);
             }
         }
         self.set_noactivate(true);
+    }
+
+    /// "HH:MM" or "HH:MM-HH:MM" makes a Luma reminder (a range: "Start" focuses that long);
+    /// no time keeps it an untimed to-do.
+    fn add_todo(&mut self, title: &str, time: &str) {
+        let (start, end) = time.split_once('-').unwrap_or((time, ""));
+        match luma::scheduler::parse_hm(start) {
+            Some(s) => {
+                let minutes = luma::scheduler::parse_hm(end).map(|e| (e - s).num_minutes().rem_euclid(24 * 60) as u32).unwrap_or(0);
+                self.brain.add_task(title, start, minutes, chrono::Local::now());
+            }
+            None => {
+                self.todo.tasks.push(model::Task { title: title.to_string(), done_day: 0, time: String::new() });
+                self.todo.save();
+            }
+        }
     }
 
     fn media_cmd(&self, c: Cmd) {
@@ -1603,7 +1963,6 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
-        let clock = self.clock();
         match a {
             Act::PagePrev => self.go_page(self.page.prev()),
             Act::PageNext => self.go_page(self.page.next()),
@@ -1631,28 +1990,93 @@ impl App {
                 self.media_cmd(Cmd::Seek(secs));
             }
             Act::PomoToggle => {
-                if self.pomo.running() {
-                    self.pomo.pause();
+                let now = chrono::Local::now();
+                if self.brain.focus.is_some() {
+                    self.brain.toggle_pause(now);
+                } else if self.pomo_mode == Phase::Focus {
+                    self.brain.start_pomodoro(25, 5, 4, "", now);
                 } else {
-                    self.pomo.start();
+                    self.brain.start_rest((self.pomo_mode.secs() / 60.0) as u32, now);
                 }
             }
-            Act::PomoReset => {
-                self.pomo.reset();
-                self.pomo.task = None;
+            Act::PomoReset => self.brain.stop_focus(chrono::Local::now()),
+            Act::PomoPhase(p) => {
+                if self.brain.focus.is_none() {
+                    self.pomo_mode = p;
+                }
             }
-            Act::PomoPhase(p) => self.pomo.set_phase(p),
             Act::Drank => {
-                self.water.drank(clock.hour as usize);
+                let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
+                self.brain.drink(chrono::Local::now());
+                if matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Water)) {
+                    self.dismiss_toast();
+                }
+                if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
+                    self.goal_toast();
+                }
                 self.water_pulse.v += 7.5;
                 self.kick();
             }
+            // The phase card's button: "+5 min" on a time's-up card, otherwise skip the break or
+            // pause the round.
             Act::ToastStartPhase => {
-                self.pomo.start();
+                let now = chrono::Local::now();
+                if self.focus_end_card() {
+                    self.answer_luma(Outcome::Snooze, false);
+                } else {
+                    match self.toast.as_ref().map(|t| t.kind) {
+                        Some(ToastKind::Break) => self.brain.skip_phase(now),
+                        _ => self.brain.toggle_pause(now),
+                    }
+                    self.dismiss_toast();
+                }
+            }
+            Act::ToastDismiss => {
+                if self.focus_end_card() {
+                    self.answer_luma(Outcome::Done, false);
+                } else {
+                    self.dismiss_toast();
+                }
+            }
+            Act::LumaDone => self.answer_luma(Outcome::Done, false),
+            Act::LumaLater => self.answer_luma(Outcome::Snooze, false),
+            Act::LumaNow => {
+                if let Some(due) = self.brain.heads_up_now() {
+                    self.dismiss_toast();
+                    self.present_luma(&due);
+                }
+            }
+            Act::LumaAppOff => {
+                self.dismiss_toast();
+                std::thread::spawn(sys::turn_off_luma_app);
+                self.settings.luma_app_off = true;
+                self.settings.save();
+                self.brain.enabled = true;
+            }
+            Act::NoticeOpen => self.open_notice(),
+            // Islet can't take the call itself: the app comes up to answer it there.
+            Act::CallAccept => {
+                if let Some(n) = &self.notice {
+                    Self::open_target(n);
+                }
                 self.dismiss_toast();
             }
-            Act::ToastDismiss => self.dismiss_toast(),
-            Act::NoticeOpen => self.open_notice(),
+            Act::CallDecline => self.dismiss_toast(),
+            Act::History(on) => {
+                self.history_open = on;
+                self.history_top = 0;
+                self.history_unread = 0;
+            }
+            Act::HistoryClear => {
+                self.history.clear();
+                self.history_open = false;
+            }
+            Act::HistoryOpen(i) => {
+                if let Some(n) = self.history.get(i) {
+                    Self::open_target(n);
+                }
+                self.set_mode(Mode::Compact);
+            }
             Act::DeviceOpen => {
                 if let Some(root) = self.device_root.take() {
                     sys::shell_open(std::ffi::OsStr::new(&root));
@@ -1660,77 +2084,62 @@ impl App {
                 self.dismiss_toast();
             }
             Act::NoticeClose => self.close_notice(),
-            Act::TaskLater => {
-                if let Some(t) = self.toast.as_ref().map(|t| t.value.clone()) {
-                    self.task_snooze = Some((t, Instant::now() + Duration::from_secs(10 * 60)));
-                }
-                self.dismiss_toast();
-            }
-            Act::TaskStart => {
-                if let Some(t) = self.toast.as_ref().map(|t| t.value.clone()) {
-                    self.pomo.set_phase(Phase::Focus);
-                    self.pomo.task = Some(t);
-                    self.pomo.start();
-                }
-                self.dismiss_toast();
-            }
-            Act::ToastDrank => {
-                self.water.drank(clock.hour as usize);
-                self.water_pulse.v += 7.5;
-                self.kick();
-                self.dismiss_toast();
-            }
-            Act::ToastSnooze => {
-                self.snooze_until = Some(Instant::now() + Duration::from_secs(10 * 60));
-                self.dismiss_toast();
-            }
             Act::WaterOn => {
-                self.water.on = !self.water.on;
-                self.water.save();
+                let on = !self.brain.cfg.reminders.water.enabled;
+                self.brain.set_water_enabled(on, chrono::Local::now());
             }
             Act::WaterSub(s) => self.water_sub = s,
             Act::WaterSettings(on) => self.water_settings = on,
-            Act::WaterReset => self.water.reset(),
+            Act::WaterReset => self.brain.reset_water(),
             Act::Bottle(d) => {
-                let i = model::BOTTLES.iter().position(|&b| b == self.water.bottle).unwrap_or(2) as i32;
-                let i = (i + d).clamp(0, model::BOTTLES.len() as i32 - 1) as usize;
-                self.water.bottle = model::BOTTLES[i];
-                self.water.inb = self.water.inb.min(self.water.bottle);
-                self.water.save();
+                // A cup's size; the goal in litres stays, so the cups a day follow.
+                let cfg = &mut self.brain.cfg;
+                let litres = cfg.water_goal * cfg.cup_ml;
+                let i = model::CUPS.iter().position(|&b| b == cfg.cup_ml).unwrap_or(2) as i32;
+                cfg.cup_ml = model::CUPS[(i + d).clamp(0, model::CUPS.len() as i32 - 1) as usize];
+                cfg.water_goal = ((litres as f32 / cfg.cup_ml as f32).round() as u32).clamp(1, 20);
+                self.brain.save_config();
             }
             Act::Goal(g) => {
-                self.water.goal = g;
-                self.water.save();
-            }
-            Act::Start(d) => {
-                let s = (self.water.start as i32 + d * 60).clamp(0, self.water.end as i32 - 60);
-                self.water.start = s as u32;
-                self.water.save();
+                let cfg = &mut self.brain.cfg;
+                cfg.water_goal = ((g as f32 / cfg.cup_ml as f32).round() as u32).clamp(1, 20);
+                self.brain.save_config();
             }
             Act::End(d) => {
-                let e = (self.water.end as i32 + d * 60).clamp(self.water.start as i32 + 60, 24 * 60);
-                self.water.end = e as u32;
-                self.water.save();
+                // Bedtime, which water is spread out to (and the bedtime reminder uses).
+                let cfg = &mut self.brain.cfg;
+                if let Some(t) = luma::scheduler::parse_hm(&cfg.reminders.sleep.time) {
+                    cfg.reminders.sleep.time = (t + chrono::TimeDelta::minutes(d as i64 * 30)).format("%H:%M").to_string();
+                    self.brain.save_config();
+                }
             }
             Act::TodoAdd => self.open_form(None),
             Act::TodoEditMode => {
-                if !self.todo.tasks.is_empty() {
+                if !self.todo_items().is_empty() {
                     self.todo_edit = !self.todo_edit;
                 }
             }
             Act::TodoToggle(i) => {
                 if self.todo_edit {
                     self.open_form(Some(i));
-                } else {
-                    self.todo.toggle(i);
+                } else if let Some(item) = self.todo_items().into_iter().nth(i) {
+                    match item.key {
+                        TodoKey::Timed(id) => self.brain.set_task_done(&id, !item.done),
+                        TodoKey::Untimed(i) => self.todo.toggle(i),
+                    }
                 }
             }
             Act::TodoDelete(i) => {
-                if i < self.todo.tasks.len() {
-                    self.todo.tasks.remove(i);
-                    self.todo.save();
+                if let Some(item) = self.todo_items().into_iter().nth(i) {
+                    match item.key {
+                        TodoKey::Timed(id) => self.brain.delete_task(&id),
+                        TodoKey::Untimed(i) => {
+                            self.todo.tasks.remove(i);
+                            self.todo.save();
+                        }
+                    }
                 }
-                if self.todo.tasks.is_empty() {
+                if self.todo_items().is_empty() {
                     self.todo_edit = false;
                 }
             }
@@ -1761,15 +2170,6 @@ impl App {
         self.render();
     }
 
-    fn announce_phase(&mut self, p: Phase) {
-        sound::play(sound::Chime::Soft);
-        match p {
-            Phase::Focus => self.toast(ToastKind::Focus, "Focus Time!", "Back to work, 25 min", None),
-            Phase::Short => self.toast(ToastKind::Break, "Break Time!", "5 minute short break", None),
-            Phase::Long => self.toast(ToastKind::Break, "Long Break!", "15 min, you earned it", None),
-        }
-    }
-
     fn tick(&mut self) {
         // An animation must get frames; one stalled mid-way in a storm test (frozen half-size
         // notch), so a missing frame for this long restarts the pump.
@@ -1794,37 +2194,15 @@ impl App {
         if self.demo.is_none() {
             self.watch();
         }
-        if let Some(p) = self.pomo.tick() {
-            self.announce_phase(p);
+        if self.pending_audio.as_ref().is_some_and(|(t, _)| t.elapsed() >= Duration::from_secs(2)) {
+            if let Some((_, card)) = self.pending_audio.take().filter(|_| !self.last_bt.is_some_and(|t| t.elapsed() < Duration::from_secs(5))) {
+                self.show_device(card);
+            }
         }
         let clock = self.clock();
-        self.water.roll_day();
-        if self.snooze_until.is_some_and(|t| Instant::now() >= t) {
-            self.snooze_until = None;
-            let ml = self.water.each();
-            sound::play(sound::Chime::Soft);
-            self.toast(ToastKind::Water, "Time to Drink", &format!("Stay hydrated! · {ml} ml"), None);
-        }
-        if self.demo.is_none() {
-            self.check_tasks(clock.minutes());
-            if self.water.goal > 0 && self.water.taken >= self.water.goal && self.goal_day != self.water.day && self.water.taken > 0 {
-                self.goal_day = self.water.day;
-                let l = self.water.taken as f32 / 1000.0;
-                self.toast(ToastKind::Goal, "Goal reached", &format!("{l:.1} L today"), Some(1.0));
-            }
-        }
-        if self.demo.is_none() && idle_seconds() < 300 {
-            match self.water.check_due(clock.minutes()) {
-                Some(WaterAlert::Drink(ml)) => {
-                    sound::play(sound::Chime::Soft);
-                    self.toast(ToastKind::Water, "Time to Drink", &format!("Stay hydrated! · {ml} ml"), None);
-                }
-                Some(WaterAlert::Refill) => {
-                    sound::play(sound::Chime::Soft);
-                    self.toast(ToastKind::Water, "Time to Refill", "Your bottle is probably empty", None);
-                }
-                None => {}
-            }
+        self.brain_ticks = self.brain_ticks.wrapping_add(1);
+        if self.brain_ticks % 4 == 0 {
+            self.brain_tick();
         }
         if !self.notice_toast() {
             self.toast_open = false;
@@ -1837,8 +2215,8 @@ impl App {
         }
         // Waiting device cards play once the current card is done (or the widgets closed).
         let device_done = match &self.toast {
-            None => true,
-            Some(t) => matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && Instant::now() >= t.until,
+            Some(t) if matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) => Instant::now() >= t.until,
+            _ => true,
         };
         if device_done && self.mode != Mode::Expanded {
             if let Some(c) = self.device_queue.pop_front() {
@@ -1876,6 +2254,8 @@ impl App {
         // a minute (a full redraw twice a second was most of Islet's idle CPU).
         if clock.minutes() != self.drawn_minute {
             self.drawn_minute = clock.minutes();
+            // Also heals the image if Windows lost it some way nothing reported.
+            self.gfx.invalidate();
             self.render();
         }
     }
@@ -1913,6 +2293,8 @@ impl App {
                 let _ = ShowWindow(self.hwnd, if cover { SW_HIDE } else { SW_SHOWNOACTIVATE });
             }
             if !cover {
+                // Windows may have dropped the hidden window's image.
+                self.gfx.invalidate();
                 self.render();
             }
         }
@@ -1932,12 +2314,11 @@ impl App {
             unsafe {
                 let _ = TrackMouseEvent(&mut tme);
             }
-            if self.yielded {
-                // Resting on the sliver brings the notch back.
-                self.yielded = false;
-                self.kick();
-            }
-            if self.mode == Mode::Compact && self.notice_toast() {
+            // Brushing the sliver does nothing: the pointer is usually on its way to something
+            // just below it. It comes back when the pointer leaves, or on a click.
+            let held = self.yielded || self.no_hover_until.is_some_and(|t| Instant::now() < t);
+            if held {
+            } else if self.mode == Mode::Compact && self.notice_toast() {
                 // A resting cursor grows the notification instead of opening the widgets.
                 self.hover_anchor = (x, y);
                 unsafe { SetTimer(Some(self.hwnd), T_HOVER, 90, None) };
@@ -2009,6 +2390,10 @@ impl App {
             return;
         }
         if !self.expanded() {
+            if self.yielded && !self.interactive_toast() {
+                self.leave_yield();
+                return;
+            }
             if self.notice_toast() {
                 if !self.toast_open {
                     self.toast_open = true;
@@ -2258,12 +2643,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 n.thumb = img.and_then(|(w, h, px)| a.gfx.bitmap(w, h, &px));
                 n.file = Some(path);
                 n.file_size = size;
+                if let Some(h) = a.history.iter_mut().find(|h| h.id == id) {
+                    *h = n.clone();
+                }
                 a.render();
+            }
+        }
+        // A call's notification left: answered, declined or missed.
+        WM_NOTICEGONE => {
+            if a.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) && a.notice.as_ref().is_some_and(|n| n.id == wp.0 as u32) {
+                a.dismiss_toast();
             }
         }
         WM_ICON => {
             let b = Box::from_raw(lp.0 as *mut (PathBuf, Option<(u32, u32, Vec<u8>)>, String));
             let (path, img, size) = *b;
+            if let Some(c) = img.as_ref().and_then(|(_, _, px)| icon_colour(px)) {
+                a.icon_tints.insert(path.clone(), c);
+            }
             let bmp = img.and_then(|(w, h, px)| a.gfx.bitmap(w, h, &px));
             a.icons_pending.remove(&path);
             a.shelf_icons.insert(path, (bmp, size));
@@ -2318,18 +2715,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // Title row: sender (or app); second row: the message, else the app name.
             let body = if n.body.is_empty() { n.app.clone() } else { n.body.clone() };
             let info = NoticeInfo::of(&n);
+            sys::timelog(&format!("shown aumid={} lines_title={} lines_body={}", n.aumid, n.title.chars().count(), n.body.chars().count()));
             if info.kind == NoticeKind::Screenshot {
                 sys::find_screenshot(a.hwnd, n.id, (240.0 * a.gfx.scale) as i32);
             }
-            if n.source == Some("facebook") {
+            if n.call {
+                sound::play(sound::Chime::Alert);
+                a.toast(ToastKind::Call, &n.phone_app.clone().unwrap_or_else(|| n.app.clone()), &n.title, None);
+            } else if info.kind == NoticeKind::Phone {
+                // The same message may also show as a browser tab title.
+                a.last_chat = Some((n.title.clone(), Instant::now()));
+                sound::play(sound::Chime::Soft);
+                a.toast(ToastKind::Message, &n.body, &n.title, None);
+            } else if n.source == Some("facebook") {
                 a.last_chat = None;
                 a.chat_message(&n.title, &body);
+                // The Windows notification carries the id and the content: it replaces the entry.
+                a.history.pop_front();
+                a.history_unread = a.history_unread.saturating_sub(1);
             } else {
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Notice, &body, &n.title, None);
             }
-            // The Windows notification carries the id (and, for chats, the content).
-            a.notice = Some(info);
+            a.keep_notice(info);
             if a.settings.hide_banners {
                 sys::hide_banner(&n.aumid);
             }
@@ -2339,6 +2747,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let state = if c.connected { "Connected" } else { "Disconnected" };
             let level = c.battery.filter(|_| c.connected).map(|b| b as f32 / 100.0);
             a.last_bt = Some(Instant::now());
+            sys::timelog(&format!("bluetooth name={:?} connected={} kind={:?} battery={:?}", c.name, c.connected, c.kind, c.battery));
             a.present_device(DeviceCard { kind: ToastKind::Bluetooth(c.connected), name: c.name.clone(), sub: state.into(), level, device: c.kind, root: None });
         }
         WM_DEVICECHANGE => {
@@ -2351,6 +2760,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             return LRESULT(1);
         }
+        WM_LUMAAPP => {
+            if wp.0 != 0 {
+                a.toast(ToastKind::LumaApp, "Luma lives here now", "Turn the old Luma app off?", None);
+                if let Some(t) = a.toast.as_mut() {
+                    t.until = Instant::now() + Duration::from_secs(60);
+                }
+            } else {
+                a.settings.luma_app_off = true;
+                a.settings.save();
+                a.brain.enabled = true;
+            }
+        }
         WM_AUDIODEV => {
             if lp.0 == 0 {
                 // The default output changed: follow its volume.
@@ -2360,14 +2781,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.audio_changed(*b);
             }
         }
-        WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
+        WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE | WM_DWMCOMPOSITIONCHANGED => {
             a.place();
+            a.gfx.invalidate();
             a.render();
             if msg == WM_DPICHANGED {
                 return LRESULT(0);
             }
         }
+        // Luma's clocks survive a restart or log-off (a short one picks up where it left off).
+        WM_ENDSESSION if wp.0 != 0 => a.brain.save_schedule(chrono::Local::now()),
         WM_DESTROY => {
+            a.brain.save_schedule(chrono::Local::now());
             a.tray(NIM_DELETE);
             let _ = RevokeDragDrop(hwnd);
             PostQuitMessage(0);
@@ -2385,6 +2810,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     // Demo states start from empty personal data so captures are reproducible.
     a.shelf.items = kv.get("shelf").map(|v| v.split('|').map(PathBuf::from).collect()).unwrap_or_default();
     a.todo.tasks.clear();
+    a.brain.enabled = false;
     a.settings.minimal = kv.get("minimal") == Some(&"1");
     a.minimal_armed = a.settings.minimal;
     a.settings.pet = kv.get("pet") == Some(&"1");
@@ -2400,13 +2826,6 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.blob.0.x = x;
         a.blob.1.x = y;
     }
-    a.water.taken = 0;
-    a.water.hours = [0; 24];
-    a.water.goal = 2000;
-    a.water.bottle = 500;
-    a.water.start = 8 * 60;
-    a.water.end = 17 * 60;
-    a.water.on = true;
     {
         let mut m = a.media.lock().unwrap();
         if let Some(t) = kv.get("title") {
@@ -2459,13 +2878,10 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     // "todos=go@16:54-00:00~Read~Gym@18:00-19:30": tasks for screenshots.
     if let Some(list) = kv.get("todos") {
-        a.todo.tasks = list
-            .split('~')
-            .map(|t| {
-                let (title, time) = t.split_once('@').unwrap_or((t, ""));
-                model::Task { title: title.to_string(), done_day: 0, time: time.to_string() }
-            })
-            .collect();
+        for t in list.split('~') {
+            let (title, time) = t.split_once('@').unwrap_or((t, ""));
+            a.add_todo(title, time);
+        }
     }
     if let Some(ml) = kv.get("water") {
         a.toast = Some(Toast {
@@ -2518,9 +2934,81 @@ fn demo_setup(a: &mut App, spec: &str) {
             until: Instant::now() + Duration::from_secs(3600),
         });
     }
+    // "phone=Zalo|Minh Anh|Text": a phone notification; "history=1": some past notifications.
+    let demo_notice = |a: &mut App, app: &str, title: &str, body: &str| {
+        let n = notify::Notice { app: "Phone Link".into(), title: title.into(), body: body.into(), aumid: "Microsoft.YourPhone_8wekyb3d8bbwe!App".into(), source: None, site: None, id: 0, phone_app: Some(app.into()), call: false };
+        a.keep_notice(NoticeInfo::of(&n));
+    };
+    if kv.get("history") == Some(&"1") {
+        for (app, title, body) in [("Shopee", "Đơn hàng", "Đơn hàng của bạn đang được giao"), ("YouTube", "Sơn Tùng M-TP", "vừa đăng video mới"), ("Messenger", "Denis", "Tối nay đi ăn không?"), ("Zalo", "Minh Anh", "Mai họp lúc mấy giờ?")] {
+            demo_notice(a, app, title, body);
+        }
+    }
+    if let Some(p) = kv.get("phone").map(|v| v.split('|').collect::<Vec<_>>()) {
+        demo_notice(a, p[0], p[1], p.get(2).unwrap_or(&""));
+        a.toast = Some(Toast {
+            born: Instant::now(),
+            kind: ToastKind::Message,
+            title: p.get(2).unwrap_or(&"").to_string(),
+            value: p[1].to_string(),
+            level: None,
+            until: Instant::now() + Duration::from_secs(3600),
+        });
+    }
+    // "call=Zalo|Minh Anh": an incoming call.
+    if let Some(p) = kv.get("call").map(|v| v.split('|').collect::<Vec<_>>()) {
+        demo_notice(a, p[0], p[1], "");
+        a.toast = Some(Toast {
+            born: Instant::now(),
+            kind: ToastKind::Call,
+            title: p[0].to_string(),
+            value: p[1].to_string(),
+            level: None,
+            until: Instant::now() + Duration::from_secs(3600),
+        });
+    }
+    if kv.get("history_open") == Some(&"1") {
+        a.history_open = true;
+    }
+    // "luma=water|stretch|eyes|breathe|sleep|task|headsup|focusend|app": Luma's cards.
+    if let Some(v) = kv.get("luma") {
+        let now = chrono::Local::now();
+        let due = match *v {
+            "water" => Some(Due::Builtin(CareKind::Water)),
+            "stretch" => Some(Due::Builtin(CareKind::Stretch)),
+            "eyes" => Some(Due::Builtin(CareKind::Eyes)),
+            "breathe" => Some(Due::Builtin(CareKind::Breathe)),
+            "sleep" => Some(Due::Builtin(CareKind::Sleep)),
+            "focusend" => Some(Due::Focus(100)),
+            "task" | "headsup" => {
+                a.brain.add_task("IELTS reading", "20:06", 45, now);
+                a.brain.cfg.custom.last().map(|c| Due::Custom(c.id.clone()))
+            }
+            _ => None,
+        };
+        match (*v, due) {
+            ("headsup", Some(due)) => {
+                a.brain.showing = Some(luma::Showing { due: due.clone(), heads_up_until: Some(now + chrono::TimeDelta::seconds(8)), card_at: None });
+                a.present_heads_up(&due, 3600);
+            }
+            (_, Some(due)) => {
+                a.brain.showing = Some(luma::Showing { due: due.clone(), heads_up_until: None, card_at: None });
+                a.present_luma(&due);
+            }
+            ("app", None) => a.toast(ToastKind::LumaApp, "Luma lives here now", "Turn the old Luma app off?", None),
+            _ => {}
+        }
+        if let Some(t) = a.toast.as_mut() {
+            t.until = Instant::now() + Duration::from_secs(3600);
+        }
+    }
     if kv.get("pomo_run") == Some(&"1") {
-        a.pomo.remaining = kv.get("pomo_left").and_then(|v| v.parse().ok()).unwrap_or(1408.0);
-        a.pomo.start();
+        let left: f64 = kv.get("pomo_left").and_then(|v| v.parse().ok()).unwrap_or(1408.0);
+        let now = chrono::Local::now();
+        a.brain.start_pomodoro(25, 5, 4, "", now);
+        if let Some(f) = a.brain.focus.as_mut() {
+            f.set_left(chrono::TimeDelta::milliseconds((left * 1000.0) as i64), now);
+        }
     }
     // "bt=Name" with "bt_kind=mouse|keyboard|speaker|headset|phone|gamepad" and "bt_batt=0.02".
     let kind_of = |k: &str| match k {
@@ -2594,6 +3082,8 @@ fn demo_setup(a: &mut App, spec: &str) {
             source: None,
             site: p.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
             id: 0,
+            phone_app: None,
+            call: false,
         };
         a.toast = Some(Toast {
             born: Instant::now() - Duration::from_secs(5),
@@ -2634,6 +3124,10 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let demo_spec = std::env::var("ISLET_DEMO").ok();
+        // Fast-time test runs (1 minute = 2 s) stay silent.
+        if std::env::var_os("ISLET_FAST").is_some() {
+            sound::MUTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mutex_name = if demo_spec.is_some() { w!("Local\\Islet.Demo") } else { w!("Local\\Islet.SingleInstance") };
         let _mutex = CreateMutexW(None, true, mutex_name);
         if GetLastError() == ERROR_ALREADY_EXISTS {

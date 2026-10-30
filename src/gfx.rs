@@ -197,6 +197,12 @@ impl Gfx {
 
     /// Starts a frame that redraws only `area` (layout units) plus whatever the previous
     /// frame covered, so small notch states don't repaint and recomposite the whole window.
+    /// Forgets what the window shows: the next frame redraws and sends all of it. For when
+    /// Windows may have dropped the window's image (shown again, display change, failed update).
+    pub fn invalidate(&mut self) {
+        self.last_dirty = None;
+    }
+
     pub unsafe fn begin(&mut self, area: Rc) -> Result<()> {
         let s = self.scale;
         let cur = RECT {

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, PostMessageW, ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
 
 use crate::devices::{Card, DeviceKind};
 use crate::{App, Mode, ToastKind};
@@ -103,6 +103,11 @@ impl App {
                 self.set_mode(Mode::Compact);
             }
             self.yielded = false;
+            // Luma's cards wait for an answer (or 45 s): answer them like a user would.
+            if self.brain.showing.is_some() && s.settle_from.is_none() {
+                self.act(crate::ui::Act::LumaLater);
+            }
+            self.brain.stop_focus(chrono::Local::now());
             let from = *s.settle_from.get_or_insert(now);
             if now - from > Duration::from_secs(16) {
                 self.storm_settled(&mut s);
@@ -129,7 +134,7 @@ impl App {
             DeviceKind::Phone,
         ];
         let (cx, w) = self.notch_geometry();
-        match s.pick(19) {
+        match s.pick(24) {
             0 => {
                 let v = s.pick(1001) as usize;
                 let muted = s.pick(10) == 0;
@@ -197,6 +202,8 @@ impl App {
                     source: None,
                     site,
                     id: 0,
+                    phone_app: None,
+                    call: false,
                 }));
                 post(crate::WM_NOTICE, 0, n as isize);
                 "notice"
@@ -215,6 +222,8 @@ impl App {
                     source: Some("facebook"),
                     site: Some("www.facebook.com".into()),
                     id: 0,
+                    phone_app: None,
+                    call: false,
                 }));
                 post(crate::WM_NOTICE, 0, n as isize);
                 "message (notification)"
@@ -273,6 +282,62 @@ impl App {
                 self.kick();
                 "step aside on/off"
             }
+            22 => {
+                // Hidden by a full-screen app and shown again: the whole notch must come back.
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
+                self.gfx.invalidate();
+                self.render();
+                "hide and show"
+            }
+            23 => {
+                self.history_open = !self.history_open && self.mode == Mode::Expanded;
+                self.history_top = 0;
+                self.render();
+                "history"
+            }
+            19 => {
+                // A Luma reminder comes (as a heads-up or straight as its card).
+                use crate::luma::config::Kind as K;
+                use crate::luma::scheduler::Due;
+                if self.brain.showing.is_none() {
+                    let due = match s.pick(6) {
+                        0 => Due::Builtin(K::Water),
+                        1 => Due::Builtin(K::Stretch),
+                        2 => Due::Builtin(K::Eyes),
+                        3 => Due::Builtin(K::Breathe),
+                        4 => Due::Builtin(K::Sleep),
+                        _ => Due::Focus(25),
+                    };
+                    let now = chrono::Local::now();
+                    if s.pick(2) == 0 {
+                        self.brain.showing = Some(crate::luma::Showing { due: due.clone(), heads_up_until: Some(now + chrono::TimeDelta::seconds(3)), card_at: None });
+                        self.present_heads_up(&due, 3);
+                    } else {
+                        self.brain.showing = Some(crate::luma::Showing { due: due.clone(), heads_up_until: None, card_at: None });
+                        self.present_luma(&due);
+                    }
+                }
+                "luma reminder"
+            }
+            20 => {
+                // Answering it: done, later, or "now" on a heads-up.
+                let act = [crate::ui::Act::LumaDone, crate::ui::Act::LumaLater, crate::ui::Act::LumaNow][s.pick(3) as usize];
+                self.act(act);
+                "luma answer"
+            }
+            21 => {
+                let now = chrono::Local::now();
+                match s.pick(4) {
+                    0 => self.brain.start_pomodoro(25, 5, 4, "storm", now),
+                    1 => self.brain.toggle_pause(now),
+                    2 => self.brain.skip_phase(now),
+                    _ => self.brain.stop_focus(now),
+                }
+                "focus"
+            }
             _ => {
                 self.toast(ToastKind::Caps(true), "Caps Lock", "On", None);
                 self.toast(ToastKind::Volume(false), "Volume", "40%", Some(0.4));
@@ -300,9 +365,13 @@ impl App {
         let message = [self.toast.as_ref(), self.last_toast.as_ref()].iter().flatten().any(|t| t.kind == ToastKind::Message) && self.toast_mix.x > 0.01;
         let grace = self.private_until.is_some_and(|t| now < t);
         fail("capture exclusion out of step", self.private != (message || grace), state.clone());
+        let luma_card = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::HeadsUp | ToastKind::Task | ToastKind::Focus));
+        fail("Luma reminder waiting unseen", self.brain.showing.is_some() && self.toast.is_none() && self.mode != Mode::Expanded && !luma_card, state.clone());
         let visible = unsafe { IsWindowVisible(self.hwnd).as_bool() };
         fail("window hidden", !visible && !self.hidden, state);
-        let expired: Vec<_> = s.open_failures.iter().filter(|(_, (t, _))| now - *t > Duration::from_millis(1000)).map(|(k, v)| (*k, v.1.clone())).collect();
+        // Luma's ticker runs every 2 s, so its card may take that long to come back.
+        let grace = |name: &str| Duration::from_millis(if name.starts_with("Luma") { 3000 } else { 1000 });
+        let expired: Vec<_> = s.open_failures.iter().filter(|(k, (t, _))| now - *t > grace(k)).map(|(k, v)| (*k, v.1.clone())).collect();
         for (name, st) in expired {
             s.failures.push(format!("{:>6.1}s  {name}  [{st}]", (now - s.started).as_secs_f32()));
             s.open_failures.remove(name);
@@ -318,7 +387,16 @@ impl App {
             s.failures.push(format!("{at:>6.1}s  size not at target {:?} (is {:.1}x{:.1})  [{state}]", t, self.sw.x, self.sh.x));
         }
         if self.animating && !self.continuous() {
-            s.failures.push(format!("{at:>6.1}s  still animating at rest  [{state}]"));
+            let springs = [
+                ("sw", &self.sw), ("sh", &self.sh), ("fade", &self.fade), ("slide", &self.slide), ("toast_mix", &self.toast_mix),
+                ("pill_mix", &self.pill_mix), ("intro", &self.intro), ("intro_grow", &self.intro_grow), ("vol_stretch", &self.vol_stretch),
+                ("sun_rot", &self.sun_rot), ("lyr_user", &self.lyr_user), ("lyr_zoom", &self.lyr_zoom), ("caps_mix", &self.caps_mix),
+                ("tl_frac", &self.tl_frac), ("toast_swap", &self.toast_swap), ("roll_t", &self.roll_t), ("vol_level", &self.vol_level),
+                ("lyr_mix", &self.lyr_mix), ("toggle_x", &self.toggle_x), ("water_pulse", &self.water_pulse), ("dot_pos", &self.dot_pos),
+                ("aurora_lvl", &self.aurora_lvl),
+            ];
+            let moving: Vec<String> = springs.iter().filter(|(_, sp)| sp.v.abs() >= 0.05 || !sp.x.is_finite()).map(|(n, sp)| format!("{n} x={:.3} v={:.3}", sp.x, sp.v)).collect();
+            s.failures.push(format!("{at:>6.1}s  still animating at rest: {}  hover={}  [{state}]", moving.join(", "), self.hover.len()));
         }
         if !self.device_queue.is_empty() {
             s.failures.push(format!("{at:>6.1}s  device cards never shown: {}  [{state}]", self.device_queue.len()));
@@ -330,7 +408,7 @@ impl App {
 
     fn storm_state(&self) -> String {
         format!(
-            "mode={:?} toast={:?} open={} yielded={} held={} private={} size={:.0}x{:.0} animating={} moving={} pump={:?} since_frame={}ms hidden={}",
+            "mode={:?} toast={:?} open={} yielded={} held={} private={} size={:.0}x{:.0} animating={} moving={} pump={:?} since_frame={}ms hidden={} toast_age={:?} toast_left={:?} device_queue={} luma={:?}",
             self.mode,
             self.toast.as_ref().map(|t| t.kind),
             self.toast_open,
@@ -343,7 +421,11 @@ impl App {
             self.springs_moving,
             crate::pump::state(),
             self.last_frame.elapsed().as_millis(),
-            self.hidden
+            self.hidden,
+            self.toast.as_ref().map(|t| t.born.elapsed().as_millis()),
+            self.toast.as_ref().map(|t| t.until.saturating_duration_since(Instant::now()).as_millis()),
+            self.device_queue.len(),
+            self.brain.showing.as_ref().map(|s| s.due.clone())
         )
     }
 

@@ -136,6 +136,88 @@ pub fn name_thread(name: &str) {
     }
 }
 
+// ---------------------------------------------------------------- Luma app
+
+/// Temporary field measurements (ISLET_TIMELOG=<file>): a millisecond clock and a line.
+pub fn timelog(line: &str) {
+    let Some(path) = std::env::var_os("ISLET_TIMELOG") else { return };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = f.write_all(format!("{t} {line}
+").as_bytes());
+    }
+}
+
+/// A fullscreen game, video or presentation is in front (Windows' own judgement).
+pub fn busy() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
+    unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE)
+}
+
+const LUMA_TASK: &str = "Luma";
+
+fn quiet_command(program: &str, args: &[&str]) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new(program).args(args).creation_flags(CREATE_NO_WINDOW).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The separate Luma app's process ids (pause.exe in Luma's install folder).
+fn luma_app_pids() -> Vec<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            if String::from_utf16_lossy(&e.szExeFile[..n]).eq_ignore_ascii_case("pause.exe") {
+                if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, e.th32ProcessID) {
+                    let mut buf = [0u16; 520];
+                    let mut len = buf.len() as u32;
+                    if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
+                        let path = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+                        if path.contains("\\luma\\") {
+                            out.push(e.th32ProcessID);
+                        }
+                    }
+                    let _ = CloseHandle(h);
+                }
+            }
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// The separate Luma app is running or still starts with Windows.
+pub fn luma_app_active() -> bool {
+    if !luma_app_pids().is_empty() {
+        return true;
+    }
+    quiet_command("schtasks", &["/Query", "/TN", LUMA_TASK, "/FO", "CSV", "/NH"]).is_some_and(|s| s.contains(LUMA_TASK) && !s.contains("Disabled"))
+}
+
+/// Closes the Luma app and stops it starting with Windows. Nothing is uninstalled or deleted:
+/// re-enabling its task (or starting it) brings it back.
+pub fn turn_off_luma_app() {
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    for pid in luma_app_pids() {
+        unsafe {
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                let _ = TerminateProcess(h, 0);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+    let _ = quiet_command("schtasks", &["/Change", "/TN", LUMA_TASK, "/DISABLE"]);
+}
+
 // ---------------------------------------------------------------- screenshots
 
 /// A screenshot file found for a Snipping Tool notification, posted as WM_SHOT.
@@ -429,21 +511,34 @@ pub struct AudioChange {
     /// Endpoint form factor: 1 speakers, 3 headphones, 5 headset (others are ignored).
     pub form_factor: u32,
     pub bluetooth: bool,
+    pub path: String,
 }
 
 /// Default output changes re-target the volume watch; endpoint state changes become cards.
 #[implement(windows::Win32::Media::Audio::IMMNotificationClient)]
-struct AudioDevices(isize);
+struct AudioDevices {
+    hwnd: isize,
+    /// Whether each endpoint is active. Windows re-reports every endpoint when one device
+    /// connects (a Bluetooth headset makes the jack report "unplugged" again): only a real
+    /// change counts.
+    known: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+}
 
 impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for AudioDevices_Impl {
     fn OnDeviceStateChanged(&self, id: &PCWSTR, state: windows::Win32::Media::Audio::DEVICE_STATE) -> windows::core::Result<()> {
         use windows::Win32::Media::Audio::{DEVICE_STATE_ACTIVE, DEVICE_STATE_NOTPRESENT, DEVICE_STATE_UNPLUGGED};
+        // The high bits carry flags.
+        let state = windows::Win32::Media::Audio::DEVICE_STATE(state.0 & 0xF);
         let active = state == DEVICE_STATE_ACTIVE;
         if !active && state != DEVICE_STATE_UNPLUGGED && state != DEVICE_STATE_NOTPRESENT {
             return Ok(());
         }
         let Ok(id) = (unsafe { id.to_string() }) else { return Ok(()) };
-        let hwnd = self.0;
+        let was = self.known.lock().unwrap().insert(id.clone(), active);
+        if was.unwrap_or(false) == active {
+            return Ok(());
+        }
+        let hwnd = self.hwnd;
         // Property reads go to the audio service: off this callback thread.
         std::thread::spawn(move || unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -466,7 +561,7 @@ impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for AudioDevices_I
     fn OnDefaultDeviceChanged(&self, flow: windows::Win32::Media::Audio::EDataFlow, role: windows::Win32::Media::Audio::ERole, _: &PCWSTR) -> windows::core::Result<()> {
         if flow == eRender && role == eMultimedia {
             unsafe {
-                let _ = PostMessageW(Some(HWND(self.0 as _)), crate::WM_AUDIODEV, WPARAM(1), LPARAM(0));
+                let _ = PostMessageW(Some(HWND(self.hwnd as _)), crate::WM_AUDIODEV, WPARAM(1), LPARAM(0));
             }
         }
         Ok(())
@@ -493,14 +588,23 @@ unsafe fn endpoint(id: &str) -> Option<AudioChange> {
     let text = |k: &PROPERTYKEY| store.GetValue(k).ok().map(|v| v.to_string()).unwrap_or_default();
     let form_factor = store.GetValue(&PKEY_AudioEndpoint_FormFactor).ok().and_then(|v| u32::try_from(&v).ok()).unwrap_or(0);
     let path = text(&PKEY_DEVICE_PATH).to_ascii_uppercase();
-    Some(AudioChange { name: text(&PKEY_DEVICE_DESC), active: false, form_factor, bluetooth: path.contains("BTHENUM") || path.contains("BTHHFENUM") || path.contains("BTHLE") })
+    Some(AudioChange { name: text(&PKEY_DEVICE_DESC), active: false, form_factor, bluetooth: path.contains("BTHENUM") || path.contains("BTHHFENUM") || path.contains("BTHLE"), path })
 }
 
 /// Registers for audio endpoint changes for the life of the process.
 pub fn watch_audio_devices(hwnd: HWND) {
     unsafe {
         let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return };
-        let cb: windows::Win32::Media::Audio::IMMNotificationClient = AudioDevices(hwnd.0 as isize).into();
+        // What is active now, so the first report of each endpoint can be told from a change.
+        let mut known = std::collections::HashMap::new();
+        if let Ok(list) = en.EnumAudioEndpoints(eRender, windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE) {
+            for i in 0..list.GetCount().unwrap_or(0) {
+                if let Some(id) = list.Item(i).ok().and_then(|d| d.GetId().ok()).and_then(|p| p.to_string().ok()) {
+                    known.insert(id, true);
+                }
+            }
+        }
+        let cb: windows::Win32::Media::Audio::IMMNotificationClient = AudioDevices { hwnd: hwnd.0 as isize, known: known.into() }.into();
         if en.RegisterEndpointNotificationCallback(&cb).is_ok() {
             std::mem::forget((en, cb));
         }
@@ -766,11 +870,6 @@ pub fn hide_banner(aumid: &str) {
     }
 }
 
-/// Whether Islet has already turned off `aumid`'s banner.
-pub fn banner_hidden(aumid: &str) -> bool {
-    show_banner_value(aumid) == Some(0) && read_banner_backup().iter().any(|(id, _)| id == aumid)
-}
-
 /// Puts every banner setting Islet changed back the way it was.
 pub fn restore_banners() {
     for (aumid, old) in read_banner_backup() {
@@ -810,8 +909,43 @@ pub fn foreground_covers(mon: RECT, own: HWND) -> bool {
         if GetWindowRect(fg, &mut r).is_err() {
             return false;
         }
-        r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom
+        if !(r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom) {
+            return false;
+        }
+        // Screen-wide shell layers (the capture overlay, Win+Tab, Start, the notification panel)
+        // are not full-screen apps.
+        if shell_overlay(fg, &cls) {
+            return false;
+        }
+        use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
+        if SHQueryUserNotificationState().is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE) {
+            return true;
+        }
+        // Borderless full screen (a video after F11): an ordinary window filling the monitor.
+        let ex = GetWindowLongPtrW(fg, GWL_EXSTYLE) as u32;
+        ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) == 0 && !IsZoomed(fg).as_bool()
     }
+}
+
+/// The foreground window belongs to one of the shell's transient full-screen layers.
+unsafe fn shell_overlay(fg: HWND, class: &str) -> bool {
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    if class == "XamlExplorerHostIslandWindow" || class == "MultitaskingViewFrame" {
+        return true;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(fg, Some(&mut pid));
+    let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+    let mut buf = [0u16; 520];
+    let mut len = buf.len() as u32;
+    let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+    let _ = CloseHandle(h);
+    if !ok {
+        return false;
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+    let exe = path.rsplit('\\').next().unwrap_or("");
+    ["screenclippinghost.exe", "snippingtool.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe"].contains(&exe)
 }
 
 // ---------------------------------------------------------------- icon

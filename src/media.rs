@@ -78,7 +78,33 @@ pub enum Cmd {
     Refresh,
 }
 
-/// Change subscriptions on the session being shown; removed when another session takes over.
+/// Another source must play this long before it may take over from one still playing.
+const TAKE_OVER: Duration = Duration::from_secs(15);
+
+/// What `choose` needs to know about a media session.
+struct Source<'a> {
+    id: &'a str,
+    playing: bool,
+    /// Has an artist: a song rather than a clip.
+    song: bool,
+    /// How long it has been playing without a break.
+    played: Duration,
+}
+
+/// Which source the notch follows. What is shown stays while it plays: only a song that has played
+/// for a while can take over from another song, or from a clip. Once it stops, a playing source
+/// follows at once, songs first.
+fn choose(shown: Option<&str>, sources: &[Source]) -> Option<usize> {
+    let cur = shown.and_then(|id| sources.iter().position(|s| s.id == id));
+    let rival = |c: &Source, s: &Source| s.id != c.id && s.playing && s.played >= TAKE_OVER && s.song >= c.song;
+    if let Some(i) = cur.filter(|i| sources[*i].playing) {
+        return Some(sources.iter().position(|s| rival(&sources[i], s)).unwrap_or(i));
+    }
+    let playing = sources.iter().enumerate().filter(|(_, s)| s.playing);
+    playing.max_by_key(|(_, s)| (s.song, s.played)).map(|(i, _)| i).or(cur).or((!sources.is_empty()).then_some(0))
+}
+
+/// Change subscriptions on one session; removed when the session goes away.
 struct Watched {
     session: GlobalSystemMediaTransportControlsSession,
     tokens: [i64; 3],
@@ -184,25 +210,31 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
         // position is extrapolated on the UI side; a slow safety read covers players whose
         // events are unreliable.
         let t = events.clone();
-        let _ = mgr.CurrentSessionChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSessionManager>, _: Ref<CurrentSessionChangedEventArgs>| {
+        let _ = mgr.SessionsChanged(&TypedEventHandler::new(move |_: Ref<GlobalSystemMediaTransportControlsSessionManager>, _: Ref<SessionsChangedEventArgs>| {
             let _ = t.send(Cmd::Refresh);
             Ok(())
         }));
-        let mut watched: Option<Watched> = None;
+        let mut tracked: Vec<Tracked> = Vec::new();
+        let mut shown: Option<String> = None;
+        // A browser reports one session for all its tabs: a clip in another tab replaces the
+        // song in it. Since when such a clip has been held back.
+        let mut clip_since: Option<Instant> = None;
         let mut first = true;
         loop {
             let wait = if std::mem::take(&mut first) { Duration::ZERO } else { Duration::from_secs(5) };
+            let mut changed_props = false;
             match rx.recv_timeout(wait) {
                 Ok(Cmd::Refresh) => {
                     // Events come in bursts (title, art, playback, timeline): read once.
                     std::thread::sleep(Duration::from_millis(60));
                     while let Ok(Cmd::Refresh) = rx.try_recv() {}
+                    changed_props = true;
                 }
                 Ok(cmd) => {
                     if let Cmd::Seek(t) = cmd {
                         hold = Some((t, Instant::now()));
                     }
-                    if let Ok(s) = mgr.GetCurrentSession() {
+                    if let Some(s) = tracked.iter().find(|t| Some(&t.id) == shown.as_ref()).map(|t| t.watched.session.clone()) {
                         let r = match cmd {
                             Cmd::Toggle => Some(s.TryTogglePlayPauseAsync()),
                             Cmd::Next => Some(s.TrySkipNextAsync()),
@@ -220,11 +252,16 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
             }
 
             let mut next = MediaInfo::default();
-            let current = mgr.GetCurrentSession().ok();
-            if current.as_ref() != watched.as_ref().map(|w| &w.session) {
-                watched = current.map(|s| Watched::new(s, &events));
-            }
-            if let Some(s) = watched.as_ref().map(|w| w.session.clone()) {
+            sync_sessions(&mgr, &mut tracked, &events, changed_props);
+            let sources: Vec<Source> = tracked
+                .iter()
+                .map(|t| Source { id: &t.id, playing: t.playing_since.is_some(), song: t.song, played: t.playing_since.map(|p| p.elapsed()).unwrap_or_default() })
+                .collect();
+            let pick = choose(shown.as_deref(), &sources);
+            drop(sources);
+            let same_source = pick.is_some_and(|i| Some(&tracked[i].id) == shown.as_ref());
+            shown = pick.map(|i| tracked[i].id.clone());
+            if let Some(s) = pick.map(|i| tracked[i].watched.session.clone()) {
                 next.has = true;
                 let props = s.TryGetMediaPropertiesAsync().and_then(|op| op.join()).ok();
                 if let Some(p) = &props {
@@ -260,6 +297,11 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
                     next.stamp = Some(Instant::now());
                 }
                 let key = format!("{}\u{1}{}", next.title, next.artist);
+                let clip = same_source && next.playing && key != last_key && next.artist.trim().is_empty() && last_key.split('\u{1}').nth(1).is_some_and(|a| !a.trim().is_empty());
+                clip_since = if clip { clip_since.or(Some(Instant::now())) } else { None };
+                if clip_since.is_some_and(|t| t.elapsed() < TAKE_OVER) {
+                    continue;
+                }
                 if key != last_key && !next.title.is_empty() {
                     last_key = key.clone();
                     art = props.as_ref().and_then(|p| load_art(p).ok());
@@ -290,6 +332,45 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
         }
     });
     tx
+}
+
+/// A session being followed: its subscriptions and what the choice needs.
+struct Tracked {
+    id: String,
+    watched: Watched,
+    song: bool,
+    playing_since: Option<Instant>,
+}
+
+fn is_song(s: &GlobalSystemMediaTransportControlsSession) -> bool {
+    s.TryGetMediaPropertiesAsync().and_then(|op| op.join()).and_then(|p| p.Artist()).is_ok_and(|a| !a.to_string().trim().is_empty())
+}
+
+/// Brings `tracked` up to date with Windows' sessions. Properties are another process's to
+/// answer, so they are only asked for after a session reported a change.
+fn sync_sessions(mgr: &GlobalSystemMediaTransportControlsSessionManager, tracked: &mut Vec<Tracked>, events: &Sender<Cmd>, changed: bool) {
+    let Ok(sessions) = mgr.GetSessions() else { return };
+    let sessions: Vec<_> = sessions.into_iter().collect();
+    let id = |s: &GlobalSystemMediaTransportControlsSession| s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
+    let ids: Vec<String> = sessions.iter().map(id).collect();
+    tracked.retain(|t| ids.contains(&t.id));
+    for (s, sid) in sessions.into_iter().zip(ids) {
+        if !tracked.iter().any(|t| t.id == sid) {
+            let song = is_song(&s);
+            tracked.push(Tracked { id: sid, watched: Watched::new(s, events), song, playing_since: None });
+        }
+    }
+    for t in tracked.iter_mut() {
+        let s = &t.watched.session;
+        let playing = s
+            .GetPlaybackInfo()
+            .and_then(|i| i.PlaybackStatus())
+            .is_ok_and(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+        t.playing_since = if playing { t.playing_since.or(Some(Instant::now())) } else { None };
+        if changed {
+            t.song = is_song(s);
+        }
+    }
 }
 
 fn load_art(p: &GlobalSystemMediaTransportControlsSessionMediaProperties) -> windows::core::Result<Arc<Art>> {
@@ -497,4 +578,41 @@ pub fn parse_lrc(text: &str) -> Vec<(f64, String)> {
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn src(id: &str, playing: bool, song: bool, secs: u64) -> Source<'_> {
+        Source { id, playing, song, played: Duration::from_secs(secs) }
+    }
+
+    #[test]
+    fn a_clip_does_not_take_over_a_playing_song() {
+        let s = [src("yt", true, true, 200), src("fb", true, false, 5)];
+        assert_eq!(choose(Some("yt"), &s), Some(0));
+        // Not even after a long while: only a song can take over from a song.
+        let s = [src("yt", true, true, 200), src("fb", true, false, 60)];
+        assert_eq!(choose(Some("yt"), &s), Some(0));
+    }
+
+    #[test]
+    fn another_song_takes_over_after_a_while() {
+        assert_eq!(choose(Some("a"), &[src("a", true, true, 99), src("b", true, true, 5)]), Some(0));
+        assert_eq!(choose(Some("a"), &[src("a", true, true, 99), src("b", true, true, 15)]), Some(1));
+    }
+
+    #[test]
+    fn a_stopped_source_gives_way_at_once_songs_first() {
+        let s = [src("yt", false, true, 0), src("clip", true, false, 1), src("sp", true, true, 1)];
+        assert_eq!(choose(Some("yt"), &s), Some(2));
+        assert_eq!(choose(Some("yt"), &[src("yt", false, true, 0), src("x", false, true, 0)]), Some(0));
+    }
+
+    #[test]
+    fn nothing_shown_yet() {
+        assert_eq!(choose(None, &[]), None);
+        assert_eq!(choose(None, &[src("a", false, false, 0)]), Some(0));
+    }
 }

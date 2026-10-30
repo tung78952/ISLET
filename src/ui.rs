@@ -48,15 +48,16 @@ pub enum Act {
     PagePrev,
     /// Seek the player to this many milliseconds.
     Seek(u32),
-    /// Water reminder toast buttons.
-    ToastDrank,
     /// End-of-phase toast: start the prepared phase, or dismiss.
     ToastStartPhase,
     ToastDismiss,
-    /// Task reminder: remind again in 10 minutes, or start a focus session for it.
-    TaskLater,
-    TaskStart,
-    ToastSnooze,
+    /// Luma's reminder card: done (drank, started, going to bed), or later (snooze).
+    LumaDone,
+    LumaLater,
+    /// The heads-up: show the card now.
+    LumaNow,
+    /// Turn the separate Luma app off (Islet takes over its reminders).
+    LumaAppOff,
     /// Timeline bar at (x, width) in tenths of a layout unit; dragging it scrubs.
     Scrub(i32, i32),
     PageNext,
@@ -75,7 +76,7 @@ pub enum Act {
     WaterReset,
     Bottle(i32),
     Goal(u32),
-    Start(i32),
+    /// Bedtime, half an hour per step (water is spread out to it).
     End(i32),
     TodoAdd,
     TodoEditMode,
@@ -93,6 +94,13 @@ pub enum Act {
     NoticeClose,
     /// Device card: open the drive that was plugged in.
     DeviceOpen,
+    /// Notification history: show it or go back, open a row, clear it.
+    History(bool),
+    HistoryOpen(usize),
+    HistoryClear,
+    /// Incoming call: bring up the app, or dismiss the card.
+    CallAccept,
+    CallDecline,
 }
 
 /// Formats up to 8 typed digits into the "HH:MM-HH:MM" mask.
@@ -439,6 +447,17 @@ mod icon {
             }
         }
     }
+    /// A phone handset, tilted down when hanging up.
+    pub fn phone(g: &Gfx, cx: f32, cy: f32, down: bool, hex: u32, a: f32) {
+        use std::f32::consts::PI;
+        let r = 7.4;
+        // The handle is an arc with a thick round earpiece at each end; hanging up it lies flat.
+        let (hx, hy, from, to) = if down { (cx, cy + 5.0, PI + 0.5, 2.0 * PI - 0.5) } else { (cx + 4.2, cy - 4.2, PI * 0.5 + 0.2, PI - 0.2) };
+        g.arc_between(hx, hy, r, from, to, 2.2, hex, a);
+        for t in [from, to] {
+            g.fill_circle(hx + r * t.cos(), hy + r * t.sin(), 2.3, 2.3, hex, a);
+        }
+    }
     /// The USB trident.
     pub fn usb(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.line(cx, cy + 6.6, cx, cy - 5.0, 1.6, hex, a);
@@ -598,8 +617,9 @@ fn compact(a: &mut App, left: f32, w: f32) {
 fn right_indicator(a: &mut App, x: f32, cy: f32) {
     // The only part that moves when nothing else does: frames can redraw just this box.
     a.loop_rect = Some(Rc::new(x - 3.0, cy - 12.0, 27.0, 24.0));
-    if a.pomo.running() {
-        let frac = (a.pomo.left() / a.pomo.phase.secs()) as f32;
+    if a.brain.focus.is_some() {
+        let (left, total, _, _) = a.pomo_view();
+        let frac = (left / total) as f32;
         let t = a.born.elapsed().as_secs_f32();
         icon::liquid(&a.gfx, x + 9.2, cy, 9.2, frac, t, 1.0);
         return;
@@ -753,15 +773,48 @@ enum Glyph {
     Bell,
     Stopwatch,
     Checklist,
+    /// Nothing: the caller draws over the badge.
+    Blank,
     /// What a connected device is (headphones, mouse, drive...).
     Device(DeviceKind),
     Usb,
+    /// Luma's breaks.
+    Stretch,
+    Eye,
+    Breath,
+    Moon,
 }
 
 fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
     match g {
         Glyph::Device(k) => icon::device(&a.gfx, k, cx, cy, hex, 1.0),
         Glyph::Usb => icon::usb(&a.gfx, cx, cy, hex, 1.0),
+        Glyph::Blank => {}
+        Glyph::Stretch => {
+            // A figure with both arms raised.
+            a.gfx.fill_circle(cx, cy - 5.6, 1.9, 1.9, hex, 1.0);
+            a.gfx.polyline(&[(cx - 5.2, cy - 6.6), (cx - 2.2, cy - 2.4), (cx + 2.2, cy - 2.4), (cx + 5.2, cy - 6.6)], 1.6, hex, 1.0);
+            a.gfx.line(cx, cy - 2.4, cx, cy + 2.6, 1.6, hex, 1.0);
+            a.gfx.polyline(&[(cx - 3.2, cy + 7.4), (cx, cy + 2.6), (cx + 3.2, cy + 7.4)], 1.6, hex, 1.0);
+        }
+        Glyph::Eye => {
+            let top: Vec<(f32, f32)> = (0..=12).map(|i| { let u = i as f32 / 12.0; (cx - 7.6 + 15.2 * u, cy - 4.6 * (std::f32::consts::PI * u).sin()) }).collect();
+            let bot: Vec<(f32, f32)> = (0..=12).map(|i| { let u = i as f32 / 12.0; (cx - 7.6 + 15.2 * u, cy + 4.6 * (std::f32::consts::PI * u).sin()) }).collect();
+            a.gfx.polyline(&top, 1.5, hex, 1.0);
+            a.gfx.polyline(&bot, 1.5, hex, 1.0);
+            a.gfx.fill_circle(cx, cy, 2.2, 2.2, hex, 1.0);
+        }
+        Glyph::Breath => {
+            // Three wind strokes curling at the end.
+            for (dy, len) in [(-4.0f32, 11.0f32), (0.0, 14.0), (4.0, 9.0)] {
+                a.gfx.line(cx - 7.0, cy + dy, cx - 7.0 + len - 2.0, cy + dy, 1.5, hex, 1.0);
+                a.gfx.arc_between(cx - 7.0 + len - 2.0, cy + dy - 1.6, 1.6, std::f32::consts::FRAC_PI_2, std::f32::consts::PI * 2.2, 1.5, hex, 1.0);
+            }
+        }
+        Glyph::Moon => {
+            a.gfx.fill_circle(cx, cy, 6.8, 6.8, hex, 1.0);
+            a.gfx.fill_circle(cx + 3.4, cy - 2.6, 5.8, 5.8, 0x000000, 1.0);
+        }
         Glyph::Bluetooth => icon::bluetooth(&a.gfx, cx, cy, hex, 1.0),
         // The arcs' bounding box is centred on (cx, cy): dot 4.6 below, outer arc 7.4 above.
         Glyph::Wifi(arcs, _) => icon::wifi_centered(&a.gfx, cx, cy, arcs, hex, 1.0),
@@ -838,11 +891,13 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
     }
     a.gfx.fill_circle(bx, cy, 14.4, 14.4, c.accent, 1.0);
     a.gfx.fill_circle(bx, cy, 11.2, 11.2, c.dark, 1.0);
-    if c.shake > 0.0 {
+    // Three shakes, then still (a card waiting for an answer stops redrawing; see effects()).
+    let shake = c.shake > 0.0 && age < 4.8;
+    if shake {
         a.gfx.rotate(bx, cy, ring_angle(age, c.shake));
     }
     glyph(a, c.badge, bx, cy, WHITE);
-    if c.shake > 0.0 {
+    if shake {
         a.gfx.unzoom();
     }
     let right_w = if c.ring.is_some() { 56.0 } else { c.reserve };
@@ -871,6 +926,7 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
 /// preview) and Open / Close buttons on the bottom row.
 fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
     let Some(n) = a.notice.as_ref() else { return };
+    let info = n.clone();
     let (kind, app, site, title, body, born, thumb, file, size, openable, aumid) = (
         n.kind,
         n.app.clone(),
@@ -889,7 +945,7 @@ fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
     // Header: badge, source name, age.
     let hy = 26.0;
     match kind {
-        crate::NoticeKind::Chat => icon::messenger(&a.gfx, x0 + 11.0, hy, 11.0, 1.0),
+        crate::NoticeKind::Chat | crate::NoticeKind::Phone => notice_badge(a, &info, x0 + 11.0, hy, 11.0),
         _ => {
             let icon = (!aumid.is_empty()).then(|| std::path::PathBuf::from(format!("shell:AppsFolder\\{aumid}")));
             let bmp = icon.and_then(|p| a.shelf_icon(&p).0);
@@ -905,6 +961,7 @@ fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
     }
     let source = match (&kind, &site) {
         (crate::NoticeKind::Chat, _) => "Messenger".to_string(),
+        (crate::NoticeKind::Phone, _) => info.source_name(),
         (crate::NoticeKind::Screenshot, _) => "Snipping Tool".to_string(),
         (_, Some(s)) => format!("{app} · {}", s.trim_start_matches("www.")),
         _ => app.clone(),
@@ -936,7 +993,8 @@ fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
             a.gfx.ui(&size, Rc::new(tx, top + 45.0, tw, 16.0), 11.5, 400, 0x8E8E93, 1.0, Align::L);
         }
     } else {
-        let shown = if kind == crate::NoticeKind::Chat && !a.settings.show_content { "Tin nhắn mới".to_string() } else { body.clone() };
+        let hidden = matches!(kind, crate::NoticeKind::Chat | crate::NoticeKind::Phone) && !a.settings.show_content;
+        let shown = if hidden { "Tin nhắn mới".to_string() } else { body.clone() };
         a.gfx.ui(&title, Rc::new(x0, top, x1 - x0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
         let by = top + 24.0;
         a.gfx.push_clip(Rc::new(x0, by, x1 - x0, (bottom - by).max(0.0)));
@@ -1023,21 +1081,71 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let off = a.gfx.off;
             a.gfx.offset(off.0, off.1 + drop);
             let ix = left + 34.0;
-            icon::messenger(&a.gfx, ix, h / 2.0, 19.0, 1.0);
+            let info = a.notice.clone();
+            let phone = info.as_ref().and_then(|n| n.phone_app.clone());
+            match info.as_ref().filter(|_| phone.is_some()) {
+                Some(n) => {
+                    let accent = a.notice_accent(n);
+                    a.gfx.glow(ix, h / 2.0, 30.0, accent, 0.28);
+                    notice_badge(a, n, ix, h / 2.0, 19.0);
+                }
+                None => icon::messenger(&a.gfx, ix, h / 2.0, 19.0, 1.0),
+            }
             let tx = left + 64.0;
             let tw = w - 64.0 - 22.0;
-            // Sender and message are centred together on the card, one line or two.
+            // Sender and message are centred together on the card, one line or two; a phone
+            // notification names its app above them.
             let body = if a.settings.show_content { title } else { "Tin nhắn mới" };
             let body_h = a.gfx.measure_wrapped(body, 13.0, 400, tw).clamp(17.0, 34.0);
+            let app_h = if phone.is_some() { 14.0 } else { 0.0 };
             // Optical centre: glyphs sit low in their line boxes.
-            let top = ((h - (20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(4.0);
-            a.gfx.ui(value, Rc::new(tx, top, tw - 40.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-            a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top + 1.0, 40.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
+            let top = ((h - (app_h + 20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(3.0) + app_h;
+            match &phone {
+                Some(app) => {
+                    a.gfx.ui(app, Rc::new(tx, top - 14.0, tw - 40.0, 14.0), 10.5, 600, 0xA0A0A5, 1.0, Align::L);
+                    a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top - 14.0, 40.0, 14.0), 10.5, 400, 0x8E8E93, 1.0, Align::R);
+                    a.gfx.ui(value, Rc::new(tx, top, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+                }
+                None => {
+                    a.gfx.ui(value, Rc::new(tx, top, tw - 40.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+                    a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top + 1.0, 40.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
+                }
+            }
             let by = top + 22.0;
             a.gfx.push_clip(Rc::new(tx, by, tw, body_h + 2.0));
             a.gfx.text(body, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
             a.gfx.pop_clip();
             a.gfx.offset(off.0, off.1);
+        }
+        ToastKind::Call => {
+            // Apple's call banner: who, from which app, red and green round buttons.
+            let info = a.notice.clone();
+            let accent = info.as_ref().map(|n| a.notice_accent(n)).unwrap_or(GREEN);
+            let ix = left + 34.0;
+            let cy = h / 2.0;
+            // Rings spread from the icon in the app's colour, in time with the ringing.
+            for d in [0.0f32, 0.5] {
+                let q = ((age + d) % 1.4) / 1.4;
+                a.gfx.stroke_circle(ix, cy, 16.0 + 12.0 * q, 1.4, accent, 0.45 * (1.0 - q));
+            }
+            match &info {
+                Some(n) => notice_badge(a, n, ix, cy, 16.0),
+                None => a.gfx.fill_circle(ix, cy, 16.0, 16.0, accent, 1.0),
+            }
+            let tx = left + 60.0;
+            let tw = w - 60.0 - 96.0;
+            a.gfx.ui(value, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+            a.gfx.ui(&format!("{title} · Incoming call"), Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+            for (i, (fill, act)) in [(0xFF3B30u32, Act::CallDecline), (0x34C759, Act::CallAccept)].into_iter().enumerate() {
+                let r = Rc::new(left + w - 88.0 + i as f32 * 40.0, cy - 16.0, 32.0, 32.0);
+                let hov = if live { btn(a, r, 0.08) } else { 0.0 };
+                a.gfx.fill_circle(r.cx(), r.cy(), 16.0, 16.0, mix(fill, WHITE, 0.12 * hov), 1.0);
+                icon::phone(&a.gfx, r.cx(), r.cy(), i == 0, WHITE, 1.0);
+                a.gfx.unzoom();
+                if live {
+                    hit(a, r, act);
+                }
+            }
         }
         ToastKind::Bluetooth(on) => {
             let lv = t.level.unwrap_or(0.0) * up;
@@ -1148,28 +1256,86 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
                 hit(a, x_btn, Act::ToastDismiss);
             }
             let (bg, fg) = if focus { (0x0E3A1B, 0x35D766) } else { (0x0D2F44, 0x4DBDFF) };
-            card_button(a, b2, if focus { "Focus" } else { "Break" }, bg, fg, live, Act::ToastStartPhase);
+            // A time's-up card offers a few more minutes; a phase notice skips the break or
+            // pauses the round.
+            let label = if a.focus_end_card() {
+                "+5 min"
+            } else if focus {
+                "Pause"
+            } else {
+                "Skip"
+            };
+            card_button(a, b2, label, bg, fg, live, Act::ToastStartPhase);
         }
         ToastKind::Task => {
             let (b1, b2) = buttons(56.0, 56.0);
             let c = Card { accent: TODO_GREEN, dark: 0x0B2414, badge: Glyph::Checklist, shake: 0.18, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
             card(a, left, w, h, t, title, value, &c);
-            card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::TaskLater);
-            card_button(a, b2, "Start", 0x0E3A1B, 0x35D766, live, Act::TaskStart);
+            later_button(a, b1, t, live);
+            card_button(a, b2, "Start", 0x0E3A1B, 0x35D766, live, Act::LumaDone);
+        }
+        ToastKind::Remind(k) => {
+            let (b1, b2) = buttons(56.0, 64.0);
+            use crate::luma::config::Kind as K;
+            let (glyph, accent, dark, done) = match k {
+                K::Stretch => (Glyph::Stretch, 0xFF9F43, 0x2E1D08, "Done"),
+                K::Eyes => (Glyph::Eye, 0x7BD88F, 0x0E2A14, "Done"),
+                K::Breathe => (Glyph::Breath, 0x66DBFF, 0x0B2A33, "Done"),
+                K::Sleep | K::Water => (Glyph::Moon, 0xA78BFA, 0x1F1636, "Sleep"),
+            };
+            let c = Card { accent, dark, badge: glyph, shake: 0.14, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, value, &c);
+            later_button(a, b1, t, live);
+            card_button(a, b2, done, mix(dark, accent, 0.25), accent, live, Act::LumaDone);
+        }
+        ToastKind::HeadsUp => {
+            let (b1, b2) = buttons(56.0, 56.0);
+            // Counts down to the card, the ring emptying second by second.
+            let secs_left = a.brain.showing.as_ref().and_then(|s| s.heads_up_until).map(|u| (u - chrono::Local::now()).num_milliseconds().max(0) as f32 / 1000.0).unwrap_or(0.0);
+            let c = Card { accent: 0xF5B833, dark: 0x2A2310, badge: Glyph::Stopwatch, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, &format!("Coming up in {}s", secs_left.ceil() as u32), &c);
+            card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::LumaLater);
+            card_button(a, b2, "Now", 0x2A2310, 0xF5B833, live, Act::LumaNow);
+        }
+        ToastKind::LumaApp => {
+            let (b1, b2) = buttons(56.0, 72.0);
+            let c = Card { accent: 0xA78BFA, dark: 0x1F1636, badge: Glyph::Moon, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            card(a, left, w, h, t, title, value, &c);
+            card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::ToastDismiss);
+            card_button(a, b2, "Turn off", 0x1F1636, 0xC9B8FF, live, Act::LumaAppOff);
         }
         ToastKind::Water => {
             let (b1, b2) = buttons(62.0, 56.0);
             let c = Card { accent: CYAN, dark: 0x0B2A33, badge: Glyph::Drop, shake: 0.16, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
             card(a, left, w, h, t, title, value, &c);
-            card_button(a, b1, "Snooze", 0x2E2E2E, 0xE6E6E6, live, Act::ToastSnooze);
-            card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live, Act::ToastDrank);
+            later_button(a, b1, t, live);
+            card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live, Act::LumaDone);
         }
         _ => {
-            // App notification: ringing bell badge, sender over message.
-            let c = Card { accent: 0xF5B833, dark: 0x2A2310, badge: Glyph::Bell, shake: 0.32, ring: None, reserve: 14.0 };
+            // App notification: the app's icon on its own colour, sender over message.
+            let info = a.notice.clone().filter(|_| live);
+            let accent = info.as_ref().map(|n| a.notice_accent(n)).unwrap_or(0xF5B833);
+            let has_icon = info.as_ref().and_then(|n| n.icon.as_ref()).is_some_and(|p| a.shelf_icon(p).0.is_some());
+            let c = Card { accent, dark: mix(0x000000, accent, 0.18), badge: if has_icon { Glyph::Blank } else { Glyph::Bell }, shake: if has_icon { 0.0 } else { 0.32 }, ring: None, reserve: 14.0 };
             card(a, left, w, h, t, value, title, &c);
+            if let Some(n) = info.filter(|_| has_icon) {
+                notice_badge(a, &n, left + 32.0, h / 2.0, 10.0);
+            }
         }
     }
+}
+
+/// "Later" on Luma's cards; on the strict care level it only appears after a few seconds.
+fn later_button(a: &mut App, r: Rc, t: &crate::Toast, live: bool) {
+    let wait = a.brain.skip_after() as f32;
+    let age = t.born.elapsed().as_secs_f32();
+    if age < wait {
+        let left = (wait - age).ceil() as u32;
+        a.gfx.fill_rrect(r, r.h / 2.0, 0x1E1E1E, 1.0);
+        a.gfx.ui(&format!("{left}s"), r, 12.0, 600, 0x7A7A7A, 1.0, Align::C);
+        return;
+    }
+    card_button(a, r, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::LumaLater);
 }
 
 /// Alarm-style shake: bursts of a fast decaying wobble every 1.6 s, amplitude `amp` radians.
@@ -1194,6 +1360,21 @@ fn header(a: &mut App, lx: f32) {
     a.gfx.ui(&date, Rc::new(lx + 163.0, 8.0, 160.0, 20.0), 13.0, 400, WHITE, 1.0, Align::L);
     let dw = a.gfx.measure(&date, 13.0, 400);
     a.gfx.ui(&time, Rc::new(lx + 163.0 + dw + 7.0, 8.0, 60.0, 20.0), 13.0, 700, WHITE, 1.0, Align::L);
+    // The bell appears once there is something to look back at.
+    if !a.history.is_empty() {
+        let bell = Rc::new(lx + 346.0, 7.0, 24.0, 22.0);
+        let h = btn(a, bell, 0.1);
+        icon::bell(&a.gfx, bell.cx(), bell.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
+        if a.history_unread > 0 {
+            let n = a.history_unread.min(99).to_string();
+            let w = (a.gfx.measure(&n, 8.5, 700) + 6.0).max(11.0);
+            let dot = Rc::new(bell.cx() + 2.0, bell.y, w, 11.0);
+            a.gfx.fill_rrect(dot, 5.5, RED, 1.0);
+            a.gfx.ui(&n, dot, 8.5, 700, WHITE, 1.0, Align::C);
+        }
+        a.gfx.unzoom();
+        hit(a, bell, Act::History(true));
+    }
     right_indicator(a, lx + 390.8, 18.0);
 }
 
@@ -1237,7 +1418,64 @@ fn title(a: &mut App, lx: f32, first: &str, second: Option<(&str, u32)>) {
     }
 }
 
+/// Notification history: newest first, three rows at a time, the wheel scrolls.
+fn history(a: &mut App, lx: f32) {
+    let back = Rc::new(lx + 19.0, 8.0, 22.0, 22.0);
+    let h = btn(a, back, 0.18);
+    a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
+    icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
+    a.gfx.unzoom();
+    hit(a, back, Act::History(false));
+    a.gfx.ui("Notifications", Rc::new(lx + 46.0, 8.2, 160.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
+    let clear = Rc::new(lx + 346.0, 10.0, 46.0, 18.0);
+    let h = btn(a, clear, 0.05);
+    a.gfx.fill_rrect(clear, 9.0, mix(0x222222, 0x3A3A3A, h), 1.0);
+    a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
+    a.gfx.unzoom();
+    hit(a, clear, Act::HistoryClear);
+    let rows: Vec<_> = a.history.iter().cloned().enumerate().skip(a.history_top).take(3).collect();
+    for (row, (i, n)) in rows.into_iter().enumerate() {
+        let y = 34.0 + row as f32 * 33.0;
+        let r = Rc::new(lx + 19.0, y, 374.0, 31.0);
+        let h = btn(a, r, 0.01);
+        if h > 0.0 {
+            a.gfx.fill_rrect(r, 9.0, 0x222222, h.min(1.0));
+        }
+        notice_badge(a, &n, lx + 38.0, y + 15.5, 11.0);
+        let (tx, tw) = (lx + 58.0, 276.0);
+        let secs = n.born.elapsed().as_secs();
+        let age = if secs < 60 { "now".to_string() } else if secs < 3600 { format!("{} min", secs / 60) } else { format!("{} h", secs / 3600) };
+        a.gfx.ui(&age, Rc::new(lx + 330.0, y + 2.0, 56.0, 14.0), 10.0, 400, 0x8E8E93, 1.0, Align::R);
+        a.gfx.ui(&n.title, Rc::new(tx, y + 1.0, tw, 15.0), 12.0, 600, WHITE, 1.0, Align::L);
+        let sub = if n.body.is_empty() { n.source_name() } else { format!("{} · {}", n.source_name(), n.body) };
+        a.gfx.ui(&sub, Rc::new(tx, y + 16.0, 328.0, 14.0), 10.5, 400, 0xA0A0A5, 1.0, Align::L);
+        a.gfx.unzoom();
+        hit(a, r, Act::HistoryOpen(i));
+    }
+    if a.history.is_empty() {
+        a.gfx.ui("No notifications", Rc::new(lx, 72.0, 420.0, 18.0), 13.0, 400, 0x6D6D6D, 1.0, Align::C);
+    }
+}
+
+/// A notification's badge: the app's real icon, else its initial on its colour.
+fn notice_badge(a: &mut App, n: &crate::NoticeInfo, cx: f32, cy: f32, r: f32) {
+    let rect = Rc::new(cx - r, cy - r, 2.0 * r, 2.0 * r);
+    if n.kind == crate::NoticeKind::Chat {
+        icon::messenger(&a.gfx, cx, cy, r, 1.0);
+    } else if let Some(b) = n.icon.as_ref().and_then(|p| a.shelf_icon(p).0) {
+        a.gfx.image_fit(&b, rect, r * 0.45, 1.0, false);
+    } else {
+        a.gfx.fill_rrect(rect, r * 0.45, a.notice_accent(n), 1.0);
+        let letter: String = n.source_name().chars().take(1).collect::<String>().to_uppercase();
+        a.gfx.ui(&letter, rect, r * 1.1, 700, WHITE, 1.0, Align::C);
+    }
+}
+
 fn expanded(a: &mut App, lx: f32) {
+    if a.history_open {
+        history(a, lx);
+        return;
+    }
     let settings = a.page == Page::Water && a.water_settings;
     let lyr = if a.page == Page::Music { a.lyr_mix.x.clamp(0.0, 1.0) } else { 0.0 };
     let base = a.gfx.alpha;
@@ -1536,7 +1774,8 @@ fn pomo(a: &mut App, lx: f32) {
     // elapsed part opens clockwise from 12 o'clock.
     use std::f32::consts::{FRAC_PI_2, TAU};
     let (r, tl, br) = (31.8, 0xFD685D, 0xF33548);
-    let left = (a.pomo.left() / a.pomo.phase.secs()).clamp(0.0, 1.0) as f32;
+    let (left_s, total_s, running, phase_label) = a.pomo_view();
+    let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
     let (from, to) = (-FRAC_PI_2 + TAU * (1.0 - left), -FRAC_PI_2 + TAU);
     for (w, alpha) in [(18.4, 0.07), (12.8, 0.11), (8.8, 0.18)] {
         if left > 0.999 {
@@ -1552,7 +1791,8 @@ fn pomo(a: &mut App, lx: f32) {
     }
     icon::stopwatch(&a.gfx, cx, cy + 2.5, 16.2, WHITE, 1.0);
 
-    let label = a.pomo.label();
+    let secs = left_s.ceil() as u64;
+    let label = format!("{:02}:{:02}", secs / 60, secs % 60);
     a.gfx.ui(&label, Rc::new(lx + 205.0, 32.4, 120.0, 34.0), 30.0, 700, WHITE, 1.0, Align::C);
     let rr = Rc::new(lx + 318.0, 38.0, 24.0, 24.0);
     let h = btn(a, rr, 0.15);
@@ -1560,12 +1800,15 @@ fn pomo(a: &mut App, lx: f32) {
     icon::reset(&a.gfx, lx + 330.0, 50.4, 5.4, WHITE, 1.0);
     a.gfx.unzoom();
     hit(a, rr, Act::PomoReset);
-    a.gfx.ui(a.pomo.phase.label(), Rc::new(lx + 206.6, 67.4, 120.0, 16.0), 13.0, 400, LABEL, 1.0, Align::C);
+    a.gfx.ui(&phase_label, Rc::new(lx + 206.6, 67.4, 120.0, 16.0), 13.0, 400, LABEL, 1.0, Align::C);
 
     let short = Rc::new(lx + 146.0, 92.0, 84.0, 28.0);
     let focus = Rc::new(lx + 302.0, 92.0, 83.2, 28.0);
     for (r, p, text) in [(short, Phase::Short, "Short Break"), (focus, Phase::Focus, "Focus Time")] {
-        let on = a.pomo.phase == p;
+        let on = match a.brain.focus.as_ref() {
+            Some(f) => f.resting() == (p != Phase::Focus),
+            None => a.pomo_mode == p,
+        };
         let h = btn(a, r, 0.06);
         a.gfx.fill_rrect(r, 14.0, mix(if on { CHIP } else { 0x171717 }, 0x444444, h * 0.5), 1.0);
         let ix = r.x + 14.0;
@@ -1581,7 +1824,7 @@ fn pomo(a: &mut App, lx: f32) {
     let play = Rc::new(lx + 238.0, 92.0, 54.4, 28.0);
     let h = btn(a, play, 0.08);
     a.gfx.fill_rrect(play, 14.0, mix(RED, 0xFF7A7A, h * 0.6), 1.0);
-    if a.pomo.running() {
+    if running {
         icon::pause(&a.gfx, play.cx(), play.cy(), 11.0, WHITE, 1.0);
     } else {
         icon::play(&a.gfx, play.cx() + 1.0, play.cy(), 11.0, WHITE, 1.0);
@@ -1595,8 +1838,14 @@ fn pomo(a: &mut App, lx: f32) {
 fn water(a: &mut App, lx: f32) {
     title(a, lx, "Water", Some((" Reminder", BLUE)));
     let clock = a.clock();
-    let wd = &a.water;
-    let (taken, goal, on, pct, next) = (wd.taken, wd.goal, wd.on, wd.percent(), wd.next_minute(clock.minutes()));
+    let cfg = &a.brain.cfg;
+    let (taken, goal, on) = (a.brain.stats.water * cfg.cup_ml, cfg.water_goal * cfg.cup_ml, cfg.reminders.water.enabled);
+    let pct = (taken as f32 * 100.0 / goal.max(1) as f32).round() as u32;
+    // The next reminder, as a clock time (demo captures keep their fixed clock).
+    let next = match a.brain.water_in(chrono::Local::now()) {
+        Some(s) if a.demo.is_none() => (clock.minutes() + (s as u32).div_ceil(60)) % (24 * 60),
+        _ => clock.minutes() + 60,
+    };
     let big = format!("{:.1}", taken as f32 / 1000.0);
     a.gfx.ui(&big, Rc::new(lx + 43.8, 30.4, 80.0, 32.0), 30.0, 700, WHITE, 1.0, Align::L);
     let bw = a.gfx.measure(&big, 30.0, 700);
@@ -1698,14 +1947,21 @@ fn chart(a: &mut App, lx: f32) {
         a.gfx.line(x0, y, x1, y, 0.8, if label == "0 ml" { 0x1B4259 } else { 0x373737 }, 1.0);
         a.gfx.ui(label, Rc::new(lx + 344.4, y - 6.0, 40.0, 12.0), 9.5, 400, 0x808080, 1.0, Align::L);
     }
-    let w = &a.water;
-    let (start, end) = (w.start, w.end);
-    let slots = w.slots().max(1);
+    // One bar per hour of the user's day, from when it usually starts to bedtime.
+    let (day, bed) = a.brain.water_day();
+    let start = (chrono::Timelike::hour(&day) * 60).min(20 * 60);
+    let mut end = chrono::Timelike::hour(&bed) * 60;
+    if end <= start {
+        end = (end + 24 * 60).min(24 * 60);
+    }
+    let cups = a.brain.cups_by_hour(chrono::Local::now());
+    let cup = a.brain.cfg.cup_ml as f32;
+    let slots = ((end - start) / 60).max(1);
     let bw = (x1 - x0) / slots as f32;
     let max = 500.0;
     for k in 0..slots {
-        let hour = ((start + k * model::Water::INTERVAL) / 60) as usize;
-        let per = w.hours[hour.min(23)] as f32 / 4.0;
+        let hour = ((start / 60 + k) % 24) as usize;
+        let per = cups[hour] as f32 * cup;
         let x = x0 + k as f32 * bw + bw * 0.25;
         a.gfx.fill_rrect(Rc::new(x, 58.0, bw * 0.5, 48.0), 0.8, 0x0F2640, 0.8);
         if per > 0.0 {
@@ -1732,15 +1988,17 @@ fn water_settings(a: &mut App, lx: f32) {
     hit(a, back, Act::WaterSettings(false));
     a.gfx.ui("Settings", Rc::new(lx + 46.0, 8.2, 100.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
 
-    for (label, y) in [("Bottle", 50.4f32), ("Goal", 80.8), ("Hours", 110.8)] {
+    for (label, y) in [("Cup", 50.4f32), ("Goal", 80.8), ("Day", 110.8)] {
         a.gfx.ui(label, Rc::new(lx + 22.0, y - 9.8, 60.0, 18.0), 13.0, 600, 0xD9D9D9, 1.0, Align::L);
     }
-    let (bottle, each, per, goal, start, end, slots, refills) = {
-        let w = &a.water;
-        (w.bottle, w.each(), w.per_bottle(), w.goal, w.start, w.end, w.slots(), w.refills())
+    let (cup, cups, every, goal, start, end) = {
+        let cfg = &a.brain.cfg;
+        let (day, bed) = a.brain.water_day();
+        let hm = |t: chrono::NaiveTime| chrono::Timelike::hour(&t) * 60 + chrono::Timelike::minute(&t);
+        (cfg.cup_ml, cfg.water_goal, cfg.reminders.water.minutes, cfg.water_goal * cfg.cup_ml, hm(day), hm(bed))
     };
-    stepper(a, lx, 50.4, &format!("{bottle} ml"), Act::Bottle(-1), Act::Bottle(1), 86.0, 162.0);
-    a.gfx.ui(&format!("{each} ml each · {per}/bottle"), Rc::new(lx + 179.6, 43.2, 130.0, 13.0), 9.5, 400, 0x808080, 1.0, Align::L);
+    stepper(a, lx, 50.4, &format!("{cup} ml"), Act::Bottle(-1), Act::Bottle(1), 86.0, 162.0);
+    a.gfx.ui(&format!("{cups} cups a day"), Rc::new(lx + 179.6, 43.2, 130.0, 13.0), 9.5, 400, 0x808080, 1.0, Align::L);
 
     for (i, g) in model::GOALS.iter().enumerate() {
         let r = Rc::new(lx + 74.8 + i as f32 * 56.0, 68.0, 50.4, 24.0);
@@ -1755,21 +2013,22 @@ fn water_settings(a: &mut App, lx: f32) {
         a.gfx.unzoom();
         hit(a, r, Act::Goal(*g));
     }
-    stepper(a, lx, 110.8, &hm_pad(start), Act::Start(-1), Act::Start(1), 86.0, 162.0);
+    // The day starts when the user usually starts (learned); it ends at bedtime, which can be set.
+    a.gfx.ui(&hm_pad(start), Rc::new(lx + 75.0, 100.6, 98.0, 20.0), 14.0, 600, 0x9A9A9A, 1.0, Align::C);
     a.gfx.ui("to", Rc::new(lx + 174.0, 102.2, 20.0, 15.0), 11.5, 400, GREY, 1.0, Align::C);
     stepper(a, lx, 110.8, &hm_pad(end), Act::End(-1), Act::End(1), 206.0, 282.0);
 
     let card = Rc::new(lx + 306.0, 36.0, 92.0, 62.4);
     a.gfx.fill_rrect(card, 12.0, 0x0F1926, 1.0);
-    a.gfx.ui(&slots.to_string(), Rc::new(card.x, 38.4, card.w, 26.0), 22.0, 700, CYAN, 1.0, Align::C);
-    a.gfx.ui("reminders", Rc::new(card.x, 59.6, card.w, 13.0), 10.0, 400, 0x93979D, 1.0, Align::C);
+    a.gfx.ui(&cups.to_string(), Rc::new(card.x, 38.4, card.w, 26.0), 22.0, 700, CYAN, 1.0, Align::C);
+    a.gfx.ui("cups", Rc::new(card.x, 59.6, card.w, 13.0), 10.0, 400, 0x93979D, 1.0, Align::C);
     a.gfx.fill_rrect(Rc::new(lx + 331.6, 75.2, 40.8, 1.6), 0.8, 0x212A36, 1.0);
-    let rs = refills.to_string();
-    let rw = a.gfx.measure(&rs, 15.0, 700) + 3.0 + a.gfx.measure("refills", 10.0, 400);
+    let rs = format!("~{every}");
+    let rw = a.gfx.measure(&rs, 15.0, 700) + 3.0 + a.gfx.measure("min", 10.0, 400);
     let rx = card.cx() - rw / 2.0 + 0.8;
-    a.gfx.ui(&rs, Rc::new(rx, 80.8, 20.0, 16.0), 15.0, 700, CYAN, 1.0, Align::L);
+    a.gfx.ui(&rs, Rc::new(rx, 80.8, 40.0, 16.0), 15.0, 700, CYAN, 1.0, Align::L);
     let nw = a.gfx.measure(&rs, 15.0, 700);
-    a.gfx.ui("refills", Rc::new(rx + nw + 3.0, 83.8, 40.0, 13.0), 10.0, 400, 0x93979D, 1.0, Align::L);
+    a.gfx.ui("min", Rc::new(rx + nw + 3.0, 83.8, 40.0, 13.0), 10.0, 400, 0x93979D, 1.0, Align::L);
     let reset = Rc::new(lx + 306.0, 104.0, 92.0, 18.4);
     let h = btn(a, reset, 0.05);
     a.gfx.fill_rrect(reset, 9.2, mix(0x19191C, 0x3A2020, h), 1.0);
@@ -2030,8 +2289,9 @@ fn drop_wave(a: &mut App) {
 
 fn todo(a: &mut App, lx: f32) {
     title(a, lx, "Todo", Some(("List", TODO_GREEN)));
-    let done = a.todo.done_today();
-    let total = a.todo.tasks.len();
+    let items = a.todo_items();
+    let done = items.iter().filter(|t| t.done).count();
+    let total = items.len();
     a.gfx.ui(&format!("{done}/{total}"), Rc::new(lx + 44.6, 26.4, 140.0, 40.0), 36.0, 700, WHITE, 1.0, Align::L);
     a.gfx.ui("Task Done Today", Rc::new(lx + 43.8, 72.0, 140.0, 16.0), 12.0, 400, LABEL, 1.0, Align::L);
 
@@ -2071,15 +2331,11 @@ fn todo(a: &mut App, lx: f32) {
         a.gfx.ui("No tasks.", Rc::new(card.x + 0.4, 91.0, card.w, 16.0), 13.0, 400, 0x6D6D6D, 1.0, Align::C);
         return;
     }
-    let order = a.todo.order();
     a.gfx.push_clip(card);
-    for (row, &i) in order.iter().take(3).enumerate() {
-        let y = card.y + 4.0 + row as f32 * 29.0;
+    for (i, item) in items.into_iter().enumerate().take(3) {
+        let y = card.y + 4.0 + i as f32 * 29.0;
         let rr = Rc::new(card.x + 4.0, y, card.w - 8.0, 27.0);
-        let (t, time, is_done) = {
-            let task = &a.todo.tasks[i];
-            (task.title.clone(), task.time.clone(), task.done_day != 0)
-        };
+        let (t, time, is_done) = (item.title, item.time, item.done);
         let h = btn(a, rr, 0.03);
         if h > 0.0 {
             a.gfx.fill_rrect(rr, 9.0, 0x2A2A2A, 0.7 * h.min(1.0));

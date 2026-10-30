@@ -27,6 +27,10 @@ pub struct Notice {
     pub site: Option<String>,
     /// Windows notification id, to remove it from the Action Center when dismissed here.
     pub id: u32,
+    /// For a phone notification (Phone Link): the app on the phone.
+    pub phone_app: Option<String>,
+    /// An incoming call rather than a message.
+    pub call: bool,
 }
 
 fn describe(n: &UserNotification) -> Option<Notice> {
@@ -66,7 +70,57 @@ fn describe(n: &UserNotification) -> Option<Notice> {
         [title, rest @ ..] => (title.clone(), rest.join(" ")),
     };
     let id = n.Id().unwrap_or(0);
-    Some(Notice { app, title, body, aumid, source, site: site_line, id })
+    let (phone_app, title, body) = split_phone(&aumid, &lines, title, body);
+    let call = is_call(&title, &body);
+    Some(Notice { app, title, body, aumid, source, site: site_line, id, phone_app, call })
+}
+
+/// Call notifications have no marker the listener can read; their wording tells them apart
+/// (first guess, to be checked against a real Zalo and Messenger call).
+fn is_call(title: &str, body: &str) -> bool {
+    let t = format!("{title} {body}").to_lowercase();
+    ["cuộc gọi đến", "đang gọi", "incoming call", "is calling", "incoming video", "incoming audio", "cuộc gọi video đến", "cuộc gọi thoại đến"].iter().any(|k| t.contains(k))
+}
+
+/// Phone Link's toast lines are: app on the phone, sender, content.
+fn split_phone(aumid: &str, lines: &[String], title: String, body: String) -> (Option<String>, String, String) {
+    if !aumid.starts_with("Microsoft.YourPhone") || lines.len() < 2 {
+        return (None, title, body);
+    }
+    (Some(lines[0].clone()), lines[1].clone(), lines[2..].join(" "))
+}
+
+/// The `launch` link of a notification, from a private copy of Windows' notification store (the
+/// listener doesn't expose it). The copy holds notification text, so it is deleted at once.
+fn launch_link(id: u32) -> Option<String> {
+    let src = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Microsoft\\Windows\\Notifications");
+    let dir = std::env::temp_dir().join(format!("islet-wpn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    for name in ["wpndatabase.db", "wpndatabase.db-wal", "wpndatabase.db-shm"] {
+        let _ = std::fs::copy(src.join(name), dir.join(name));
+    }
+    let read = || -> Option<Vec<u8>> {
+        let db = rusqlite::Connection::open(dir.join("wpndatabase.db")).ok()?;
+        db.query_row("SELECT Payload FROM Notification WHERE Id = ?1", [id], |r| r.get(0)).ok()
+    };
+    let payload = read();
+    let _ = std::fs::remove_dir_all(&dir);
+    launch_of(&String::from_utf8_lossy(&payload?))
+}
+
+fn launch_of(payload: &str) -> Option<String> {
+    let rest = &payload[payload.find("launch=\"")? + 8..];
+    let link = rest[..rest.find('"')?].replace("&amp;", "&");
+    link.starts_with("ms-phone:").then_some(link)
+}
+
+/// Opens a phone notification in Phone Link: the exact one when its link can be read.
+pub fn open_phone(id: u32) {
+    std::thread::spawn(move || {
+        crate::sys::name_thread("islet-open-phone");
+        let target = launch_link(id).unwrap_or_else(|| "shell:AppsFolder\\Microsoft.YourPhone_8wekyb3d8bbwe!App".to_string());
+        crate::sys::shell_open(std::ffi::OsStr::new(&target));
+    });
 }
 
 /// Removes a notification from the Action Center (it was read on the notch).
@@ -83,39 +137,43 @@ pub fn remove(id: u32) {
     });
 }
 
-/// Windows writes every notification into its database under this folder, so a change there is
-/// the signal to read the list again (the listener's own change event needs package identity).
-/// Reading the list on a timer instead kept a shell worker thread busy (~1 % CPU at 500 ms).
-fn watch_store() -> Option<windows::Win32::Foundation::HANDLE> {
-    use windows::Win32::Storage::FileSystem::*;
+/// Windows keeps notifications in a SQLite database. Its write-ahead index starts with a change
+/// counter, bumped on every commit, and reading those bytes costs next to nothing, unlike asking
+/// the listener for the list (which kept a shell worker busy, about 1 % CPU at 500 ms). The
+/// listener's own change event needs package identity, and folder-change notifications don't
+/// fire for this file: Windows keeps it open, so a notification waited for the safety read.
+fn open_store() -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
     let dir = std::env::var_os("LOCALAPPDATA")?;
-    let dir = std::path::Path::new(&dir).join("Microsoft\\Windows\\Notifications");
-    let h = unsafe { FindFirstChangeNotificationW(&windows::core::HSTRING::from(dir.as_os_str()), false, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE) }.ok()?;
-    (!h.is_invalid()).then_some(h)
+    let path = std::path::Path::new(&dir).join(r"Microsoft\Windows\Notifications\wpndatabase.db-shm");
+    std::fs::OpenOptions::new().read(true).share_mode(7).open(path).ok()
 }
 
-/// Blocks until the notification store changes (a slow timer covers missed signals). Returns
-/// whether it changed. The store can be written a moment before the listener lists the new
-/// notification, so after a change the caller reads once more shortly after.
-fn wait_for_change(h: &mut Option<windows::Win32::Foundation::HANDLE>) -> bool {
-    use windows::Win32::Foundation::WAIT_OBJECT_0;
-    use windows::Win32::Storage::FileSystem::FindNextChangeNotification;
-    use windows::Win32::System::Threading::WaitForSingleObject;
-    match *h {
-        Some(handle) => unsafe {
-            let changed = WaitForSingleObject(handle, 15_000) == WAIT_OBJECT_0;
-            if FindNextChangeNotification(handle).is_err() {
-                *h = None;
+/// Waits until the store's counter moves (15 s at most, in case it never does). Returns whether
+/// it moved.
+fn wait_for_change(store: &mut Option<std::fs::File>, last: &mut [u8; 4]) -> bool {
+    use std::os::windows::fs::FileExt;
+    let Some(f) = store else {
+        std::thread::sleep(Duration::from_millis(1500));
+        *store = open_store();
+        return false;
+    };
+    for _ in 0..75 {
+        std::thread::sleep(Duration::from_millis(200));
+        let mut now = [0u8; 4];
+        match f.seek_read(&mut now, 8) {
+            Ok(4) if now != *last => {
+                *last = now;
+                return true;
             }
-            // A notification is written in several steps; read once they settle.
-            std::thread::sleep(Duration::from_millis(60));
-            changed
-        },
-        None => {
-            std::thread::sleep(Duration::from_millis(1500));
-            false
+            Ok(4) => {}
+            _ => {
+                *store = None;
+                return false;
+            }
         }
     }
+    false
 }
 
 /// Set by the UI thread from the "Hide Windows banners" setting.
@@ -139,7 +197,8 @@ pub fn spawn(hwnd: HWND) {
             return;
         }
         let mut seen: Option<HashSet<u32>> = None;
-        let mut changes = watch_store();
+        let mut store = open_store();
+        let mut counter = [0u8; 4];
         let mut recheck = false;
         loop {
             if let Ok(list) = listener.GetNotificationsAsync(NotificationKinds::Toast).and_then(|op| op.join()) {
@@ -155,14 +214,7 @@ pub fn spawn(hwnd: HWND) {
                 // Notifications already in the Action Center at startup are not replayed.
                 if let Some(old) = &seen {
                     for n in current.iter().filter(|n| n.Id().is_ok_and(|id| !old.contains(&id))) {
-                        let aumid = aumid_of(n);
-                        if hide && !crate::sys::banner_hidden(&aumid) {
-                            // First notification from this app: its banner is already up. Dismiss it
-                            // (Islet shows it) and keep later ones from popping a banner at all.
-                            if let Ok(id) = n.Id() {
-                                let _ = listener.RemoveNotification(id);
-                            }
-                        }
+                        crate::sys::timelog("read");
                         if let Some(notice) = describe(n) {
                             let b = Box::into_raw(Box::new(notice));
                             if PostMessageW(Some(HWND(target as *mut _)), WM_NOTICE, WPARAM(0), LPARAM(b as isize)).is_err() {
@@ -171,14 +223,48 @@ pub fn spawn(hwnd: HWND) {
                         }
                     }
                 }
+                // Gone since the last look (a call that was answered, for one).
+                if let Some(old) = &seen {
+                    for id in old.difference(&ids) {
+                        let _ = PostMessageW(Some(HWND(target as *mut _)), crate::WM_NOTICEGONE, WPARAM(*id as usize), LPARAM(0));
+                    }
+                }
                 seen = Some(ids);
             }
             if recheck {
                 recheck = false;
                 std::thread::sleep(Duration::from_millis(300));
             } else {
-                recheck = wait_for_change(&mut changes);
+                recheck = wait_for_change(&mut store, &mut counter);
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phone_lines_are_app_sender_content() {
+        let l: Vec<String> = ["Messenger", "Denis", "Hello", "there"].iter().map(|s| s.to_string()).collect();
+        let (app, title, body) = split_phone("Microsoft.YourPhone_8wekyb3d8bbwe!App", &l, l[0].clone(), String::new());
+        assert_eq!((app.as_deref(), title.as_str(), body.as_str()), (Some("Messenger"), "Denis", "Hello there"));
+        let (app, title, _) = split_phone("Chrome", &l, "x".into(), String::new());
+        assert_eq!((app, title.as_str()), (None, "x"));
+    }
+
+    #[test]
+    fn calls_are_told_from_messages() {
+        assert!(is_call("Minh Anh", "Cuộc gọi đến"));
+        assert!(is_call("Denis is calling you", ""));
+        assert!(!is_call("Minh Anh", "Mai gọi lại nhé"));
+    }
+
+    #[test]
+    fn launch_link_is_read_and_unescaped() {
+        let p = r#"<toast launch="ms-phone:phonenotifications?deviceid=a&amp;notificationId=b" hint-toastId="c">"#;
+        assert_eq!(launch_of(p).as_deref(), Some("ms-phone:phonenotifications?deviceid=a&notificationId=b"));
+        assert_eq!(launch_of(r#"<toast launch="0|2|Chrome">"#), None);
+    }
 }

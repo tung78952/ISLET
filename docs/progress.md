@@ -214,6 +214,35 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   "Charger unplugged" (follows the counting-up level). Storm gains a 3-device burst and a check
   that no device card is left unshown; 2x120 s pass.
 
+- Round 18 (Luma merge, step 1: the brain): src/luma/ carries Luma's config, scheduler, smart
+  and focus logic unchanged (26 of its tests pass inside Islet), plus Brain, which runs Luma's
+  ticker every 2 s from Islet's tick. Data in %APPDATA%\Islet\luma (copied once from
+  %APPDATA%\com.pause.desktop, which is never changed). Water page = Luma cups x cup size
+  (config cupMl/waterGoal added), next from Luma's schedule, chart from today's answers; water
+  settings: cup, goal, learned day start to bedtime (settable). Pomodoro page = Luma focus /
+  Pomodoro (rounds, long rest, phase notices with Skip/Pause, time's-up card with +5 min). To-do
+  = today's Luma reminders (timed, "HH:MM-HH:MM" starts focus) + untimed to-dos; Islet's timed
+  to-dos moved over (todo.txt.bak), water.txt retired (water.txt.bak). New cards: stretch, eyes,
+  breathe, bedtime (ToastKind::Remind), heads-up countdown, Luma-app takeover. Cards wait for an
+  answer (45 s timeout = Luma's snooze; strict hides Later for 10 s) and return after other
+  toasts. While the Luma app is running or its task is enabled, Islet's reminders stay off until
+  "Turn off" (closes pause.exe, disables the "Luma" task). ISLET_FAST=1: 1 minute = 2 s, muted.
+  Fixed: long-lived toasts redrew at 60 fps (15 % CPU) - arrival animations now stop after 3-5 s
+  (waiting card 0.05 %, idle 0.13 %). Storm covers Luma reminders/answers/focus; 4 seeds pass.
+
+- Round 19 (bug pass): foreground_covers ignores shell overlays (capture layer, Win+Tab, Start,
+  panel) and topmost windows; Gfx::invalidate forces a whole frame after show/display change and
+  once a minute (screen check over 7 captures: notch 88 % black throughout). Sliver: brushing does
+  nothing, back on leaving 1 s or a click, 2 s no-hover after. Notification lag was the 15 s safety
+  read (folder change events don't fire for wpndatabase): now polls the db-shm change counter every
+  200 ms, 20 test toasts avg 197 ms, max 288 ms (was 6-19 s). media.rs follows all sessions via
+  choose(); a same-session clip is held 15 s. First notification no longer removed. Phone Link
+  parsed as app/sender/content with Phone Link's icons, brand or icon colour, exact-message link
+  from a private copy of wpndatabase (rusqlite). Toasts stay 6-12 s by length; memory-only history
+  of 50 with a bell. Audio endpoints: flags masked, only real active changes count, cards held 2 s
+  and dropped if Bluetooth reported. Call card (ToastKind::Call, wording-based detection, unverified).
+  ISLET_TIMELOG is temporary, remove after the wired-headphone test.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.
