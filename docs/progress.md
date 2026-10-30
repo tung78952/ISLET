@@ -248,6 +248,9 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   (phone_apps.txt) stay quiet (notify::phone_covers). Clicking brings up the app's or the site's
   open window (sys::open_app/open_site), else launches it. Branch islet-classic and tag
   islet-classic-v1 at 4ae491f; master fast-forwarded to the Luma merge.
+- Round 21: a notification's card and detail view crossfade by share of the growth (card out in
+  the first half, detail in the second), so a taller phone card no longer shows both. The "Show
+  message content" setting is gone: hovering showed the text anyway.
 
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
