@@ -539,7 +539,19 @@ pub fn draw(a: &mut App) {
     let exp_alpha = a.fade.x.clamp(0.0, 1.0) * ((h - 70.0) / 50.0).clamp(0.0, 1.0);
     let tall = a.toast.as_ref().or(a.last_toast.as_ref()).is_some_and(|t| t.kind.tall()) && a.toast_mix.x > 0.5;
     let fade_from = if tall { 84.0 } else { 36.0 };
-    let small_alpha = (1.0 - (h - fade_from) / 14.0).clamp(0.0, 1.0) * (1.0 - a.fade.x).clamp(0.0, 1.0);
+    let mut small_alpha = (1.0 - (h - fade_from) / 14.0).clamp(0.0, 1.0) * (1.0 - a.fade.x).clamp(0.0, 1.0);
+    // A notification grows into its detail view: the card leaves in the first half of the way, the
+    // detail comes in the second, so the two are never on screen together.
+    let notice = a.notice_toast() && a.fade.x < 0.01;
+    let grown = if notice {
+        let card_h = a.notice_card_height();
+        ((h - card_h) / (crate::NOTICE_OPEN[1] - card_h)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if notice {
+        small_alpha = (1.0 - 2.0 * grown).clamp(0.0, 1.0);
+    }
 
     if exp_alpha > 0.01 {
         a.gfx.alpha = na * exp_alpha;
@@ -584,8 +596,8 @@ pub fn draw(a: &mut App) {
             }
         }
     }
-    if a.notice_toast() && a.fade.x < 0.01 {
-        let d = ((h - 86.0) / 40.0).clamp(0.0, 1.0);
+    if notice {
+        let d = (2.0 * grown - 1.0).clamp(0.0, 1.0);
         if d > 0.01 {
             a.gfx.alpha = na * d;
             a.gfx.push_clip(Rc::new(left, 0.0, w, h));

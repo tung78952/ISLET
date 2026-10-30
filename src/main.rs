@@ -882,9 +882,7 @@ impl App {
                     NOTICE_OPEN
                 } else if let Some(t) = &self.toast {
                     if t.kind == ToastKind::Message {
-                        // A phone notification has one more line: the app's name.
-                        let phone = self.notice.as_ref().is_some_and(|n| n.phone_app.is_some());
-                        if phone { [MESSAGE_TOAST[0], MESSAGE_TOAST[1] + 12.0] } else { MESSAGE_TOAST }
+                        [MESSAGE_TOAST[0], self.notice_card_height()]
                     } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break) {
                         PHASE_TOAST
                     } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
@@ -1778,6 +1776,16 @@ impl App {
         v.extend(self.todo.tasks.iter().enumerate().map(|(i, t)| TodoItem { key: TodoKey::Untimed(i), title: t.title.clone(), time: String::new(), done: t.done_day == today }));
         v.sort_by_key(|t| t.done);
         v
+    }
+
+    /// Height of the current notification's small card.
+    pub fn notice_card_height(&self) -> f32 {
+        match self.toast.as_ref().map(|t| t.kind) {
+            // A phone notification has one more line: the app's name.
+            Some(ToastKind::Message) if self.notice.as_ref().is_some_and(|n| n.phone_app.is_some()) => MESSAGE_TOAST[1] + 12.0,
+            Some(ToastKind::Message) => MESSAGE_TOAST[1],
+            _ => TALL_TOAST[1],
+        }
     }
 
     /// The current toast is a notification that can grow into its detail view.
