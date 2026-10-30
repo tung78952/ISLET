@@ -75,6 +75,15 @@ fn describe(n: &UserNotification) -> Option<Notice> {
     Some(Notice { app, title, body, aumid, source, site: site_line, id, phone_app, call })
 }
 
+/// With the phone connected its notifications carry everything, so the PC's own copies stay out:
+/// browsers (YouTube, Gmail...) and apps the phone has also notified from (Zalo PC...).
+pub fn phone_covers(aumid: &str, app: &str, site: Option<&str>, phone_apps: &[String]) -> bool {
+    let id = aumid.to_lowercase();
+    let browser = site.is_some() || ["chrome", "msedge", "brave", "opera", "firefox", "coccoc", "vivaldi"].iter().any(|b| id.contains(b));
+    let name = app.split(" - ").next().unwrap_or(app).trim().to_lowercase();
+    browser || phone_apps.iter().any(|p| !p.is_empty() && (*p == name || name.contains(p.as_str())))
+}
+
 /// Call notifications have no marker the listener can read; their wording tells them apart
 /// (first guess, to be checked against a real Zalo and Messenger call).
 fn is_call(title: &str, body: &str) -> bool {
@@ -252,6 +261,16 @@ mod tests {
         assert_eq!((app.as_deref(), title.as_str(), body.as_str()), (Some("Messenger"), "Denis", "Hello there"));
         let (app, title, _) = split_phone("Chrome", &l, "x".into(), String::new());
         assert_eq!((app, title.as_str()), (None, "x"));
+    }
+
+    #[test]
+    fn the_phone_covers_browsers_and_apps_it_has() {
+        let phone = vec!["zalo".to_string()];
+        assert!(phone_covers("Chrome", "Google Chrome", Some("www.youtube.com"), &phone));
+        assert!(phone_covers("MSEdge", "Microsoft Edge", None, &phone));
+        assert!(phone_covers("Zalo.App", "Zalo", None, &phone));
+        assert!(!phone_covers("Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "Snipping Tool", None, &phone));
+        assert!(!phone_covers("MSTeams_8wekyb3d8bbwe!MSTeams", "Microsoft Teams", None, &phone));
     }
 
     #[test]

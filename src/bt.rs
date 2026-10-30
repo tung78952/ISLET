@@ -1,7 +1,7 @@
 //! Bluetooth connect/disconnect toasts for paired devices, via a WinRT association-endpoint watcher.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::core::{Interface, Ref, HSTRING};
@@ -21,6 +21,19 @@ const CONTAINER: &str = "System.Devices.Aep.ContainerId";
 const BATTERY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
 /// Classic Bluetooth and Bluetooth LE protocol ids, paired devices only.
 const SELECTOR: &str = "(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\") AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
+
+/// A phone is connected right now, and when the last one left (tick count).
+static PHONE_ON: AtomicBool = AtomicBool::new(false);
+static PHONE_LEFT: AtomicU64 = AtomicU64::new(0);
+/// A phone that left a moment ago still counts: Bluetooth drops briefly.
+const PHONE_GRACE_MS: u64 = 60_000;
+
+/// Whether notifications can be expected from the phone (through Phone Link).
+pub fn phone_connected() -> bool {
+    let tick = || unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    let left = PHONE_LEFT.load(Ordering::Relaxed);
+    PHONE_ON.load(Ordering::Relaxed) || (left != 0 && tick() - left < PHONE_GRACE_MS)
+}
 
 /// A connection change, boxed into the LPARAM of WM_BLUETOOTH.
 pub struct Change {
@@ -108,18 +121,28 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     // Devices already connected at startup are recorded silently.
     let ready = Arc::new(AtomicBool::new(false));
     let kinds: Arc<Mutex<HashMap<windows::core::GUID, DeviceKind>>> = Arc::default();
+    let cached = {
+        let kinds = kinds.clone();
+        move |c: windows::core::GUID| {
+            if let Some(k) = kinds.lock().unwrap().get(&c) {
+                return *k;
+            }
+            let k = kind_of(c);
+            kinds.lock().unwrap().insert(c, k);
+            k
+        }
+    };
+    let (d, kind_for) = (devices.clone(), cached.clone());
+    let check_phone = move || {
+        let on = d.lock().unwrap().values().filter(|v| v.connected).filter_map(|v| v.container).collect::<Vec<_>>();
+        let on = on.into_iter().any(|c| kind_for(c) == DeviceKind::Phone);
+        if PHONE_ON.swap(on, Ordering::Relaxed) && !on {
+            PHONE_LEFT.store(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }, Ordering::Relaxed);
+        }
+    };
     let post = move |name: String, connected: bool, container: Option<windows::core::GUID>| {
         let battery = if connected { container.and_then(battery) } else { None };
-        let kind = container
-            .map(|c| {
-                if let Some(k) = kinds.lock().unwrap().get(&c) {
-                    return *k;
-                }
-                let k = kind_of(c);
-                kinds.lock().unwrap().insert(c, k);
-                k
-            })
-            .unwrap_or_default();
+        let kind = container.map(&cached).unwrap_or_default();
         let change = Box::into_raw(Box::new(Change { name, connected, battery, kind }));
         let hwnd = HWND(target as *mut _);
         if unsafe { PostMessageW(Some(hwnd), WM_BLUETOOTH, WPARAM(0), LPARAM(change as isize)) }.is_err() {
@@ -128,6 +151,8 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     };
 
     let post_updated = post.clone();
+    let phone_updated = check_phone.clone();
+    let phone_added = check_phone.clone();
     let (d, r) = (devices.clone(), ready.clone());
     w.Added(&TypedEventHandler::new(move |_: Ref<DeviceWatcher>, info: Ref<DeviceInformation>| {
         if let Some(info) = info.as_ref() {
@@ -138,6 +163,9 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
                 post(name.clone(), true, cont);
             }
             d.lock().unwrap().insert(info.Id()?.to_string(), Device { name, connected: on, container: cont });
+            if on {
+                phone_added();
+            }
         }
         Ok(())
     }))?;
@@ -154,8 +182,12 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
                 })
             };
             // Posted outside the lock: the battery lookup may wait for the device to report.
+            let moved = changed.is_some();
             if let (Some((name, cont)), true) = (changed, r.load(Ordering::Acquire)) {
                 post_updated(name, on, cont);
+            }
+            if moved {
+                phone_updated();
             }
         }
         Ok(())
@@ -170,6 +202,7 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     let r = ready.clone();
     w.EnumerationCompleted(&TypedEventHandler::new(move |_: Ref<DeviceWatcher>, _: Ref<windows::core::IInspectable>| {
         r.store(true, Ordering::Release);
+        check_phone();
         Ok(())
     }))?;
     w.Start()?;

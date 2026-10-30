@@ -243,6 +243,12 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   and dropped if Bluetooth reported. Call card (ToastKind::Call, wording-based detection, unverified).
   ISLET_TIMELOG is temporary, remove after the wired-headphone test.
 
+- Round 20 (phone first): Chrome tab watcher removed. bt::phone_connected() (a connected Bluetooth
+  device of kind Phone, 60 s grace); while true, browsers and PC apps learned from Phone Link
+  (phone_apps.txt) stay quiet (notify::phone_covers). Clicking brings up the app's or the site's
+  open window (sys::open_app/open_site), else launches it. Branch islet-classic and tag
+  islet-classic-v1 at 4ae491f; master fast-forwarded to the Luma merge.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

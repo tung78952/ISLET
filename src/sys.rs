@@ -267,182 +267,76 @@ pub fn find_screenshot(hwnd: HWND, id: u32, px: i32) {
     });
 }
 
-// ---------------------------------------------------------------- browser chat tabs
+// ---------------------------------------------------------------- bringing up an app
 
-/// Facebook doesn't send desktop notifications while its tab is open; it retitles the tab
-/// instead ("Denis đã nhắn tin cho bạn" / "Denis sent you a message"). Chromium reports tab title
-/// changes as accessibility name-change events once an accessibility client has looked at its
-/// tab strip, so this watcher touches each browser's tab strip once (never page contents) and
-/// then just listens: nothing runs until some title changes. New senders are posted as
-/// WM_TABMSG with a boxed (sender, text).
-static TAB_TARGET: AtomicIsize = AtomicIsize::new(0);
-static TAB_RECENT: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
-
-const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
-
-unsafe extern "system" fn on_name_change(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
-    use windows::Win32::UI::Accessibility::*;
-    // Cheap filter first: only Chromium browser windows.
-    let root = GetAncestor(hwnd, GA_ROOT);
-    let mut cls = [0u16; 32];
-    let n = GetClassNameW(root, &mut cls) as usize;
-    if String::from_utf16_lossy(&cls[..n]) != "Chrome_WidgetWin_1" {
-        return;
-    }
-    // Pages rename their own elements constantly (timestamps, players); only tabs matter. Each
-    // element's role is asked once (a cross-process call) and remembered, so page churn costs a
-    // lookup instead of two calls per event.
-    thread_local! {
-        static IS_TAB: std::cell::RefCell<std::collections::HashMap<(isize, i32), bool>> = Default::default();
-    }
-    let key = (root.0 as isize, id_child);
-    if IS_TAB.with(|m| m.borrow().get(&key) == Some(&false)) {
-        return;
-    }
-    let mut acc: Option<IAccessible> = None;
-    let mut child = windows::Win32::System::Variant::VARIANT::default();
-    if AccessibleObjectFromEvent(hwnd, id_object as u32, id_child as u32, &mut acc, &mut child).is_err() {
-        return;
-    }
-    let Some(acc) = acc else { return };
-    let known = IS_TAB.with(|m| m.borrow().get(&key).copied());
-    if known.is_none() {
-        const ROLE_SYSTEM_PAGETAB: i32 = 0x25;
-        let tab = acc.get_accRole(&child).ok().and_then(|v| i32::try_from(&v).ok()) == Some(ROLE_SYSTEM_PAGETAB);
-        IS_TAB.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.len() > 20_000 {
-                m.clear();
-            }
-            m.insert(key, tab);
-        });
-        if !tab {
-            return;
-        }
-    }
-    let Some(name) = acc.get_accName(&child).ok().map(|b| b.to_string()) else { return };
-    let Some((sender, text)) = chat_title(&name) else { return };
-    let now = std::time::Instant::now();
-    let mut recent = TAB_RECENT.lock().unwrap();
-    recent.retain(|(_, t)| now.duration_since(*t) < Duration::from_secs(45));
-    // Facebook flips the title back and forth while a message is unread: report once.
-    let fresh = !recent.iter().any(|(s, _)| *s == sender);
-    if let Some(e) = recent.iter_mut().find(|(s, _)| *s == sender) {
-        e.1 = now;
-    } else {
-        recent.push((sender.clone(), now));
-    }
-    if fresh {
-        let b = Box::into_raw(Box::new((sender, text)));
-        let own = HWND(TAB_TARGET.load(Ordering::Relaxed) as *mut _);
-        if PostMessageW(Some(own), crate::WM_TABMSG, WPARAM(0), LPARAM(b as isize)).is_err() {
-            drop(Box::from_raw(b));
-        }
-    }
-}
-
-pub fn spawn_tab_watch(hwnd: isize) {
-    TAB_TARGET.store(hwnd, Ordering::Relaxed);
-    std::thread::spawn(move || unsafe {
-        name_thread("islet-tab-watch");
-        use windows::Win32::UI::Accessibility::*;
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-        let hook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, None, Some(on_name_change), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-        if hook.is_invalid() {
-            return;
-        }
-        let uia = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok();
-        let walker = uia.as_ref().and_then(|u| u.ControlViewWalker().ok());
-        let mut touched: Vec<isize> = Vec::new();
-        // A timer wakes the message loop every 10 s to touch newly opened browser windows.
-        let _ = SetTimer(None, 1, 10_000, None);
-        let mut msg = MSG::default();
-        loop {
-            if let (Some(u), Some(w)) = (&uia, &walker) {
-                let wins = chromium_windows();
-                touched.retain(|h| wins.iter().any(|w| w.0 as isize == *h));
-                for win in wins {
-                    if !touched.contains(&(win.0 as isize)) {
-                        if let Ok(root) = u.ElementFromHandle(win) {
-                            let _ = find_tab_strip(w, &root);
-                        }
-                        touched.push(win.0 as isize);
-                    }
-                }
-            }
-            if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                break;
-            }
-            DispatchMessageW(&msg);
-        }
-    });
-}
-
-/// The element whose children are the browser's tabs (breadth-first over the frame, skipping
-/// web documents).
-unsafe fn find_tab_strip(
-    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    root: &windows::Win32::UI::Accessibility::IUIAutomationElement,
-) -> Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
-    use windows::Win32::UI::Accessibility::*;
-    let mut queue = std::collections::VecDeque::from([(root.clone(), 0u32)]);
-    let mut visited = 0;
-    while let Some((el, depth)) = queue.pop_front() {
-        visited += 1;
-        if visited > 400 {
-            return None;
-        }
-        let ct = el.CurrentControlType().unwrap_or_default();
-        if ct == UIA_TabItemControlTypeId {
-            return walker.GetParentElement(&el).ok();
-        }
-        if ct == UIA_DocumentControlTypeId || depth > 9 {
-            continue;
-        }
-        let mut child = walker.GetFirstChildElement(&el).ok();
-        while let Some(c) = child {
-            child = walker.GetNextSiblingElement(&c).ok();
-            queue.push_back((c, depth + 1));
-        }
-    }
-    None
-}
-
-/// Sender and message line from a Facebook/Messenger chat tab title.
-fn chat_title(name: &str) -> Option<(String, String)> {
-    let n = name.trim();
-    for (pat, text) in [
-        (" đã nhắn tin cho bạn", "đã nhắn tin cho bạn"),
-        (" đã gửi tin nhắn cho bạn", "đã gửi tin nhắn cho bạn"),
-        (" sent you a message", "sent you a message"),
-        (" messaged you", "messaged you"),
-    ] {
-        if let Some(i) = n.find(pat) {
-            let sender = n[..i].trim().trim_start_matches(|c: char| c == '(' || c.is_ascii_digit() || c == ')' || c == ' ');
-            if !sender.is_empty() {
-                return Some((sender.to_string(), text.to_string()));
-            }
-        }
-    }
-    None
-}
-
-fn chromium_windows() -> Vec<HWND> {
+/// Brings up a top-level window `pick` accepts (by its title and executable name).
+fn focus_window(pick: impl Fn(&str, &str) -> bool) -> bool {
     unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
         let out = &mut *(lp.0 as *mut Vec<HWND>);
-        let mut cls = [0u16; 64];
-        let n = GetClassNameW(h, &mut cls) as usize;
-        if IsWindowVisible(h).as_bool() && String::from_utf16_lossy(&cls[..n]) == "Chrome_WidgetWin_1" && GetWindowTextLengthW(h) > 0 {
+        let tool = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        if IsWindowVisible(h).as_bool() && !tool && GetWindowTextLengthW(h) > 0 {
             out.push(h);
         }
         true.into()
     }
-    let mut v: Vec<HWND> = Vec::new();
+    let mut wins: Vec<HWND> = Vec::new();
     unsafe {
-        let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+        let _ = EnumWindows(Some(each), LPARAM(&mut wins as *mut _ as isize));
+        for h in wins {
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(h, &mut buf) as usize;
+            let title = String::from_utf16_lossy(&buf[..n]).to_lowercase();
+            if pick(&title, &exe_of(h)) {
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
+                SwitchToThisWindow(h, true);
+                return true;
+            }
+        }
     }
-    v.truncate(6);
-    v
+    false
+}
+
+/// Lower-case file name of the process owning a window.
+unsafe fn exe_of(h: HWND) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(h, Some(&mut pid));
+    let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+    let mut buf = [0u16; 520];
+    let mut len = buf.len() as u32;
+    let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+    let _ = CloseHandle(p);
+    if !ok {
+        return String::new();
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+    path.rsplit('\\').next().unwrap_or("").to_string()
+}
+
+/// An app's own window if it is open, else starts it.
+pub fn open_app(aumid: &str, name: &str) {
+    let name: String = name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    let id = aumid.to_lowercase();
+    let found = focus_window(|_, exe| {
+        let stem = exe.trim_end_matches(".exe");
+        !stem.is_empty() && stem != "applicationframehost" && ((name.len() >= 3 && stem.contains(&name)) || (stem.len() >= 3 && id.contains(stem)))
+    });
+    if !found && !aumid.is_empty() {
+        shell_open(std::ffi::OsStr::new(&format!("shell:AppsFolder\\{aumid}")));
+    }
+}
+
+/// The browser window showing `site` (its tab is the active one) if there is one, else a new tab.
+pub fn open_site(site: &str) {
+    let host = site.split("://").last().unwrap_or(site).trim_start_matches("www.").to_lowercase();
+    let label = host.split('.').next().unwrap_or("").to_string();
+    let browsers = ["chrome.exe", "msedge.exe", "brave.exe", "opera.exe", "firefox.exe", "browser.exe", "vivaldi.exe"];
+    if label.is_empty() || !focus_window(|title, exe| browsers.contains(&exe) && title.contains(&label)) {
+        let url = if site.contains("://") { site.to_string() } else { format!("https://{site}") };
+        shell_open(std::ffi::OsStr::new(&url));
+    }
 }
 
 // ---------------------------------------------------------------- volume

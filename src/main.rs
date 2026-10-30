@@ -52,7 +52,6 @@ pub const WM_FOREGROUND: u32 = WM_APP + 9;
 pub const WM_BLUETOOTH: u32 = WM_APP + 10;
 pub const WM_NOTICE: u32 = WM_APP + 11;
 pub const WM_VOLKEY: u32 = WM_APP + 12;
-pub const WM_TABMSG: u32 = WM_APP + 13;
 pub const WM_ICON: u32 = WM_APP + 14;
 pub const WM_SHOT: u32 = WM_APP + 15;
 pub const WM_AUDIODEV: u32 = WM_APP + 16;
@@ -523,7 +522,11 @@ pub struct App {
     pub loop_rect: Option<gfx::Rc>,
     /// Last screen brightness reported, and the last chat sender shown.
     brightness: Option<u32>,
-    last_chat: Option<(String, Instant)>,
+    /// Apps seen coming from the phone (lower case), kept between runs: while the phone is
+    /// connected their PC versions stay quiet.
+    phone_apps: Vec<String>,
+    /// The phone's last connection card: Bluetooth flapping doesn't get one each time.
+    phone_card: Option<Instant>,
     /// Tasks whose start-time reminder already fired today: (title, day).
     /// Water goal reached toast shown for this day.
     /// Whether the current button press began outside the window (a drag coming in).
@@ -699,7 +702,8 @@ impl App {
             catch_all: false,
             loop_rect: None,
             brightness: None,
-            last_chat: None,
+            phone_apps: std::fs::read_to_string(model::data_dir().join("phone_apps.txt")).unwrap_or_default().lines().map(str::to_string).collect(),
+            phone_card: None,
             press_known: false,
             press_outside: false,
             yielded: false,
@@ -752,7 +756,6 @@ impl App {
             self.devices = Some(devices::Tracker::start(self.hwnd));
             sys::watch_audio_devices(self.hwnd);
             notify::spawn(self.hwnd);
-            sys::spawn_tab_watch(self.hwnd.0 as isize);
             sys::spawn_focus_watch();
             self.poll_power();
             self.take_over_from_luma();
@@ -1486,30 +1489,12 @@ impl App {
         }
     }
 
-    /// A chat message from a browser tab title; skipped if the same sender just arrived as a
-    /// Windows notification.
-    pub fn chat_message(&mut self, sender: &str, text: &str) {
-        if self.last_chat.as_ref().is_some_and(|(s, t)| s == sender && t.elapsed() < Duration::from_secs(20)) {
-            return;
+    fn learn_phone_app(&mut self, app: &str) {
+        let app = app.trim().to_lowercase();
+        if !self.phone_apps.contains(&app) {
+            self.phone_apps.push(app);
+            let _ = std::fs::write(model::data_dir().join("phone_apps.txt"), self.phone_apps.join("\n"));
         }
-        self.last_chat = Some((sender.to_string(), Instant::now()));
-        sound::play(sound::Chime::Soft);
-        self.toast(ToastKind::Message, text, sender, None);
-        self.keep_notice(NoticeInfo {
-            kind: NoticeKind::Chat,
-            app: "Messenger".into(),
-            aumid: String::new(),
-            site: Some("www.facebook.com".into()),
-            id: 0,
-            title: sender.to_string(),
-            body: text.to_string(),
-            born: Instant::now(),
-            file: None,
-            thumb: None,
-            file_size: String::new(),
-            phone_app: None,
-            icon: None,
-        });
     }
 
     /// The notification behind the current toast; it also goes into the history.
@@ -1814,14 +1799,13 @@ impl App {
                     sys::shell_open(f.as_os_str());
                 }
             }
-            NoticeKind::Chat => sys::shell_open(std::ffi::OsStr::new("https://www.facebook.com/messages/")),
+            NoticeKind::Chat => sys::open_site("https://www.facebook.com/messages/"),
             NoticeKind::Browser => {
                 if let Some(site) = &n.site {
-                    let url = if site.contains("://") { site.clone() } else { format!("https://{site}") };
-                    sys::shell_open(std::ffi::OsStr::new(&url));
+                    sys::open_site(site);
                 }
             }
-            NoticeKind::App => sys::shell_open(std::ffi::OsStr::new(&format!("shell:AppsFolder\\{}", n.aumid))),
+            NoticeKind::App => sys::open_app(&n.aumid, &n.app),
         }
     }
 
@@ -2666,10 +2650,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             a.shelf_icons.insert(path, (bmp, size));
             a.render();
         }
-        WM_TABMSG => {
-            let m = Box::from_raw(lp.0 as *mut (String, String));
-            a.chat_message(&m.0, &m.1);
-        }
         WM_TRAY => match (lp.0 & 0xFFFF) as u32 {
             WM_LBUTTONUP => {
                 let m = if a.expanded() { Mode::Compact } else { Mode::Expanded };
@@ -2714,6 +2694,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let n = Box::from_raw(lp.0 as *mut notify::Notice);
             // Title row: sender (or app); second row: the message, else the app name.
             let body = if n.body.is_empty() { n.app.clone() } else { n.body.clone() };
+            if a.settings.hide_banners {
+                sys::hide_banner(&n.aumid);
+            }
+            sys::timelog(&format!("notice phone_connected={}", bt::phone_connected()));
+            match &n.phone_app {
+                Some(app) => a.learn_phone_app(app),
+                None if bt::phone_connected() && notify::phone_covers(&n.aumid, &n.app, n.site.as_deref(), &a.phone_apps) => return LRESULT(0),
+                None => {}
+            }
             let info = NoticeInfo::of(&n);
             sys::timelog(&format!("shown aumid={} lines_title={} lines_body={}", n.aumid, n.title.chars().count(), n.body.chars().count()));
             if info.kind == NoticeKind::Screenshot {
@@ -2722,25 +2711,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if n.call {
                 sound::play(sound::Chime::Alert);
                 a.toast(ToastKind::Call, &n.phone_app.clone().unwrap_or_else(|| n.app.clone()), &n.title, None);
-            } else if info.kind == NoticeKind::Phone {
-                // The same message may also show as a browser tab title.
-                a.last_chat = Some((n.title.clone(), Instant::now()));
+            } else if info.kind == NoticeKind::Phone || n.source == Some("facebook") {
                 sound::play(sound::Chime::Soft);
-                a.toast(ToastKind::Message, &n.body, &n.title, None);
-            } else if n.source == Some("facebook") {
-                a.last_chat = None;
-                a.chat_message(&n.title, &body);
-                // The Windows notification carries the id and the content: it replaces the entry.
-                a.history.pop_front();
-                a.history_unread = a.history_unread.saturating_sub(1);
+                a.toast(ToastKind::Message, &body, &n.title, None);
             } else {
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Notice, &body, &n.title, None);
             }
             a.keep_notice(info);
-            if a.settings.hide_banners {
-                sys::hide_banner(&n.aumid);
-            }
         }
         WM_BLUETOOTH => {
             let c = Box::from_raw(lp.0 as *mut bt::Change);
@@ -2748,7 +2726,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let level = c.battery.filter(|_| c.connected).map(|b| b as f32 / 100.0);
             a.last_bt = Some(Instant::now());
             sys::timelog(&format!("bluetooth name={:?} connected={} kind={:?} battery={:?}", c.name, c.connected, c.kind, c.battery));
-            a.present_device(DeviceCard { kind: ToastKind::Bluetooth(c.connected), name: c.name.clone(), sub: state.into(), level, device: c.kind, root: None });
+            let flapping = c.kind == devices::DeviceKind::Phone && a.phone_card.is_some_and(|t| t.elapsed() < Duration::from_secs(60));
+            if !flapping {
+                if c.kind == devices::DeviceKind::Phone {
+                    a.phone_card = Some(Instant::now());
+                }
+                a.present_device(DeviceCard { kind: ToastKind::Bluetooth(c.connected), name: c.name.clone(), sub: state.into(), level, device: c.kind, root: None });
+            }
         }
         WM_DEVICECHANGE => {
             if let Some(t) = a.devices.as_mut() {

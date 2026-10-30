@@ -209,9 +209,19 @@ impl App {
                 "notice"
             }
             9 => {
-                let m = Box::into_raw(Box::new((format!("Sender {}", s.pick(3)), "đã nhắn tin cho bạn".to_string())));
-                post(crate::WM_TABMSG, 0, m as isize);
-                "message (tab)"
+                let n = Box::into_raw(Box::new(crate::notify::Notice {
+                    app: "Phone Link".into(),
+                    title: format!("Sender {}", s.pick(3)),
+                    body: "Hello from the phone".into(),
+                    aumid: "Microsoft.YourPhone_8wekyb3d8bbwe!App".into(),
+                    source: None,
+                    site: None,
+                    id: 0,
+                    phone_app: Some("Zalo".into()),
+                    call: false,
+                }));
+                post(crate::WM_NOTICE, 0, n as isize);
+                "message (phone)"
             }
             10 => {
                 let n = Box::into_raw(Box::new(crate::notify::Notice {
