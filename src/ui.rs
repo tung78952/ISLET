@@ -1005,12 +1005,10 @@ fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
             a.gfx.ui(&size, Rc::new(tx, top + 45.0, tw, 16.0), 11.5, 400, 0x8E8E93, 1.0, Align::L);
         }
     } else {
-        let hidden = matches!(kind, crate::NoticeKind::Chat | crate::NoticeKind::Phone) && !a.settings.show_content;
-        let shown = if hidden { "Tin nhắn mới".to_string() } else { body.clone() };
         a.gfx.ui(&title, Rc::new(x0, top, x1 - x0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
         let by = top + 24.0;
         a.gfx.push_clip(Rc::new(x0, by, x1 - x0, (bottom - by).max(0.0)));
-        a.gfx.text(&shown, Rc::new(x0, by, x1 - x0, 200.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
+        a.gfx.text(&body, Rc::new(x0, by, x1 - x0, 200.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
         a.gfx.pop_clip();
     }
 
@@ -1107,8 +1105,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let tw = w - 64.0 - 22.0;
             // Sender and message are centred together on the card, one line or two; a phone
             // notification names its app above them.
-            let body = if a.settings.show_content { title } else { "Tin nhắn mới" };
-            let body_h = a.gfx.measure_wrapped(body, 13.0, 400, tw).clamp(17.0, 34.0);
+            let body_h = a.gfx.measure_wrapped(title, 13.0, 400, tw).clamp(17.0, 34.0);
             let app_h = if phone.is_some() { 14.0 } else { 0.0 };
             // Optical centre: glyphs sit low in their line boxes.
             let top = ((h - (app_h + 20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(3.0) + app_h;
@@ -1125,7 +1122,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             }
             let by = top + 22.0;
             a.gfx.push_clip(Rc::new(tx, by, tw, body_h + 2.0));
-            a.gfx.text(body, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
+            a.gfx.text(title, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
             a.gfx.pop_clip();
             a.gfx.offset(off.0, off.1);
         }

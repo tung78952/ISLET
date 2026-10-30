@@ -2454,7 +2454,6 @@ impl App {
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.pet), 2, w!("Islet Mascot"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.minimal), 3, w!("Minimal notch"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.hide_banners), 6, w!("Hide Windows banners"));
-        let _ = AppendMenuW(m, MF_STRING | check(self.settings.show_content), 7, w!("Show message content"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING, 4, w!("About Islet"));
         let _ = AppendMenuW(m, MF_STRING, 5, w!("Exit"));
@@ -2472,10 +2471,6 @@ impl App {
             3 => {
                 self.settings.minimal = !self.settings.minimal;
                 self.minimal_armed = true;
-                self.settings.save();
-            }
-            7 => {
-                self.settings.show_content = !self.settings.show_content;
                 self.settings.save();
             }
             6 => {

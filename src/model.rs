@@ -81,8 +81,6 @@ pub struct Settings {
     pub lyric_size: f32,
     /// Turn off Windows' corner banners for apps whose notifications Islet shows.
     pub hide_banners: bool,
-    /// Show the text of chat messages (off: sender only).
-    pub show_content: bool,
     /// The separate Luma app was turned off (Islet runs its reminders now).
     pub luma_app_off: bool,
 }
@@ -95,7 +93,6 @@ impl Settings {
             minimal: num(&m, "minimal", 0u8) == 1,
             lyric_size: num(&m, "lyric_size", 15.0f32).clamp(15.0, 26.0),
             hide_banners: num(&m, "hide_banners", 1u8) == 1,
-            show_content: num(&m, "show_content", 1u8) == 1,
             luma_app_off: num(&m, "luma_app_off", 0u8) == 1,
         }
     }
@@ -107,7 +104,6 @@ impl Settings {
                 ("minimal", (self.minimal as u8).to_string()),
                 ("lyric_size", self.lyric_size.to_string()),
                 ("hide_banners", (self.hide_banners as u8).to_string()),
-                ("show_content", (self.show_content as u8).to_string()),
                 ("luma_app_off", (self.luma_app_off as u8).to_string()),
             ],
         );
