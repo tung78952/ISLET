@@ -85,9 +85,10 @@ pub enum Act {
     OldDelete(usize),
     FormDay(u8),
     FormDelete,
+    FormNext,
+    FormBack,
+    PanelBack,
     FormClear,
-    FormSave,
-    FormCancel,
     ShelfOpen(usize),
     ShelfRemove(usize),
     ShelfClear,
@@ -1575,19 +1576,28 @@ fn ring_angle(age: f32, amp: f32) -> f32 {
 
 // ---------------------------------------------------------------- expanded
 
+/// The top row, the same on every page: the title's side is the page's, the rest sits together
+/// on the right, the settings button in the corner.
 fn header(a: &mut App, lx: f32) {
-    let charging = a.power.is_some_and(|p| p.battery && p.ac);
-    if charging {
-        icon::charging(&a.gfx, lx + 146.0, 18.0, 8.2, a.charge_level(), 1.0);
+    const GEAR: f32 = 382.0;
+    const BELL: f32 = 346.0;
+    const EQ: f32 = 288.0;
+    if a.page == Page::Music && a.panel.is_none() {
+        let date = a.date_label();
+        a.gfx.ui(&date, Rc::new(lx + 24.0, 8.0, 180.0, 20.0), 13.0, 400, 0xC8C8C8, 1.0, Align::L);
     }
-    let date = a.date_label();
     let time = a.clock().time_label();
-    a.gfx.ui(&date, Rc::new(lx + 163.0, 8.0, 160.0, 20.0), 13.0, 400, WHITE, 1.0, Align::L);
-    let dw = a.gfx.measure(&date, 13.0, 400);
-    a.gfx.ui(&time, Rc::new(lx + 163.0 + dw + 7.0, 8.0, 60.0, 20.0), 13.0, 700, WHITE, 1.0, Align::L);
+    a.gfx.ui(&time, Rc::new(lx + 214.0, 8.0, 60.0, 20.0), 14.0, 700, WHITE, 1.0, Align::R);
+    if a.power.is_some_and(|p| p.battery && p.ac) {
+        icon::charging(&a.gfx, lx + 196.0, 18.0, 8.2, a.charge_level(), 1.0);
+    }
+    if a.panel.is_some() || a.form.is_some() {
+        return;
+    }
+    right_indicator(a, lx + EQ, 18.0);
     // The bell appears once there is something to look back at.
-    if !a.history.is_empty() && a.panel.is_none() {
-        let bell = Rc::new(lx + 346.0, 7.0, 24.0, 22.0);
+    if !a.history.is_empty() {
+        let bell = Rc::new(lx + BELL - 12.0, 7.0, 24.0, 22.0);
         let h = btn(a, bell, 0.1);
         icon::bell(&a.gfx, bell.cx(), bell.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
         if a.history_unread > 0 {
@@ -1600,14 +1610,11 @@ fn header(a: &mut App, lx: f32) {
         a.gfx.unzoom();
         hit(a, bell, Act::History(true));
     }
-    if a.panel.is_none() {
-        right_indicator(a, lx + 390.8, 18.0);
-    }
-    // Every page has its settings a click away.
-    if a.panel.is_none() && !a.water_settings {
-        let gear = Rc::new(lx + 118.0, 8.0, 20.0, 20.0);
+    if !a.water_settings {
+        let gear = Rc::new(lx + GEAR - 13.0, 5.0, 26.0, 26.0);
         let h = btn(a, gear, 0.15);
-        icon::sliders(&a.gfx, gear.cx(), gear.cy(), mix(0x8A8A8A, WHITE, h), 1.0);
+        a.gfx.fill_circle(gear.cx(), gear.cy(), 13.0, 13.0, 0xFFFFFF, 0.07 + 0.1 * h);
+        icon::sliders(&a.gfx, gear.cx(), gear.cy(), WHITE, 1.0);
         a.gfx.unzoom();
         hit(a, gear, match a.page {
             Page::Music => Act::Panel(Some(Panel::Music)),
@@ -2131,13 +2138,6 @@ fn water(a: &mut App, lx: f32) {
     a.gfx.ui("Drink", Rc::new(drink.x + 26.4, drink.y, 40.0, drink.h), 10.0, 400, WHITE, 1.0, Align::L);
     a.gfx.unzoom();
     hit(a, drink, Act::Drank);
-    let set = Rc::new(lx + 108.8, 97.6, 70.4, 26.4);
-    let h = btn(a, set, 0.07);
-    a.gfx.fill_rrect(set, 13.2, mix(0x19191C, 0x34343A, h), 1.0);
-    icon::sliders(&a.gfx, set.x + 13.6, set.cy(), 0xE3E3E3, 1.0);
-    a.gfx.ui("Settings", Rc::new(set.x + 26.0, set.y, 44.0, set.h), 10.0, 400, 0xE3E3E3, 1.0, Align::L);
-    a.gfx.unzoom();
-    hit(a, set, Act::WaterSettings(true));
 
     a.gfx.fill_rrect(Rc::new(lx + 205.2, 36.0, 1.6, 84.0), 0.8, 0x131313, 1.0);
     for (i, dx) in [359.6f32, 366.8].iter().enumerate() {
@@ -2338,7 +2338,7 @@ fn panel(a: &mut App, lx: f32, p: Panel) {
     a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
     icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
     a.gfx.unzoom();
-    hit(a, back, Act::Panel(None));
+    hit(a, back, Act::PanelBack);
     let title = match p {
         Panel::General => "Cài đặt",
         Panel::Focus => "Tập trung",
@@ -2347,10 +2347,10 @@ fn panel(a: &mut App, lx: f32, p: Panel) {
     };
     a.gfx.ui(title, Rc::new(lx + 46.0, 8.2, 120.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
     if p != Panel::General {
-        let r = Rc::new(lx + 346.0, 9.0, 52.0, 20.0);
+        let r = Rc::new(lx + 340.0, 6.0, 58.0, 24.0);
         let h = btn(a, r, 0.06);
-        a.gfx.fill_rrect(r, 10.0, mix(0x1E1E20, 0x3A3A3C, h), 1.0);
-        a.gfx.ui("Chung", r, 10.5, 400, 0xC8C8C8, 1.0, Align::C);
+        a.gfx.fill_rrect(r, 12.0, mix(0x242426, 0x3A3A3C, h), 1.0);
+        a.gfx.ui("Chung", r, 12.0, 500, WHITE, 1.0, Align::C);
         a.gfx.unzoom();
         hit(a, r, Act::Panel(Some(Panel::General)));
     }
@@ -2412,6 +2412,11 @@ fn panel(a: &mut App, lx: f32, p: Panel) {
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.
 fn wheel(a: &mut App, id: WheelId, r: Rc, labels: &[String]) {
+    wheel_sized(a, id, r, labels, 14.0);
+}
+
+fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
+    let row = a.wheels[id as usize].row;
     let pos = a.wheels[id as usize].pos;
     a.gfx.push_clip(r);
     let first = (pos.floor() as i32 - 2).max(0);
@@ -2421,12 +2426,12 @@ fn wheel(a: &mut App, id: WheelId, r: Rc, labels: &[String]) {
             continue;
         }
         // Rows bend back around a drum: closer together away from the middle.
-        let y = r.cy() + crate::wheel::ROW * 1.15 * (d * 0.85).sin() / 0.85 * 0.9;
+        let y = r.cy() + row * 1.15 * (d * 0.85).sin() / 0.85 * 0.9;
         let near = (1.0 - d.abs()).clamp(0.0, 1.0);
-        let size = 11.5 + 2.5 * near;
+        let size = big * (0.82 + 0.18 * near);
         let tone = mix(0x8A8A8A, WHITE, near);
         let alpha = (1.05 - 0.42 * d.abs()).clamp(0.0, 1.0);
-        a.gfx.ui(&labels[i as usize], Rc::new(r.x, y - 10.0, r.w, 20.0), size, if near > 0.5 { 600 } else { 400 }, tone, alpha, Align::C);
+        a.gfx.ui(&labels[i as usize], Rc::new(r.x, y - big, r.w, big * 2.0), size, if near > 0.5 { 600 } else { 400 }, tone, alpha, Align::C);
     }
     a.gfx.pop_clip();
     hit(a, r, Act::Wheel(id));
@@ -2691,13 +2696,13 @@ fn toggle(a: &mut App, r: Rc, on: bool, act: Act) {
 }
 
 fn todo(a: &mut App, lx: f32) {
-    title(a, lx, "Reminders", None);
-    let tw = a.gfx.measure("Reminders", 15.0, 600);
     if a.form.is_some() {
         form(a, lx);
         return;
     }
-    let add = Rc::new(lx + 18.0 + tw, 9.0, 20.0, 20.0);
+    title(a, lx, "Reminders", None);
+    let tw = a.gfx.measure("Reminders", 15.0, 600);
+    let add = Rc::new(lx + 24.0 + tw, 6.0, 24.0, 24.0);
     let h = btn(a, add, 0.15);
     icon::plus_circle(&a.gfx, add.cx(), add.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
     a.gfx.unzoom();
@@ -2744,53 +2749,102 @@ fn todo(a: &mut App, lx: f32) {
     }
 }
 
+/// Row height of the big clock in the reminder form.
+pub const CLOCK_ROW: f32 = 34.0;
+
+fn pill(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, act: Act) {
+    let h = btn(a, r, 0.07);
+    a.gfx.fill_rrect(r, r.h / 2.0, mix(bg, 0x8A8A8A, 0.2 * h), 1.0);
+    a.gfx.ui(label, r, 14.0, 600, fg, 1.0, Align::C);
+    a.gfx.unzoom();
+    hit(a, r, act);
+}
+
+/// The reminder form, one thing at a time: the name, then a big clock that shrinks up out of the
+/// way when the days come in. The steps glide into each other and back.
 fn form(a: &mut App, lx: f32) {
-    let (text, days, editing) = {
+    let (text, days, editing, step) = {
         let f = a.form.as_ref().unwrap();
-        (f.title.clone(), f.days, f.id.is_some())
+        (f.title.clone(), f.days, f.id.is_some(), f.step)
     };
-    let tf = Rc::new(lx + 22.0, 36.0, 376.0, 26.0);
-    a.gfx.fill_rrect(tf, 10.0, 0x161618, 1.0);
-    let inner = Rc::new(tf.x + 11.0, tf.y, tf.w - 34.0, tf.h);
-    if text.is_empty() {
-        a.gfx.ui("Tên nhắc", inner, 13.0, 400, GREY, 1.0, Align::L);
-    } else {
-        a.gfx.ui(&text, inner, 13.0, 400, WHITE, 1.0, Align::L);
-        icon::x_circle(&a.gfx, tf.x + tf.w - 15.2, tf.cy(), 6.4, 0xDADADA, 0x121212, 1.0);
-        hit(a, Rc::new(tf.x + tf.w - 24.0, tf.y, 22.0, tf.h), Act::FormClear);
+    let x = a.form_anim.x.clamp(0.0, 2.0);
+    let (to_time, to_days) = (x.min(1.0), (x - 1.0).max(0.0));
+    let back = Rc::new(lx + 18.0, 6.0, 24.0, 24.0);
+    let h = btn(a, back, 0.18);
+    a.gfx.fill_circle(back.cx(), back.cy(), 12.0, 12.0, mix(CHEVRON, 0x8A8A8A, h), 1.0);
+    icon::chevron(&a.gfx, back.cx(), back.cy(), true, 0x000000, 1.0);
+    a.gfx.unzoom();
+    hit(a, back, Act::FormBack);
+    let base = a.gfx.alpha;
+    // The name.
+    let name = 1.0 - to_time;
+    if name > 0.01 {
+        a.gfx.alpha = base * name;
+        let tf = Rc::new(lx + 30.0 - 60.0 * to_time, 44.0, 360.0, 40.0);
+        a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
+        let inner = Rc::new(tf.x + 16.0, tf.y, tf.w - 44.0, tf.h);
+        if text.is_empty() {
+            a.gfx.ui("Tên nhắc", inner, 16.0, 400, GREY, 1.0, Align::L);
+        } else {
+            a.gfx.ui(&text, inner, 16.0, 500, WHITE, 1.0, Align::L);
+            icon::x_circle(&a.gfx, tf.x + tf.w - 20.0, tf.cy(), 7.4, 0xDADADA, 0x1A1A1C, 1.0);
+            if step == 0 {
+                hit(a, Rc::new(tf.x + tf.w - 32.0, tf.y, 30.0, tf.h), Act::FormClear);
+            }
+        }
+        if step == 0 && (a.born.elapsed().as_millis() / 530) % 2 == 0 {
+            let cw = a.gfx.measure(&text, 16.0, 500).min(inner.w);
+            a.gfx.line(inner.x + cw + 1.0, tf.y + 10.0, inner.x + cw + 1.0, tf.y + tf.h - 10.0, 1.4, WHITE, 1.0);
+        }
+        if editing {
+            pill(a, Rc::new(tf.x, 96.0, 90.0, 32.0), "Xóa", 0x2A1416, 0xFF6B6B, Act::FormDelete);
+        }
     }
-    if (a.born.elapsed().as_millis() / 530) % 2 == 0 {
-        let cw = a.gfx.measure(&text, 13.0, 400).min(inner.w);
-        a.gfx.line(inner.x + cw + 0.8, tf.y + 7.0, inner.x + cw + 0.8, tf.y + tf.h - 7.0, 1.2, WHITE, 1.0);
+    // The clock: big to choose, then small and out of the way.
+    let (hour, minute) = (a.wheels[WheelId::FormHour as usize].index(), a.wheels[WheelId::FormMinute as usize].index());
+    if to_time > 0.01 {
+        a.gfx.alpha = base * to_time;
+        let big = 34.0;
+        if to_days < 0.01 {
+            let cy = 80.0;
+            let cx = lx + 170.0 + 60.0 * (1.0 - to_time);
+            a.gfx.fill_rrect(Rc::new(cx - 90.0, cy - 25.0, 180.0, 50.0), 14.0, 0xFFFFFF, 0.09);
+            let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+            let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
+            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 88.0, 34.0, 76.0, 92.0), &hours, big);
+            a.gfx.ui(":", Rc::new(cx - 12.0, cy - 24.0, 24.0, 44.0), big, 600, WHITE, 1.0, Align::C);
+            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 12.0, 34.0, 76.0, 92.0), &minutes, big);
+        } else {
+            // The same numbers flying up beside the title.
+            let k = to_days;
+            let (cx, cy) = (lx + 170.0 + (lx + 110.0 - (lx + 170.0)) * k, 80.0 + (19.0 - 80.0) * k);
+            let size = big + (17.0 - big) * k;
+            a.gfx.ui(&format!("{hour:02} : {minute:02}"), Rc::new(cx - 100.0, cy - size, 200.0, size * 2.0), size, 700, WHITE, 1.0, Align::C);
+        }
     }
-    const CY: f32 = 96.0;
-    a.gfx.fill_rrect(Rc::new(lx + 22.0, CY - 11.0, 110.0, 22.0), 7.0, 0xFFFFFF, 0.09);
-    let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
-    let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-    wheel(a, WheelId::FormHour, Rc::new(lx + 26.0, CY - 28.0, 46.0, 56.0), &hours);
-    a.gfx.ui(":", Rc::new(lx + 71.0, CY - 10.0, 10.0, 20.0), 14.0, 600, WHITE, 1.0, Align::C);
-    wheel(a, WheelId::FormMinute, Rc::new(lx + 80.0, CY - 28.0, 46.0, 56.0), &minutes);
-    for (i, name) in ["T2", "T3", "T4", "T5", "T6", "T7", "CN"].into_iter().enumerate() {
-        let r = Rc::new(lx + 144.0 + i as f32 * 36.0, 69.0, 34.0, 24.0);
-        let on = days[i];
-        let h = btn(a, r, 0.06);
-        a.gfx.fill_rrect(r, 8.0, mix(if on { WHITE } else { 0x1E1E20 }, 0x8A8A8A, 0.25 * h), 1.0);
-        a.gfx.ui(name, r, 11.0, 600, if on { 0x000000 } else { 0x9A9A9A }, 1.0, Align::C);
-        a.gfx.unzoom();
-        hit(a, r, Act::FormDay(i as u8));
+    // The days.
+    if to_days > 0.01 {
+        a.gfx.alpha = base * to_days;
+        let grow = 0.82 + 0.18 * to_days;
+        let (w, h, gap) = (46.0 * grow, 40.0 * grow, 8.0 * grow);
+        let x0 = lx + 210.0 - (7.0 * w + 6.0 * gap) / 2.0;
+        for (i, name) in ["T2", "T3", "T4", "T5", "T6", "T7", "CN"].into_iter().enumerate() {
+            let r = Rc::new(x0 + i as f32 * (w + gap), 40.0, w, h);
+            let on = days[i];
+            let hov = btn(a, r, 0.06);
+            a.gfx.fill_rrect(r, 12.0, mix(if on { WHITE } else { 0x1E1E20 }, 0x8A8A8A, 0.25 * hov), 1.0);
+            a.gfx.ui(name, r, 15.0, 600, if on { 0x000000 } else { 0xB0B0B0 }, 1.0, Align::C);
+            a.gfx.unzoom();
+            if step == 2 {
+                hit(a, r, Act::FormDay(i as u8));
+            }
+        }
+        let on: Vec<u8> = (0..7).filter(|d| days[*d as usize]).collect();
+        a.gfx.ui(&days_label(&on), Rc::new(lx + 30.0, 96.0, 200.0, 32.0), 14.0, 400, 0xB0B0B0, 1.0, Align::L);
     }
-    let button = |a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, act: Act| {
-        let h = btn(a, r, 0.07);
-        a.gfx.fill_rrect(r, r.h / 2.0, mix(bg, 0x8A8A8A, 0.2 * h), 1.0);
-        a.gfx.ui(label, r, 11.5, 600, fg, 1.0, Align::C);
-        a.gfx.unzoom();
-        hit(a, r, act);
-    };
-    if editing {
-        button(a, Rc::new(lx + 144.0, 100.0, 60.0, 22.0), "Xóa", 0x2A1416, 0xFF6B6B, Act::FormDelete);
-    }
-    button(a, Rc::new(lx + 262.0, 100.0, 62.0, 22.0), "Hủy", 0x2A2A2C, WHITE, Act::FormCancel);
-    button(a, Rc::new(lx + 330.0, 100.0, 68.0, 22.0), "Lưu", WHITE, 0x000000, Act::FormSave);
+    a.gfx.alpha = base;
+    let label = if step == 2 { "Lưu" } else { "Tiếp" };
+    pill(a, Rc::new(lx + 300.0, 96.0, 90.0, 32.0), label, WHITE, 0x000000, Act::FormNext);
 }
 
 #[cfg(test)]

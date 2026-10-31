@@ -12,6 +12,8 @@ pub const ROW: f32 = 19.0;
 
 pub struct Wheel {
     pub pos: f32,
+    /// Height of a row: how far a drag turns it by one value.
+    pub row: f32,
     len: usize,
     speed: f32,
     target: Option<f32>,
@@ -27,7 +29,12 @@ struct Drag {
 
 impl Wheel {
     pub fn new(len: usize, index: usize) -> Self {
-        Wheel { pos: index as f32, len, speed: 0.0, target: None, drag: None }
+        Wheel { pos: index as f32, row: ROW, len, speed: 0.0, target: None, drag: None }
+    }
+
+    pub fn tall(mut self, row: f32) -> Self {
+        self.row = row;
+        self
     }
 
     /// The value it is on, or passing.
@@ -52,9 +59,9 @@ impl Wheel {
         d.moved |= (y - d.y).abs() > 3.0;
         let dt = (t - d.last.1).max(0.001);
         // A touch of smoothing, so one jittery sample doesn't decide the flick.
-        self.speed = self.speed * 0.6 + 0.4 * (d.last.0 - y) / ROW / dt;
+        self.speed = self.speed * 0.6 + 0.4 * (d.last.0 - y) / self.row / dt;
         d.last = (y, t);
-        let pos = d.from + (d.y - y) / ROW;
+        let pos = d.from + (d.y - y) / self.row;
         let top = (self.len - 1) as f32;
         // Past the ends it gives way reluctantly.
         self.pos = if pos < 0.0 { pos * 0.35 } else if pos > top { top + (pos - top) * 0.35 } else { pos };
@@ -67,6 +74,14 @@ impl Wheel {
             self.speed = 0.0;
             self.target = Some((self.pos.round() + tap as f32).clamp(0.0, (self.len - 1) as f32));
         }
+    }
+
+    /// The drag was taken away: it just settles where it is.
+    pub fn drop_drag(&mut self) {
+        if let Some(d) = self.drag.as_mut() {
+            d.moved = true;
+        }
+        self.release(0);
     }
 
     pub fn turn(&mut self, notches: f32) {
@@ -158,6 +173,17 @@ mod tests {
         w.release(0);
         settle(&mut w);
         assert_eq!(w.index(), 4);
+    }
+
+    #[test]
+    fn losing_the_mouse_mid_drag_does_not_leave_it_stuck() {
+        let mut w = Wheel::new(10, 5);
+        w.press(100.0, 0.0);
+        w.drag_to(60.0, 0.1);
+        w.drop_drag();
+        assert!(!w.held());
+        settle(&mut w);
+        assert_eq!(w.pos, w.pos.round());
     }
 
     #[test]

@@ -212,6 +212,8 @@ pub struct Form {
     pub title: String,
     /// Weekdays it repeats on, Monday first. None chosen: once.
     pub days: [bool; 7],
+    /// 0 the name, 1 the time, 2 the days.
+    pub step: u8,
 }
 
 /// Left, top, right, bottom in layout units.
@@ -471,6 +473,10 @@ pub struct App {
     pub wheels: [wheel::Wheel; 10],
     /// The settings panel on show, instead of the page.
     pub panel: Option<ui::Panel>,
+    /// The panel to go back to from the general one.
+    panel_back: Option<ui::Panel>,
+    /// Glides between the steps of the reminder form.
+    pub form_anim: Spring,
     wheel_held: Option<ui::WheelId>,
     wheels_moving: bool,
     pub old_notes: bool,
@@ -700,8 +706,10 @@ impl App {
             page: Page::Music,
             water_sub: 0,
             water_settings: false,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8), wheel::Wheel::new(60, 0), wheel::Wheel::new(18, 4), wheel::Wheel::new(30, 4), wheel::Wheel::new(8, 3), wheel::Wheel::new(12, 0)],
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(18, 4), wheel::Wheel::new(30, 4), wheel::Wheel::new(8, 3), wheel::Wheel::new(12, 0)],
             panel: None,
+            panel_back: None,
+            form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
             wheels_moving: false,
             old_notes: false,
@@ -1303,6 +1311,7 @@ impl App {
         if self.playing() {
             self.last_playing = now;
         }
+        let form_target = self.form.as_ref().map_or(0.0, |f| f.step as f32);
         let eq_target = if now.duration_since(self.last_playing) < Duration::from_millis(EQ_HOLD_MS) { 1.0 } else { 0.0 };
         for _ in 0..n {
             moving |= self.sw.step(t[0], sub);
@@ -1311,6 +1320,7 @@ impl App {
             moving |= self.slide.step(0.0, sub);
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
+            moving |= self.form_anim.step(form_target, sub);
             moving |= self.eq_mix.step(eq_target, sub);
             moving |= self.jam_x.step(if self.jam_show { 1.0 } else { 0.0 }, sub);
             moving |= self.intro.step(0.0, sub);
@@ -2313,7 +2323,9 @@ impl App {
                 days[*d as usize % 7] = true;
             }
         }
-        self.form = Some(Form { id: item.as_ref().map(|r| r.id.clone()), title: item.map(|r| r.title).unwrap_or_default(), days });
+        self.form = Some(Form { id: item.as_ref().map(|r| r.id.clone()), title: item.map(|r| r.title).unwrap_or_default(), days, step: 0 });
+        self.form_anim.x = 0.0;
+        self.form_anim.v = 0.0;
         self.set_noactivate(false);
         unsafe {
             let _ = SetForegroundWindow(self.hwnd);
@@ -2491,7 +2503,12 @@ impl App {
             }
             Act::Wheel(_) => {}
             Act::Panel(p) => {
+                self.panel_back = if p == Some(ui::Panel::General) { self.panel } else { None };
                 self.panel = p;
+                self.sync_wheels();
+            }
+            Act::PanelBack => {
+                self.panel = self.panel_back.take();
                 self.sync_wheels();
             }
             Act::Set(key) => self.change_setting(key),
@@ -2516,6 +2533,19 @@ impl App {
                     self.old_notes = false;
                 }
             }
+            Act::FormNext => {
+                match self.form.as_mut() {
+                    Some(f) if f.step == 2 => self.close_form(true),
+                    Some(f) if !f.title.trim().is_empty() => f.step += 1,
+                    _ => {}
+                }
+            }
+            Act::FormBack => {
+                match self.form.as_mut() {
+                    Some(f) if f.step > 0 => f.step -= 1,
+                    _ => self.close_form(false),
+                }
+            }
             Act::FormDay(d) => {
                 if let Some(form) = self.form.as_mut() {
                     form.days[d as usize] ^= true;
@@ -2532,8 +2562,6 @@ impl App {
                 }
                 self.close_form(false);
             }
-            Act::FormSave => self.close_form(true),
-            Act::FormCancel => self.close_form(false),
             Act::ShelfOpen(i) => {
                 if let Some(p) = self.shelf.items.get(i) {
                     unsafe {
@@ -2762,6 +2790,15 @@ impl App {
         self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
     }
 
+    /// The mouse was taken from a drag in progress.
+    fn drop_wheel(&mut self) {
+        if let Some(id) = self.wheel_held.take() {
+            self.wheels[id as usize].drop_drag();
+            self.down = None;
+            self.kick();
+        }
+    }
+
     /// The wheels show what is set.
     fn sync_wheels(&mut self) {
         use chrono::Timelike;
@@ -2869,6 +2906,10 @@ impl App {
             let t = self.eye_time();
             self.wheels[id as usize].press(y, t);
             self.wheel_held = Some(id);
+            // The drag goes on outside the notch.
+            unsafe {
+                SetCapture(self.hwnd);
+            }
             self.kick();
         }
         if let Some(Act::Scrub(bx, bw)) = act {
@@ -2885,6 +2926,9 @@ impl App {
             let tap = self.hits.iter().find(|(_, a)| *a == Act::Wheel(id)).map_or(0, |(r, _)| ((pressed_at - r.cy()) / wheel::ROW).round() as i32);
             self.wheels[id as usize].release(tap.clamp(-1, 1));
             self.down = None;
+            unsafe {
+                let _ = ReleaseCapture();
+            }
             self.kick();
             return;
         }
@@ -2940,8 +2984,8 @@ impl App {
             8 => {
                 f.title.pop();
             }
-            13 => return self.act(Act::FormSave),
-            27 => return self.act(Act::FormCancel),
+            13 => return self.act(Act::FormNext),
+            27 => return self.act(Act::FormBack),
             c if c >= 32 => {
                 if let Some(ch) = char::from_u32(c).filter(|_| f.title.chars().count() < 60) {
                     f.title.push(ch);
@@ -3086,6 +3130,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let (x, y) = lparam_xy(lp);
             a.on_up(x, y);
         }
+        WM_CAPTURECHANGED => a.drop_wheel(),
         WM_MOUSEACTIVATE => {
             return LRESULT(if a.form.is_some() { MA_ACTIVATE } else { MA_NOACTIVATE } as isize);
         }
@@ -3364,8 +3409,13 @@ fn demo_setup(a: &mut App, spec: &str) {
         });
         a.sync_wheels();
     }
-    if kv.get("remform") == Some(&"1") {
+    if let Some(step) = kv.get("remform").and_then(|v| v.parse::<u8>().ok()) {
         a.open_form(None);
+        if let Some(f) = a.form.as_mut() {
+            f.title = "Uống thuốc".into();
+            f.step = step;
+        }
+        a.form_anim.x = step as f32;
     }
     if kv.get("watersettings") == Some(&"1") {
         a.water_settings = true;
