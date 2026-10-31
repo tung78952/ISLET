@@ -642,7 +642,10 @@ fn compact(a: &mut App, left: f32, w: f32) {
     if show > 0.3 {
         eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
     }
-    if show > 0.01 || a.sample_running() {
+    // The battery and the notes reach past the compact notch, so those scenes redraw everything.
+    if a.eyes.scene.x > 0.01 || a.eye_feel_wide() {
+        a.loop_rect = None;
+    } else if show > 0.01 || a.sample_running() {
         a.loop_rect = Some(Rc::new(left + 2.0, 0.0, w - 4.0, 30.0));
     }
 }
@@ -676,12 +679,18 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     /// Notch units per pixel of the design sheet.
     const SCALE: f32 = 0.175;
     let e = &a.eyes;
-    let lean = e.lean.x;
+    // In the battery scene the eyes stay on their side and lunge at it.
+    let scene = e.scene.x.clamp(0.0, 1.0);
+    let centre = cx;
+    let cx = cx - 46.0 * scene + 32.0 * e.lunge.x * scene;
+    let room = reach;
+    let reach = reach * (1.0 - scene);
+    let lean = e.lean.x + 0.08 * e.tilt.x;
     let t = a.born.elapsed().as_secs_f32();
     let breath = 0.35 * (t * 1.7).sin();
     let g = &a.gfx;
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
-        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + p.1 * SCALE)).collect();
+        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + side * e.tilt.x * 2.6 + p.1 * SCALE)).collect();
         g.glow_ellipse(cx + lean * reach + side * 32.0, cy, 28.0, 16.0, RED, 0.3 * show);
         let lens = show * (1.0 - e.dizzy.x.clamp(0.0, 1.0));
         g.fill_poly(&outline, WHITE, lens);
@@ -709,6 +718,29 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
             g.droplet(cx + side * 52.0, cy + dy, 4.2, WHITE, show * tear * (1.0 - k * k));
         }
     }
+    // Notes and the battery never leave the notch as it narrows again.
+    let half = a.sw.x / 2.0;
+    g.push_clip(Rc::new(centre - half, 0.0, half * 2.0, a.sh.x));
+    for &(born, side, pair) in &e.notes {
+        let k = (t - born) / crate::eyes::NOTE_LIFE;
+        if (0.0..1.0).contains(&k) {
+            let x = centre + side * (room + 40.0) + 3.0 * (k * 7.0).sin();
+            crate::anim::note(g, x, cy + 8.0 - 18.0 * k, 5.5, pair, show * (1.0 - k * k * k));
+        }
+    }
+    if scene > 0.01 {
+        // The battery slides in from the right, takes the blows and shows what is left.
+        let (bx, by) = (centre + 66.0 + 60.0 * (1.0 - scene) + e.shove.x, cy);
+        let pct = a.power.map_or(10, |p| p.pct);
+        g.rotate(bx, by, 0.09 * e.rock.x);
+        crate::anim::battery(g, bx, by, 40.0, 20.0, e.dent.x.clamp(0.0, 1.0));
+        g.unzoom();
+        let rise = 3.0 * e.dent.x.clamp(0.0, 1.0);
+        let label = format!("{pct}%");
+        let at = Rc::new(bx + 28.0 + e.shove.x * 0.4, cy - 10.0 - rise, 44.0, 20.0);
+        a.gfx.ui(&label, at, 15.0, 700, 0xFF3B30, scene * show, Align::L);
+    }
+    a.gfx.pop_clip();
 }
 
 fn lyric_pill(a: &mut App, left: f32, w: f32) {
@@ -833,7 +865,6 @@ enum Glyph {
     Drop,
     Bell,
     Stopwatch,
-    Checklist,
     /// Nothing: the caller draws over the badge.
     Blank,
     /// What a connected device is (headphones, mouse, drive...).
@@ -917,11 +948,6 @@ fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
             a.gfx.unzoom();
         }
         Glyph::Stopwatch => icon::stopwatch(&a.gfx, cx, cy + 1.2, 7.4, hex, 1.0),
-        Glyph::Checklist => {
-            a.gfx.zoom(cx, cy, 0.62);
-            icon::checklist(&a.gfx, cx, cy, hex, 1.0);
-            a.gfx.unzoom();
-        }
     }
 }
 
@@ -947,19 +973,25 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
     let tx = left + 62.0;
     // Badge: a ripple leaves it once, the ring breathes gently.
     let q = (age / 0.8).clamp(0.0, 1.0);
-    if q < 1.0 {
-        a.gfx.stroke_circle(bx, cy, 14.4 + 8.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
-    }
-    a.gfx.fill_circle(bx, cy, 14.4, 14.4, c.accent, 1.0);
-    a.gfx.fill_circle(bx, cy, 11.2, 11.2, c.dark, 1.0);
-    // Three shakes, then still (a card waiting for an answer stops redrawing; see effects()).
-    let shake = c.shake > 0.0 && age < 4.8;
-    if shake {
-        a.gfx.rotate(bx, cy, ring_angle(age, c.shake));
-    }
-    glyph(a, c.badge, bx, cy, WHITE);
-    if shake {
-        a.gfx.unzoom();
+    if matches!(c.badge, Glyph::Bell) {
+        // The bell is its own badge and keeps ringing while the card waits.
+        crate::anim::bell(&a.gfx, bx, cy, 16.0, age, c.accent);
+        a.loop_rect = Some(Rc::new(bx - 24.0, 0.0, 48.0, h));
+    } else {
+        if q < 1.0 {
+            a.gfx.stroke_circle(bx, cy, 14.4 + 8.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
+        }
+        a.gfx.fill_circle(bx, cy, 14.4, 14.4, c.accent, 1.0);
+        a.gfx.fill_circle(bx, cy, 11.2, 11.2, c.dark, 1.0);
+        // Three shakes, then still (a card waiting for an answer stops redrawing; see effects()).
+        let shake = c.shake > 0.0 && age < 4.8;
+        if shake {
+            a.gfx.rotate(bx, cy, ring_angle(age, c.shake));
+        }
+        glyph(a, c.badge, bx, cy, WHITE);
+        if shake {
+            a.gfx.unzoom();
+        }
     }
     let right_w = if c.ring.is_some() { 56.0 } else { c.reserve };
     let tw = w - (tx - left) - right_w - 8.0;
@@ -1345,7 +1377,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         }
         ToastKind::Task => {
             let (b1, b2) = buttons(56.0, 56.0);
-            let c = Card { accent: TODO_GREEN, dark: 0x0B2414, badge: Glyph::Checklist, shake: 0.18, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            let c = Card { accent: TODO_GREEN, dark: 0x0B2414, badge: Glyph::Bell, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
             card(a, left, w, h, t, title, value, &c);
             later_button(a, b1, t, live);
             card_button(a, b2, "Start", 0x0E3A1B, 0x35D766, live, Act::LumaDone);
@@ -1368,7 +1400,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let (b1, b2) = buttons(56.0, 56.0);
             // Counts down to the card, the ring emptying second by second.
             let secs_left = a.brain.showing.as_ref().and_then(|s| s.heads_up_until).map(|u| (u - chrono::Local::now()).num_milliseconds().max(0) as f32 / 1000.0).unwrap_or(0.0);
-            let c = Card { accent: 0xF5B833, dark: 0x2A2310, badge: Glyph::Stopwatch, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            let c = Card { accent: 0xF5B833, dark: 0x2A2310, badge: Glyph::Bell, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
             card(a, left, w, h, t, title, &format!("Coming up in {}s", secs_left.ceil() as u32), &c);
             card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::LumaLater);
             card_button(a, b2, "Now", 0x2A2310, 0xF5B833, live, Act::LumaNow);

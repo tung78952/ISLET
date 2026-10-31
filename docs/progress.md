@@ -261,6 +261,12 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   wiring, bell on real cards, eight more icons (need images), character choice, eye CPU on its
   own, moving the Spider-Man lenses out of the code before any release, removing ISLET_TIMELOG.
 
+- Round 23: the eyes come out on their own (Mind Peek): random every 15-40 min, a look before a
+  reminder card, nodding to music (loudness meter, read only while nodding, with notes in a wider
+  notch), a battery scene at 10 % (the eyes butt the battery), love, sad and cry on events.
+  An event waits 10 s for a free moment. Task and heads-up cards ring the new bell. Waiting: eight
+  icons (need images), character choice, Spider-Man lenses out of the code before any release.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

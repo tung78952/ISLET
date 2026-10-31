@@ -371,6 +371,23 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeWatch_Impl {
 }
 
 thread_local! {
+    static METER: std::cell::RefCell<Option<windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Opens the loudness meter of the default output. It reads levels only, never the audio.
+pub fn open_meter() {
+    let meter = unsafe {
+        CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL).ok().and_then(|en| en.GetDefaultAudioEndpoint(eRender, eMultimedia).ok()).and_then(|dev| dev.Activate(CLSCTX_ALL, None).ok())
+    };
+    METER.with(|m| *m.borrow_mut() = meter);
+}
+
+/// Peak loudness of what is playing right now (0..1).
+pub fn audio_peak() -> f32 {
+    METER.with(|m| m.borrow().as_ref().and_then(|m| unsafe { m.GetPeakValue() }.ok()).unwrap_or(0.0))
+}
+
+thread_local! {
     /// The volume subscription on the current default output; replaced when the default changes.
     static VOLUME_SUB: std::cell::RefCell<Option<(IAudioEndpointVolume, IAudioEndpointVolumeCallback)>> = const { std::cell::RefCell::new(None) };
 }

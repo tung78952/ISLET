@@ -113,6 +113,55 @@ const DIZZY: f32 = 2.0;
 const REST_WORKING: f32 = 30.0;
 const REST_ACTED: f32 = 1.0;
 
+/// Seconds an event waits for a free moment before it is dropped.
+const PEEK_WAIT: f32 = 10.0;
+
+/// A reason to come out without the pointer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Peek {
+    /// Look around and pull one face.
+    Random,
+    /// A moment's look before a reminder card.
+    Card(Look),
+    /// Nod along to what is playing.
+    Music,
+    /// React to something that happened.
+    Mood(Look),
+    /// Butt the nearly flat battery to get attention.
+    Battery,
+}
+
+impl Peek {
+    fn lasts(self) -> f32 {
+        match self {
+            Peek::Random => 4.0,
+            Peek::Card(_) => 0.8,
+            Peek::Music => 5.0,
+            Peek::Mood(_) => 2.0,
+            Peek::Battery => 4.0,
+        }
+    }
+}
+
+/// Spots beats in a stream of loudness readings: a jump above the recent average.
+pub struct Beat {
+    average: f32,
+    cooling: u32,
+}
+
+impl Beat {
+    pub fn new() -> Self {
+        Beat { average: 0.0, cooling: 0 }
+    }
+
+    pub fn feed(&mut self, level: f32) -> bool {
+        let hit = self.cooling == 0 && level > 0.02 && level > self.average * 1.3;
+        self.average += (level - self.average) * 0.15;
+        self.cooling = if hit { 5 } else { self.cooling.saturating_sub(1) };
+        hit
+    }
+}
+
 /// What the app tells the eyes about the moment.
 pub struct Sense {
     pub t: f32,
@@ -138,10 +187,15 @@ pub struct Feel {
     pub blink: bool,
     pub gaze: f32,
     pub lift: f32,
+    /// Nodding along to the music.
+    pub music: bool,
+    /// The battery scene is on, and how far the eyes lunge at the battery (-1 back to 1 hit).
+    pub battery: bool,
+    pub lunge: f32,
 }
 
 impl Feel {
-    pub const ASLEEP: Feel = Feel { show: false, look: Look::Closed, blink: false, gaze: 0.0, lift: 0.0 };
+    pub const ASLEEP: Feel = Feel { show: false, look: Look::Closed, blink: false, gaze: 0.0, lift: 0.0, music: false, battery: false, lunge: 0.0 };
 }
 
 /// When the eyes come out and what they do: they answer a pointer arriving, never one that is
@@ -167,6 +221,11 @@ pub struct Mind {
     heading: f32,
     shakes: u32,
     shake_at: f32,
+    next_random: f32,
+    /// An event waiting for a free moment, and when it was asked for.
+    pending: Option<(Peek, f32)>,
+    /// What they are out for: the reason, when it began, the face it uses.
+    active: Option<(Peek, f32, Look)>,
 }
 
 impl Mind {
@@ -190,7 +249,47 @@ impl Mind {
             heading: 0.0,
             shakes: 0,
             shake_at: 0.0,
+            next_random: 0.0,
+            pending: None,
+            active: None,
         }
+    }
+
+    /// Asks the eyes to come out. A newer reason replaces one still waiting.
+    pub fn ask(&mut self, peek: Peek, t: f32) {
+        self.pending = Some((peek, t));
+    }
+
+    /// What they do during a peek, `e` seconds in.
+    fn peeking(&mut self, t: f32, peek: Peek, e: f32, face: Look) -> Feel {
+        let blink = self.blink(t);
+        let (look, gaze) = match peek {
+            Peek::Random if e < 0.8 => (Look::Neutral, -0.7),
+            Peek::Random if e < 1.5 => (Look::Neutral, 0.7),
+            Peek::Random if (2.1..3.4).contains(&e) => (face, 0.0),
+            Peek::Random => (Look::Neutral, 0.0),
+            Peek::Card(look) | Peek::Mood(look) => (look, 0.0),
+            Peek::Music => (Look::Happy, 0.0),
+            Peek::Battery if e < 0.8 => (Look::Neutral, 0.8),
+            Peek::Battery if e < 2.3 => (Look::Squint, 0.8),
+            Peek::Battery => (Look::Neutral, -0.2),
+        };
+        let lunge = match e {
+            _ if peek != Peek::Battery => 0.0,
+            e if (0.8..1.0).contains(&e) || (1.5..1.7).contains(&e) => -0.3,
+            e if (1.0..1.16).contains(&e) || (1.7..1.86).contains(&e) => 1.0,
+            _ => 0.0,
+        };
+        Feel { show: true, look, blink: blink && look == Look::Neutral, gaze, lift: 0.0, music: peek == Peek::Music, battery: peek == Peek::Battery, lunge }
+    }
+
+    fn blink(&mut self, t: f32) -> bool {
+        if t >= self.blink_at {
+            self.blink_until = t + 0.11;
+            // One blink in four comes twice.
+            self.blink_at = t + if self.roll() < 0.25 { 0.24 } else { 2.0 + 4.0 * self.roll() };
+        }
+        t < self.blink_until
     }
 
     /// A number from 0 up to 1.
@@ -220,6 +319,20 @@ impl Mind {
         let heading = self.last.map_or(0.0, |(px, ..)| (s.x - px).signum());
         self.last = Some((s.x, s.y, t));
         let moving = speed > 60.0 * s.scale;
+        if self.next_random == 0.0 {
+            self.next_random = t + 900.0 + 1500.0 * self.roll();
+        } else if t >= self.next_random {
+            self.next_random = t + 900.0 + 1500.0 * self.roll();
+            if self.pending.is_none() {
+                self.pending = Some((Peek::Random, t));
+            }
+        }
+        if self.pending.is_some_and(|(_, at)| t - at > PEEK_WAIT) {
+            self.pending = None;
+        }
+        if (s.acted || s.blocked) && self.active.take().is_some() {
+            self.closing_until = t + 0.14;
+        }
         if s.acted {
             if self.awake {
                 self.sleep(t, REST_ACTED);
@@ -231,6 +344,23 @@ impl Mind {
             if self.awake {
                 self.sleep(t, 1.0);
             }
+            return self.asleep(t);
+        }
+        if self.active.is_none() {
+            if let Some((peek, _)) = self.pending.take() {
+                let face = [Look::Happy, Look::Wink, Look::Smug, Look::Up][(self.roll() * 4.0) as usize % 4];
+                self.active = Some((peek, t, face));
+                self.awake = false;
+                self.mood = None;
+            }
+        }
+        if let Some((peek, began, face)) = self.active {
+            if t - began < peek.lasts() {
+                return self.peeking(t, peek, t - began, face);
+            }
+            self.active = None;
+            self.closing_until = t + 0.14;
+            self.rest_until = self.rest_until.max(t + 1.0);
             return self.asleep(t);
         }
         if !self.awake {
@@ -253,7 +383,7 @@ impl Mind {
         // Dizzy lasts its full time whatever the pointer does: nobody recovers in an instant.
         let dizzy = self.mood.is_some_and(|m| m.0 == Look::Dizzy && t <= m.1);
         if dizzy {
-            return Feel { show: true, look: Look::Dizzy, blink: false, gaze: 0.0, lift: 0.0 };
+            return Feel { show: true, look: Look::Dizzy, ..Feel::ASLEEP };
         }
         let still = t - self.moved_at;
         let rest = if !s.near {
@@ -282,7 +412,7 @@ impl Mind {
         if self.shakes >= 4 {
             self.shakes = 0;
             self.mood = Some((Look::Dizzy, t + DIZZY));
-            return Feel { show: true, look: Look::Dizzy, blink: false, gaze: 0.0, lift: 0.0 };
+            return Feel { show: true, look: Look::Dizzy, ..Feel::ASLEEP };
         }
         // Coming round from dizziness takes a moment, with heavy lids.
         if let Some((look, end)) = self.mood.filter(|m| t > m.1) {
@@ -314,18 +444,17 @@ impl Mind {
         } else {
             self.fixed += error * 0.4;
         }
-        if t >= self.blink_at {
-            self.blink_until = t + 0.11;
-            // One blink in four comes twice.
-            self.blink_at = t + if self.roll() < 0.25 { 0.24 } else { 2.0 + 4.0 * self.roll() };
-        }
+        let blink = self.blink(t);
         if t > self.twitch_at {
             self.twitch_at = t + 0.8 + 0.6 * self.roll();
         }
         let tremor = 0.025 * (self.twitch_at * 37.0).sin();
-        Feel { show: true, look: self.mood.map_or(Look::Neutral, |m| m.0), blink: t < self.blink_until, gaze: self.fixed + tremor, lift: s.lift }
+        Feel { show: true, look: self.mood.map_or(Look::Neutral, |m| m.0), blink, gaze: self.fixed + tremor, lift: s.lift, ..Feel::ASLEEP }
     }
 }
+
+/// Seconds a music note stays in the air.
+pub const NOTE_LIFE: f32 = 1.2;
 
 pub struct Eye {
     pub points: Vec<P>,
@@ -340,6 +469,16 @@ pub struct Eyes {
     pub lean: Spring,
     /// A little hop whenever the expression changes.
     pub hop: Spring,
+    /// The head tilting from side to side with the beat (-1..1).
+    pub tilt: Spring,
+    /// Music notes in the air: when each left, which side, which note.
+    pub notes: Vec<(f32, f32, bool)>,
+    /// The battery scene: how far it has come in, the lunge, and the blow's effect on the battery.
+    pub scene: Spring,
+    pub lunge: Spring,
+    pub shove: Spring,
+    pub rock: Spring,
+    pub dent: Spring,
     /// How far the tear and the spirals have come in (0..1).
     pub tear: Spring,
     pub dizzy: Spring,
@@ -348,6 +487,9 @@ pub struct Eyes {
     last: Look,
     /// Seconds of slow reopening left after a blink.
     reopening: f32,
+    /// Which way the head tilts on the next beat.
+    sway: f32,
+    last_lunge: f32,
 }
 
 impl Eyes {
@@ -361,17 +503,36 @@ impl Eyes {
             gaze: Spring::new(0.0, 900.0, 46.0),
             lean: Spring::new(0.0, 130.0, 13.0),
             hop: Spring::new(0.0, 320.0, 15.0),
+            tilt: Spring::new(0.0, 200.0, 16.0),
+            notes: Vec::new(),
+            scene: Spring::new(0.0, 170.0, 24.0),
+            lunge: Spring::new(0.0, 700.0, 30.0),
+            shove: Spring::new(0.0, 160.0, 10.0),
+            rock: Spring::new(0.0, 220.0, 7.0),
+            dent: Spring::new(0.0, 420.0, 20.0),
             tear: Spring::new(0.0, 170.0, 24.0),
             dizzy: Spring::new(0.0, 170.0, 24.0),
             pair: [eye(false), eye(true)],
             mind: Mind::new(),
             last: Look::Closed,
             reopening: 0.0,
+            sway: 1.0,
+            last_lunge: 0.0,
+        }
+    }
+
+    /// A beat of the music: a nod, and the head tips the other way.
+    pub fn beat(&mut self, t: f32) {
+        self.hop.v = -46.0;
+        self.sway = -self.sway;
+        self.notes.retain(|n| t - n.0 < NOTE_LIFE);
+        if self.notes.len() < 6 {
+            self.notes.push((t, self.sway, self.notes.len() % 2 == 0));
         }
     }
 
     pub fn step(&mut self, feel: Feel, dt: f32) {
-        let Feel { show, look, blink, gaze, lift } = feel;
+        let Feel { show, look, blink, gaze, lift, music, battery, lunge } = feel;
         // A blink shuts fast and reopens more slowly; expressions change between the two.
         self.reopening = if blink { 0.2 } else { (self.reopening - dt).max(0.0) };
         let (k, c) = if blink {
@@ -389,6 +550,19 @@ impl Eyes {
             self.hop.v = -38.0;
         }
         self.hop.step(0.0, dt);
+        self.tilt.step(if music { self.sway } else { 0.0 }, dt);
+        // Contact: the battery is shoved, rocks and dents, then springs back.
+        if lunge > 0.5 && self.last_lunge <= 0.5 {
+            self.shove.v += 150.0;
+            self.rock.v += 5.0;
+            self.dent.v += 16.0;
+        }
+        self.last_lunge = lunge;
+        self.lunge.step(lunge, dt);
+        self.shove.step(0.0, dt);
+        self.rock.step(0.0, dt);
+        self.dent.step(0.0, dt);
+        self.scene.step(if battery { 1.0 } else { 0.0 }, dt);
         let leaning = self.gaze.x;
         for (i, eye) in self.pair.iter_mut().enumerate() {
             let target = outline(shape, i == 1, leaning, lift);
@@ -489,6 +663,63 @@ mod tests {
         let t = awake(&mut m, 0.5);
         m.tick(&Sense { near: false, ..sense(t, t * 200.0) });
         assert!(!m.tick(&Sense { near: false, ..sense(t + 0.3, 0.0) }).show);
+    }
+
+    #[test]
+    fn a_random_peek_comes_at_its_time_and_makes_a_face() {
+        let mut m = Mind::new();
+        m.tick(&Sense { near: false, ..sense(1.0, 0.0) });
+        assert!(m.next_random >= 900.0 && m.next_random <= 2401.0);
+        let at = m.next_random;
+        assert!(m.tick(&Sense { near: false, ..sense(at, 0.0) }).show);
+        let face = m.tick(&Sense { near: false, ..sense(at + 2.5, 0.0) }).look;
+        assert!(matches!(face, Look::Happy | Look::Wink | Look::Smug | Look::Up), "{face:?}");
+        m.tick(&Sense { near: false, ..sense(at + 4.2, 0.0) });
+        assert!(!m.tick(&Sense { near: false, ..sense(at + 4.5, 0.0) }).show);
+    }
+
+    #[test]
+    fn an_event_waits_for_a_free_moment_then_gives_up() {
+        let mut m = Mind::new();
+        m.ask(Peek::Mood(Look::Love), 1.0);
+        assert!(!m.tick(&Sense { blocked: true, ..sense(5.0, 0.0) }).show);
+        assert_eq!(m.tick(&sense(9.0, 0.0)).look, Look::Love);
+        let mut m = Mind::new();
+        m.ask(Peek::Mood(Look::Love), 1.0);
+        assert!(!m.tick(&sense(12.0, 0.0)).show, "too late");
+    }
+
+    #[test]
+    fn a_click_cuts_a_peek_short() {
+        let mut m = Mind::new();
+        m.ask(Peek::Music, 1.0);
+        let feel = m.tick(&sense(1.1, 0.0));
+        assert!(feel.show && feel.music);
+        m.tick(&Sense { acted: true, ..sense(1.2, 0.0) });
+        assert!(!m.tick(&Sense { acted: true, ..sense(1.5, 0.0) }).show);
+    }
+
+    #[test]
+    fn the_battery_scene_lunges_twice_and_ends() {
+        let mut m = Mind::new();
+        m.ask(Peek::Battery, 0.0);
+        let hits = (0..90).map(|i| m.tick(&sense(i as f32 * 0.05, 0.0))).collect::<Vec<_>>();
+        assert!(hits[20].battery && hits[20].show);
+        let blows = hits.windows(2).filter(|w| w[0].lunge <= 0.5 && w[1].lunge > 0.5).count();
+        assert_eq!(blows, 2);
+        assert!(!hits[89].show);
+    }
+
+    #[test]
+    fn beats_are_jumps_in_loudness() {
+        let mut b = Beat::new();
+        let mut levels = vec![0.2f32; 40];
+        levels.extend([0.5, 0.2, 0.0, 0.0]);
+        let hits: Vec<bool> = levels.iter().map(|l| b.feed(*l)).collect();
+        assert!(hits[40], "{hits:?}");
+        assert!(!hits[20..40].iter().any(|h| *h), "steady sound has no beats");
+        let mut quiet = Beat::new();
+        assert!((0..20).all(|_| !quiet.feed(0.0)));
     }
 
     #[test]

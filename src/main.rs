@@ -486,7 +486,15 @@ pub struct App {
     private_until: Option<Instant>,
     pub eyes: eyes::Eyes,
     eye_feel: eyes::Feel,
-    /// Preview run (ISLET_DEMO "sample=eyes|0|1"): start and what it shows.
+    beat: eyes::Beat,
+    /// A reminder held back for a moment while the eyes look down at it.
+    card_after: Option<(Due, Instant)>,
+    /// "Later" answers in a row.
+    later_row: u32,
+    last_drink: Instant,
+    last_song: String,
+    next_nod: f32,
+    /// Preview run (ISLET_DEMO "sample=eyes|music|battery|0|1"): start and what it shows.
     sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
     pub device_kind: devices::DeviceKind,
@@ -691,6 +699,12 @@ impl App {
             private_until: None,
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
+            beat: eyes::Beat::new(),
+            card_after: None,
+            later_row: 0,
+            last_drink: Instant::now(),
+            last_song: String::new(),
+            next_nod: 0.0,
             sample: None,
             device_kind: devices::DeviceKind::Other,
             device_root: None,
@@ -899,7 +913,9 @@ impl App {
             }
             Mode::Peek => PEEK,
             Mode::Compact => {
-                if self.toast_open && self.notice_toast() {
+                if self.eye_feel_wide() {
+                    LYRIC_PILL
+                } else if self.toast_open && self.notice_toast() {
                     NOTICE_OPEN
                 } else if let Some(t) = &self.toast {
                     if t.kind == ToastKind::Message {
@@ -985,6 +1001,11 @@ impl App {
         (None, String::new())
     }
 
+    /// The notch widens for the battery and for the notes around nodding eyes.
+    pub fn eye_feel_wide(&self) -> bool {
+        self.eye_feel.battery || self.eye_feel.music
+    }
+
     pub fn sample_running(&self) -> bool {
         self.sample.is_some()
     }
@@ -995,6 +1016,26 @@ impl App {
         let t = start.elapsed().as_secs_f32();
         let (eyes_at, card) = match what.as_str() {
             "eyes" => (Some(t % 17.5), None),
+            "battery" => {
+                let now = self.eye_time();
+                if self.eye_feel.battery == false && t % 6.0 < 0.1 {
+                    self.eyes.mind.ask(eyes::Peek::Battery, now);
+                }
+                let sense = eyes::Sense { t: now, x: 0.0, y: 0.0, scale: 1.0, follow: 0.0, lift: 0.0, near: false, blocked: false, acted: false };
+                self.eye_feel = self.eyes.mind.tick(&sense);
+                self.eyes.step(self.eye_feel, dt);
+                return;
+            }
+            "music" => {
+                let beat = (t * 2.0) as u32;
+                if beat != ((t - dt) * 2.0) as u32 {
+                    let now = self.eye_time();
+                    self.eyes.beat(now);
+                }
+                self.eye_feel = eyes::Feel { show: true, look: eyes::Look::Happy, music: true, ..eyes::Feel::ASLEEP };
+                self.eyes.step(self.eye_feel, dt);
+                return;
+            }
             n => (None, n.parse::<u8>().ok()),
         };
         let mut pt = POINT::default();
@@ -1024,7 +1065,7 @@ impl App {
             _ => (Look::Closed, 0.0),
         };
         let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
-        self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, lift: 0.0 }, dt);
+        self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
         let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
         if shown != card {
             match card {
@@ -1186,6 +1227,7 @@ impl App {
             || self.sample.is_some()
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
+            || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Water)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
@@ -1487,30 +1529,62 @@ impl App {
         let (ux, uy) = ((pt.x as f32 - self.pos.0 as f32) / s, (pt.y as f32 - self.pos.1 as f32) / s);
         let along = ux - WIN_W / 2.0;
         let (dx, dy) = ((along.abs() - w / 2.0).max(0.0), (uy - h).max(0.0));
-        let held = self.no_hover_until.is_some_and(|t| Instant::now() < t);
+        let t = self.eye_time();
+        let (song, playing) = {
+            let m = self.media.lock().unwrap();
+            (m.title.clone(), m.has && m.playing && !m.title.is_empty())
+        };
+        if playing && (song != self.last_song || t >= self.next_nod) {
+            self.last_song = song;
+            self.next_nod = t + 180.0;
+            self.eyes.mind.ask(eyes::Peek::Music, t);
+        }
+        // Plugging in ends the battery scene at once.
+        let plugged = self.eye_feel.battery && self.power.is_some_and(|p| p.ac);
+        let blocked = self.eyes_blocked() || plugged;
         let sense = eyes::Sense {
-            t: self.born.elapsed().as_secs_f32(),
+            t,
             x: pt.x as f32,
             y: pt.y as f32,
             scale: s,
             follow: (along / (w / 2.0 + 90.0)).clamp(-1.0, 1.0),
             lift: (dy / eyes::RANGE).clamp(0.0, 1.0) * 0.5,
             near: dx.hypot(dy) < eyes::RANGE,
-            blocked: !self.settings.pet
-                || self.minimal()
-                || self.yielded
-                || held
-                || self.hidden
-                || self.mouse_in
-                || self.mode != Mode::Compact
-                || self.toast.is_some()
-                || self.drag_over,
+            blocked,
             acted: down || sys::key_idle_ms() < 700,
         };
+        let was_nodding = self.eye_feel.music;
         self.eye_feel = self.eyes.mind.tick(&sense);
+        if self.eye_feel.music {
+            if !was_nodding {
+                sys::open_meter();
+                self.beat = eyes::Beat::new();
+            }
+            if self.beat.feed(sys::audio_peak()) {
+                self.eyes.beat(t);
+            }
+        }
         if self.eye_feel.show {
             self.kick();
         }
+        if self.card_after.as_ref().is_some_and(|(_, at)| Instant::now() >= *at) {
+            if let Some((due, _)) = self.card_after.take() {
+                self.present_luma(&due);
+            }
+        }
+    }
+
+    /// Something more important has the notch: the eyes stay in.
+    fn eyes_blocked(&self) -> bool {
+        !self.settings.pet
+            || self.minimal()
+            || self.yielded
+            || self.no_hover_until.is_some_and(|t| Instant::now() < t)
+            || self.hidden
+            || self.mouse_in
+            || self.mode != Mode::Compact
+            || self.toast.is_some()
+            || self.drag_over
     }
 
     fn poll_drag_zone(&mut self) {
@@ -1524,7 +1598,7 @@ impl App {
         let s = self.gfx.scale;
         let near = (pt.y as f32) < self.pos.1 as f32 + (WIN_H + 160.0) * s
             && (pt.x as f32 - (self.pos.0 as f32 + WIN_W * s / 2.0)).abs() < (WIN_W / 2.0 + 160.0) * s;
-        let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500;
+        let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500 || self.eye_feel.show || self.card_after.is_some();
         let every = if busy { 50 } else { 250 };
         if every != self.zone_every {
             self.zone_every = every;
@@ -1749,10 +1823,11 @@ impl App {
         for ev in events {
             match ev {
                 luma::Event::HeadsUp(due, secs) => self.present_heads_up(&due, secs),
-                luma::Event::Show(due) => self.present_luma(&due),
+                luma::Event::Show(due) => self.present_after_look(due),
                 luma::Event::Phase { resting, round, rounds, minutes } => {
                     sound::play(sound::Chime::Soft);
                     if resting {
+                        self.feel(eyes::Look::Love);
                         let sub = if minutes >= luma::focus::LONG_REST_MINUTES { "15 min, you earned it".to_string() } else { format!("{minutes} minute short break") };
                         self.toast(ToastKind::Break, if minutes >= luma::focus::LONG_REST_MINUTES { "Long Break!" } else { "Break Time!" }, &sub, None);
                     } else {
@@ -1765,7 +1840,7 @@ impl App {
             self.answer_luma(Outcome::Snooze, true);
         }
         // A reminder card covered by another toast (or the open widgets) comes back afterwards.
-        if self.toast.is_none() && self.mode != Mode::Expanded {
+        if self.toast.is_none() && self.mode != Mode::Expanded && self.card_after.is_none() {
             match self.brain.showing.as_ref().map(|s| (s.due.clone(), s.heads_up_until)) {
                 Some((due, Some(until))) => self.present_heads_up(&due, (until - now).num_seconds().max(1) as u32),
                 Some((due, None)) => self.present_luma(&due),
@@ -1777,7 +1852,31 @@ impl App {
         }
     }
 
+    fn eye_time(&self) -> f32 {
+        self.born.elapsed().as_secs_f32()
+    }
+
+    fn feel(&mut self, look: eyes::Look) {
+        let t = self.eye_time();
+        self.eyes.mind.ask(eyes::Peek::Mood(look), t);
+    }
+
+    /// The eyes look down at a reminder before it appears; if they can't, it appears at once.
+    fn present_after_look(&mut self, due: Due) {
+        if self.demo.is_some() || self.eyes_blocked() || sys::key_idle_ms() < 700 {
+            self.present_luma(&due);
+            return;
+        }
+        let thirsty = matches!(due, Due::Builtin(CareKind::Water)) && self.last_drink.elapsed() > Duration::from_secs(2 * 3600);
+        let look = if thirsty { eyes::Look::Angry } else { eyes::Look::Down };
+        let t = self.eye_time();
+        self.eyes.mind.ask(eyes::Peek::Card(look), t);
+        self.card_after = Some((due, Instant::now() + Duration::from_millis(800)));
+        self.kick();
+    }
+
     fn goal_toast(&mut self) {
+        self.feel(eyes::Look::Love);
         let l = self.brain.stats.water as f32 * self.brain.cfg.cup_ml as f32 / 1000.0;
         self.toast(ToastKind::Goal, "Goal reached", &format!("{l:.1} L today"), Some(1.0));
     }
@@ -1833,6 +1932,15 @@ impl App {
         let now = chrono::Local::now();
         let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
         let water = matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Builtin(CareKind::Water)));
+        if outcome == Outcome::Done && self.focus_end_card() {
+            self.feel(eyes::Look::Love);
+        }
+        // Being put off again and again, or ignored, hurts a little.
+        self.later_row = if outcome == Outcome::Snooze && !timed_out { self.later_row + 1 } else { 0 };
+        if timed_out || self.later_row >= 3 {
+            self.later_row = 0;
+            self.feel(eyes::Look::Sad);
+        }
         if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
             self.brain.start_focus(minutes, &label, now);
         }
@@ -1840,6 +1948,7 @@ impl App {
             self.dismiss_toast();
         }
         if water && outcome == Outcome::Done {
+            self.last_drink = Instant::now();
             self.water_pulse.v += 7.5;
             if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
                 self.goal_toast();
@@ -2113,7 +2222,13 @@ impl App {
                     self.brain.start_rest((self.pomo_mode.secs() / 60.0) as u32, now);
                 }
             }
-            Act::PomoReset => self.brain.stop_focus(chrono::Local::now()),
+            Act::PomoReset => {
+                // Giving up on a work stretch makes them cry; ending a break doesn't.
+                if self.brain.focus.as_ref().is_some_and(|f| !f.pomodoro.is_some_and(|p| p.resting)) {
+                    self.feel(eyes::Look::Cry);
+                }
+                self.brain.stop_focus(chrono::Local::now());
+            }
             Act::PomoPhase(p) => {
                 if self.brain.focus.is_none() {
                     self.pomo_mode = p;
@@ -2128,6 +2243,7 @@ impl App {
                 if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
                     self.goal_toast();
                 }
+                self.last_drink = Instant::now();
                 self.water_pulse.v += 7.5;
                 self.kick();
             }
@@ -2390,7 +2506,13 @@ impl App {
                     self.toast(ToastKind::Battery, "Low battery", "Plug in soon", lv);
                 } else if !p.ac && old.pct > 10 && p.pct <= 10 {
                     sound::play(sound::Chime::Alert);
-                    self.toast(ToastKind::Battery, "Battery critical", "Plug in now", lv);
+                    // The eyes make the point themselves when they can; a busy moment gets the card.
+                    if self.eyes_blocked() || sys::key_idle_ms() < 700 {
+                        self.toast(ToastKind::Battery, "Battery critical", "Plug in now", lv);
+                    } else {
+                        let t = self.eye_time();
+                        self.eyes.mind.ask(eyes::Peek::Battery, t);
+                    }
                 } else if p.ac && old.pct < 100 && p.pct == 100 {
                     self.toast(ToastKind::Charging(true), "Fully charged", "You can unplug", Some(1.0));
                 }
