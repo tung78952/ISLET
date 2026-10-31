@@ -267,6 +267,10 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   An event waits 10 s for a free moment. Task and heads-up cards ring the new bell. Waiting: eight
   icons (need images), character choice, Spider-Man lenses out of the code before any release.
 
+- Round 24: nodding eyes and notes removed. A new song passes by as a card (cover, title, artist).
+  Small eyes (eyes::Mini) head the lyric pill: they read, blink, nod to the beat and perk up at
+  each line; the meter runs only while the pill shows. Banners are hidden per phone app.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

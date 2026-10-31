@@ -154,6 +154,8 @@ pub enum ToastKind {
     LumaApp,
     /// Someone is calling (Accept / Decline): caller in `value`, app in `title`.
     Call,
+    /// The song that has just started: title in `title`, artist in `value`.
+    Song,
     /// Preview of an animated icon.
     Sample(u8),
 }
@@ -164,6 +166,7 @@ impl ToastKind {
             self,
             ToastKind::Bluetooth(_)
                 | ToastKind::Sample(_)
+                | ToastKind::Song
                 | ToastKind::Device(_)
                 | ToastKind::Notice
                 | ToastKind::Message
@@ -486,15 +489,16 @@ pub struct App {
     private_until: Option<Instant>,
     pub eyes: eyes::Eyes,
     eye_feel: eyes::Feel,
-    beat: eyes::Beat,
+    pub mini: eyes::Mini,
+    meter_on: bool,
+    mini_busy: bool,
     /// A reminder held back for a moment while the eyes look down at it.
     card_after: Option<(Due, Instant)>,
     /// "Later" answers in a row.
     later_row: u32,
     last_drink: Instant,
     last_song: String,
-    next_nod: f32,
-    /// Preview run (ISLET_DEMO "sample=eyes|music|battery|0|1"): start and what it shows.
+    /// Preview run (ISLET_DEMO "sample=eyes|lyric|battery|0|1"): start and what it shows.
     sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
     pub device_kind: devices::DeviceKind,
@@ -699,12 +703,13 @@ impl App {
             private_until: None,
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
-            beat: eyes::Beat::new(),
+            mini: eyes::Mini::new(),
+            meter_on: false,
+            mini_busy: false,
             card_after: None,
             later_row: 0,
             last_drink: Instant::now(),
             last_song: String::new(),
-            next_nod: 0.0,
             sample: None,
             device_kind: devices::DeviceKind::Other,
             device_root: None,
@@ -1004,9 +1009,9 @@ impl App {
         (None, String::new())
     }
 
-    /// The notch widens for the battery and for the notes around nodding eyes.
+    /// The notch widens for the battery scene.
     pub fn eye_feel_wide(&self) -> bool {
-        self.eye_feel.battery || self.eye_feel.music
+        self.eye_feel.battery
     }
 
     /// Lyrics stay switched on with nothing playing, but there is nothing to show until music is back.
@@ -1034,14 +1039,9 @@ impl App {
                 self.eyes.step(self.eye_feel, dt);
                 return;
             }
-            "music" => {
-                let beat = (t * 2.0) as u32;
-                if beat != ((t - dt) * 2.0) as u32 {
-                    let now = self.eye_time();
-                    self.eyes.beat(now);
-                }
-                self.eye_feel = eyes::Feel { show: true, look: eyes::Look::Happy, music: true, ..eyes::Feel::ASLEEP };
-                self.eyes.step(self.eye_feel, dt);
+            "lyric" => {
+                let now = self.eye_time();
+                self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 });
                 return;
             }
             n => (None, n.parse::<u8>().ok()),
@@ -1175,6 +1175,7 @@ impl App {
             moving |= self.slide.step(0.0, sub);
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
+            self.mini_busy = self.mini.step(self.born.elapsed().as_secs_f32(), sub);
             moving |= self.intro.step(0.0, sub);
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
@@ -1233,6 +1234,7 @@ impl App {
     fn continuous(&self) -> bool {
         self.effects()
             || self.sample.is_some()
+            || self.mini_busy
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
@@ -1301,6 +1303,7 @@ impl App {
             ToastKind::Task | ToastKind::Call => 60_000,
             ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal => 2_600,
             ToastKind::Bluetooth(_) | ToastKind::Device(_) => 4_000,
+            ToastKind::Song => 2_400,
             ToastKind::Notice => reading_ms(6_000, title),
             ToastKind::Message => reading_ms(8_000, title),
             _ => 1_800,
@@ -1538,14 +1541,30 @@ impl App {
         let along = ux - WIN_W / 2.0;
         let (dx, dy) = ((along.abs() - w / 2.0).max(0.0), (uy - h).max(0.0));
         let t = self.eye_time();
-        let (song, playing) = {
+        let (song, artist, playing) = {
             let m = self.media.lock().unwrap();
-            (m.title.clone(), m.has && m.playing && !m.title.is_empty())
+            (m.title.clone(), m.artist.clone(), m.has && m.playing && !m.title.is_empty())
         };
-        if playing && (song != self.last_song || t >= self.next_nod) {
+        // A new song passes by once, unless something else has the notch.
+        if playing && song != self.last_song {
+            let quiet = self.toast.is_none() && !self.expanded() && !self.yielded && !self.hidden && t > 5.0;
+            if quiet {
+                self.toast(ToastKind::Song, &song, &artist, None);
+            }
             self.last_song = song;
-            self.next_nod = t + 180.0;
-            self.eyes.mind.ask(eyes::Peek::Music, t);
+            self.meter_on = false;
+        }
+        // The small eyes listen only while the lyrics are on show.
+        if playing && self.pill_mix.x > 0.5 {
+            if !self.meter_on {
+                sys::open_meter();
+                self.meter_on = true;
+            }
+            if self.mini.feed(t, sys::audio_peak()) {
+                self.kick();
+            }
+        } else {
+            self.meter_on = false;
         }
         // Plugging in ends the battery scene at once.
         let plugged = self.eye_feel.battery && self.power.is_some_and(|p| p.ac);
@@ -1561,17 +1580,7 @@ impl App {
             blocked,
             acted: down || sys::key_idle_ms() < 700,
         };
-        let was_nodding = self.eye_feel.music;
         self.eye_feel = self.eyes.mind.tick(&sense);
-        if self.eye_feel.music {
-            if !was_nodding {
-                sys::open_meter();
-                self.beat = eyes::Beat::new();
-            }
-            if self.beat.feed(sys::audio_peak()) {
-                self.eyes.beat(t);
-            }
-        }
         if self.eye_feel.show {
             self.kick();
         }
@@ -1606,7 +1615,7 @@ impl App {
         let s = self.gfx.scale;
         let near = (pt.y as f32) < self.pos.1 as f32 + (WIN_H + 160.0) * s
             && (pt.x as f32 - (self.pos.0 as f32 + WIN_W * s / 2.0)).abs() < (WIN_W / 2.0 + 160.0) * s;
-        let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500 || self.eye_feel.show || self.card_after.is_some();
+        let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500 || self.eye_feel.show || self.card_after.is_some() || self.meter_on;
         let every = if busy { 50 } else { 250 };
         if every != self.zone_every {
             self.zone_every = every;
@@ -3153,6 +3162,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         ("bright", ToastKind::Brightness, "Brightness", "70%"),
         ("task", ToastKind::Task, "Task Time!", "Học từ vựng"),
         ("goal", ToastKind::Goal, "Goal reached", "2.0 L today"),
+        ("song", ToastKind::Song, "You're Sorry", "Some Artist"),
     ] {
         if let Some(v) = kv.get(key).and_then(|v| v.parse::<f32>().ok()) {
             a.toast = Some(Toast {

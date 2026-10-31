@@ -642,7 +642,7 @@ fn compact(a: &mut App, left: f32, w: f32) {
     if show > 0.3 {
         eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
     }
-    // The battery and the notes reach past the compact notch, so those scenes redraw everything.
+    // The battery reaches past the compact notch, so that scene redraws everything.
     if a.eyes.scene.x > 0.01 || a.eye_feel_wide() {
         a.loop_rect = None;
     } else if show > 0.01 || a.sample_running() {
@@ -683,14 +683,13 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     let scene = e.scene.x.clamp(0.0, 1.0);
     let centre = cx;
     let cx = cx - 46.0 * scene + 32.0 * e.lunge.x * scene;
-    let room = reach;
     let reach = reach * (1.0 - scene);
-    let lean = e.lean.x + 0.08 * e.tilt.x;
+    let lean = e.lean.x;
     let t = a.born.elapsed().as_secs_f32();
     let breath = 0.35 * (t * 1.7).sin();
     let g = &a.gfx;
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
-        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + side * e.tilt.x * 2.6 + p.1 * SCALE)).collect();
+        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + p.1 * SCALE)).collect();
         g.glow_ellipse(cx + lean * reach + side * 32.0, cy, 28.0, 16.0, RED, 0.3 * show);
         let lens = show * (1.0 - e.dizzy.x.clamp(0.0, 1.0));
         g.fill_poly(&outline, WHITE, lens);
@@ -718,16 +717,9 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
             g.droplet(cx + side * 52.0, cy + dy, 4.2, WHITE, show * tear * (1.0 - k * k));
         }
     }
-    // Notes and the battery never leave the notch as it narrows again.
+    // The battery never leaves the notch as it narrows again.
     let half = a.sw.x / 2.0;
     g.push_clip(Rc::new(centre - half, 0.0, half * 2.0, a.sh.x));
-    for &(born, side, pair) in &e.notes {
-        let k = (t - born) / crate::eyes::NOTE_LIFE;
-        if (0.0..1.0).contains(&k) {
-            let x = centre + side * (room + 40.0) + 3.0 * (k * 7.0).sin();
-            crate::anim::note(g, x, cy + 8.0 - 18.0 * k, 5.5, pair, show * (1.0 - k * k * k));
-        }
-    }
     if scene > 0.01 {
         // The battery slides in from the right, takes the blows and shows what is left.
         let (bx, by) = (centre + 66.0 + 60.0 * (1.0 - scene) + e.shove.x, cy);
@@ -743,15 +735,33 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     a.gfx.pop_clip();
 }
 
+/// The small eyes at the head of the lyrics.
+fn mini_eyes(a: &mut App, cx: f32, cy: f32) {
+    /// Notch units per pixel of the design sheet.
+    const SCALE: f32 = 0.085;
+    let hop = a.mini.hop.x;
+    for eye in &a.mini.pair {
+        let outline: Vec<(f32, f32)> = eye.points.iter().map(|p| (cx + p.0 * SCALE, cy + hop + p.1 * SCALE)).collect();
+        a.gfx.fill_poly(&outline, WHITE, 1.0);
+        let mut rim = outline;
+        rim.push(rim[0]);
+        a.gfx.polyline(&rim, 1.25, 0xFF1F1F, 1.0);
+    }
+}
+
 fn lyric_pill(a: &mut App, left: f32, w: f32) {
     let line = a.lyric_line().unwrap_or_default();
     // Art-tinted glow rising from the bottom edge, as on the expanded lyrics view.
     let h = a.sh.x;
     let radius = 12.4 + 19.2 * ((h - 30.0) / 110.0).clamp(0.0, 1.0);
     a.gfx.fill_rrect_vgrad(Rc::new(left, 0.0, w, h), radius, (art_tint(a), 0.0), (art_tint(a), 0.85));
-    icon::note(&a.gfx, left + 22.0, 16.0, 0xBDBDBD, 1.0);
+    mini_eyes(a, left + 25.0, h / 2.0);
+    // Between lines only the small eyes move, so frames can redraw just their box.
+    a.loop_rect = Some(Rc::new(left + 4.0, 0.0, 44.0, h));
     if line != a.pill_cur {
         let old = std::mem::replace(&mut a.pill_cur, line.clone());
+        let t = a.born.elapsed().as_secs_f32();
+        a.mini.new_line(t);
         a.pill_prev = if old.is_empty() { None } else { Some((std::time::Instant::now(), old)) };
         a.kick();
     }
@@ -1165,6 +1175,21 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         (b1, b2)
     };
     match kind {
+        ToastKind::Song => {
+            // What has just started: cover, title and artist, the music moving on the right.
+            let cy = h / 2.0;
+            let cover = Rc::new(left + 18.0, cy - 19.0, 38.0, 38.0);
+            if a.art.is_some() {
+                art(a, cover);
+            } else {
+                a.gfx.fill_rrect(cover, 8.0, 0x2A2A2A, 1.0);
+                icon::note(&a.gfx, cover.cx(), cover.cy(), 0x8A8A8A, 1.0);
+            }
+            let (tx, tw) = (left + 68.0, w - 68.0 - 50.0);
+            a.gfx.ui(title, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+            a.gfx.ui(value, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+            right_indicator(a, left + w - 42.0, cy);
+        }
         ToastKind::Sample(i) => {
             // Nothing on the right, so the icon and text sit together in the middle of the card.
             const ICON: f32 = 54.0;

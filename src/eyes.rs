@@ -123,8 +123,6 @@ pub enum Peek {
     Random,
     /// A moment's look before a reminder card.
     Card(Look),
-    /// Nod along to what is playing.
-    Music,
     /// React to something that happened.
     Mood(Look),
     /// Butt the nearly flat battery to get attention.
@@ -136,7 +134,6 @@ impl Peek {
         match self {
             Peek::Random => 4.0,
             Peek::Card(_) => 0.8,
-            Peek::Music => 5.0,
             Peek::Mood(_) => 2.0,
             Peek::Battery => 4.0,
         }
@@ -187,15 +184,13 @@ pub struct Feel {
     pub blink: bool,
     pub gaze: f32,
     pub lift: f32,
-    /// Nodding along to the music.
-    pub music: bool,
     /// The battery scene is on, and how far the eyes lunge at the battery (-1 back to 1 hit).
     pub battery: bool,
     pub lunge: f32,
 }
 
 impl Feel {
-    pub const ASLEEP: Feel = Feel { show: false, look: Look::Closed, blink: false, gaze: 0.0, lift: 0.0, music: false, battery: false, lunge: 0.0 };
+    pub const ASLEEP: Feel = Feel { show: false, look: Look::Closed, blink: false, gaze: 0.0, lift: 0.0, battery: false, lunge: 0.0 };
 }
 
 /// When the eyes come out and what they do: they answer a pointer arriving, never one that is
@@ -269,7 +264,6 @@ impl Mind {
             Peek::Random if (2.1..3.4).contains(&e) => (face, 0.0),
             Peek::Random => (Look::Neutral, 0.0),
             Peek::Card(look) | Peek::Mood(look) => (look, 0.0),
-            Peek::Music => (Look::Happy, 0.0),
             Peek::Battery if e < 0.8 => (Look::Neutral, 0.8),
             Peek::Battery if e < 2.3 => (Look::Squint, 0.8),
             Peek::Battery => (Look::Neutral, -0.2),
@@ -280,7 +274,7 @@ impl Mind {
             e if (1.0..1.16).contains(&e) || (1.7..1.86).contains(&e) => 1.0,
             _ => 0.0,
         };
-        Feel { show: true, look, blink: blink && look == Look::Neutral, gaze, lift: 0.0, music: peek == Peek::Music, battery: peek == Peek::Battery, lunge }
+        Feel { show: true, look, blink: blink && look == Look::Neutral, gaze, lift: 0.0, battery: peek == Peek::Battery, lunge }
     }
 
     fn blink(&mut self, t: f32) -> bool {
@@ -453,12 +447,102 @@ impl Mind {
     }
 }
 
-/// Seconds a music note stays in the air.
-pub const NOTE_LIFE: f32 = 1.2;
-
 pub struct Eye {
     pub points: Vec<P>,
     speed: Vec<P>,
+}
+
+impl Eye {
+    /// Springs every point towards an outline; returns the fastest point's speed.
+    fn ease(&mut self, target: &[P], k: f32, c: f32, dt: f32) -> f32 {
+        let mut fastest = 0.0f32;
+        for ((p, v), t) in self.points.iter_mut().zip(self.speed.iter_mut()).zip(target) {
+            v.0 += (-(p.0 - t.0) * k - c * v.0) * dt;
+            v.1 += (-(p.1 - t.1) * k - c * v.1) * dt;
+            p.0 += v.0 * dt;
+            p.1 += v.1 * dt;
+            fastest = fastest.max(v.0.abs()).max(v.1.abs());
+        }
+        fastest
+    }
+}
+
+const MINI_AHEAD: Lens = ((-132.0, -70.0), (12.0, 40.0), [(-85.0, -45.0), (-15.0, -5.0)], [(-160.0, 40.0), (-50.0, 125.0)]);
+const MINI_AHEAD_FAR: Lens = ((-132.0, -40.0), (-40.0, 55.0), [(-95.0, -20.0), (-60.0, 15.0)], [(-140.0, 40.0), (-90.0, 85.0)]);
+const MINI_BLINK: Lens = ((-145.0, -20.0), (-10.0, 18.0), [(-100.0, -12.0), (-40.0, 2.0)], [(-120.0, 30.0), (-50.0, 40.0)]);
+const MINI_HAPPY: Lens = ((-158.0, 45.0), (-15.0, 45.0), [(-135.0, -70.0), (-50.0, -75.0)], [(-115.0, 0.0), (-60.0, -5.0)]);
+const MINI_NOD: Lens = ((-140.0, -45.0), (-10.0, 15.0), [(-95.0, -25.0), (-45.0, -10.0)], [(-150.0, 50.0), (-60.0, 60.0)]);
+
+/// The small eyes at the head of the lyrics: they read the words, blink, nod to the beat and
+/// perk up at each new line.
+pub struct Mini {
+    pub pair: [Eye; 2],
+    pub hop: Spring,
+    beat: Beat,
+    face: Option<(Lens, f32)>,
+    blink_at: f32,
+    blink_until: f32,
+    seed: u32,
+}
+
+impl Mini {
+    pub fn new() -> Self {
+        let eye = |lens| {
+            let points = trace(lens, true);
+            Eye { speed: vec![(0.0, 0.0); points.len()], points }
+        };
+        let left = trace(MINI_AHEAD, false);
+        Mini {
+            pair: [Eye { speed: vec![(0.0, 0.0); left.len()], points: left }, eye(MINI_AHEAD_FAR)],
+            hop: Spring::new(0.0, 420.0, 16.0),
+            beat: Beat::new(),
+            face: None,
+            blink_at: 2.0,
+            blink_until: 0.0,
+            seed: 0x51F1_5EED,
+        }
+    }
+
+    /// A reading of the music's loudness; true when something needs drawing.
+    pub fn feed(&mut self, t: f32, level: f32) -> bool {
+        let mut moved = false;
+        if self.beat.feed(level) {
+            self.hop.v = -15.0;
+            if self.face.is_none_or(|f| t >= f.1) {
+                self.face = Some((MINI_NOD, t + 0.12));
+            }
+            moved = true;
+        }
+        if t >= self.blink_at {
+            self.seed ^= self.seed << 13;
+            self.seed ^= self.seed >> 17;
+            self.seed ^= self.seed << 5;
+            self.blink_until = t + 0.11;
+            self.blink_at = t + 2.0 + (self.seed % 1000) as f32 / 250.0;
+            moved = true;
+        }
+        moved
+    }
+
+    pub fn new_line(&mut self, t: f32) {
+        self.face = Some((MINI_HAPPY, t + 0.5));
+        self.hop.v = -24.0;
+    }
+
+    /// Returns whether anything is still moving.
+    pub fn step(&mut self, t: f32, dt: f32) -> bool {
+        let face = self.face.filter(|f| t < f.1).map(|f| f.0);
+        let lens = |right: bool| match face {
+            _ if t < self.blink_until => MINI_BLINK,
+            Some(f) => f,
+            None if right => MINI_AHEAD_FAR,
+            None => MINI_AHEAD,
+        };
+        let (a, b) = (trace(lens(false), false), trace(lens(true), true));
+        let fastest = self.pair[0].ease(&a, 700.0, 36.0, dt).max(self.pair[1].ease(&b, 700.0, 36.0, dt));
+        let hopping = self.hop.step(0.0, dt);
+        fastest > 2.0 || hopping || t < self.blink_until || face.is_some()
+    }
 }
 
 pub struct Eyes {
@@ -469,10 +553,6 @@ pub struct Eyes {
     pub lean: Spring,
     /// A little hop whenever the expression changes.
     pub hop: Spring,
-    /// The head tilting from side to side with the beat (-1..1).
-    pub tilt: Spring,
-    /// Music notes in the air: when each left, which side, which note.
-    pub notes: Vec<(f32, f32, bool)>,
     /// The battery scene: how far it has come in, the lunge, and the blow's effect on the battery.
     pub scene: Spring,
     pub lunge: Spring,
@@ -487,8 +567,6 @@ pub struct Eyes {
     last: Look,
     /// Seconds of slow reopening left after a blink.
     reopening: f32,
-    /// Which way the head tilts on the next beat.
-    sway: f32,
     last_lunge: f32,
 }
 
@@ -503,8 +581,6 @@ impl Eyes {
             gaze: Spring::new(0.0, 900.0, 46.0),
             lean: Spring::new(0.0, 130.0, 13.0),
             hop: Spring::new(0.0, 320.0, 15.0),
-            tilt: Spring::new(0.0, 200.0, 16.0),
-            notes: Vec::new(),
             scene: Spring::new(0.0, 170.0, 24.0),
             lunge: Spring::new(0.0, 700.0, 30.0),
             shove: Spring::new(0.0, 160.0, 10.0),
@@ -516,23 +592,12 @@ impl Eyes {
             mind: Mind::new(),
             last: Look::Closed,
             reopening: 0.0,
-            sway: 1.0,
             last_lunge: 0.0,
         }
     }
 
-    /// A beat of the music: a nod, and the head tips the other way.
-    pub fn beat(&mut self, t: f32) {
-        self.hop.v = -46.0;
-        self.sway = -self.sway;
-        self.notes.retain(|n| t - n.0 < NOTE_LIFE);
-        if self.notes.len() < 6 {
-            self.notes.push((t, self.sway, self.notes.len() % 2 == 0));
-        }
-    }
-
     pub fn step(&mut self, feel: Feel, dt: f32) {
-        let Feel { show, look, blink, gaze, lift, music, battery, lunge } = feel;
+        let Feel { show, look, blink, gaze, lift, battery, lunge } = feel;
         // A blink shuts fast and reopens more slowly; expressions change between the two.
         self.reopening = if blink { 0.2 } else { (self.reopening - dt).max(0.0) };
         let (k, c) = if blink {
@@ -550,7 +615,6 @@ impl Eyes {
             self.hop.v = -38.0;
         }
         self.hop.step(0.0, dt);
-        self.tilt.step(if music { self.sway } else { 0.0 }, dt);
         // Contact: the battery is shoved, rocks and dents, then springs back.
         if lunge > 0.5 && self.last_lunge <= 0.5 {
             self.shove.v += 150.0;
@@ -566,12 +630,7 @@ impl Eyes {
         let leaning = self.gaze.x;
         for (i, eye) in self.pair.iter_mut().enumerate() {
             let target = outline(shape, i == 1, leaning, lift);
-            for ((p, v), t) in eye.points.iter_mut().zip(eye.speed.iter_mut()).zip(target) {
-                v.0 += (-(p.0 - t.0) * k - c * v.0) * dt;
-                v.1 += (-(p.1 - t.1) * k - c * v.1) * dt;
-                p.0 += v.0 * dt;
-                p.1 += v.1 * dt;
-            }
+            eye.ease(&target, k, c, dt);
         }
         self.show.step(if show { 1.0 } else { 0.0 }, dt);
         self.tear.step(if look == Look::Cry { 1.0 } else { 0.0 }, dt);
@@ -692,9 +751,8 @@ mod tests {
     #[test]
     fn a_click_cuts_a_peek_short() {
         let mut m = Mind::new();
-        m.ask(Peek::Music, 1.0);
-        let feel = m.tick(&sense(1.1, 0.0));
-        assert!(feel.show && feel.music);
+        m.ask(Peek::Mood(Look::Love), 1.0);
+        assert!(m.tick(&sense(1.1, 0.0)).show);
         m.tick(&Sense { acted: true, ..sense(1.2, 0.0) });
         assert!(!m.tick(&Sense { acted: true, ..sense(1.5, 0.0) }).show);
     }
@@ -708,6 +766,21 @@ mod tests {
         let blows = hits.windows(2).filter(|w| w[0].lunge <= 0.5 && w[1].lunge > 0.5).count();
         assert_eq!(blows, 2);
         assert!(!hits[89].show);
+    }
+
+    #[test]
+    fn the_small_eyes_nod_blink_and_settle() {
+        let mut m = Mini::new();
+        for i in 0..40 {
+            m.feed(i as f32 * 0.05, 0.2);
+        }
+        assert!(m.feed(2.05, 0.6) || m.hop.v < 0.0, "a beat moves them");
+        let mut t = 2.05;
+        for _ in 0..600 {
+            t += 0.005;
+            m.step(t, 0.005);
+        }
+        assert!(!m.step(t, 0.005), "they come to rest");
     }
 
     #[test]
