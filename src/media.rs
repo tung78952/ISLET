@@ -203,6 +203,9 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
         let mut last_key = String::new();
         let mut art: Option<Arc<Art>> = None;
         let mut art_id = 0u64;
+        // A browser can send the cover after the title, so a new song's art is read again for a
+        // moment until this time.
+        let mut art_until: Option<Instant> = None;
         // After a seek the session keeps reporting the old position for a moment; hold the
         // requested one until it catches up so the UI doesn't jump back and forth.
         let mut hold: Option<(f64, Instant)> = None;
@@ -306,7 +309,22 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
                     last_key = key.clone();
                     art = props.as_ref().and_then(|p| load_art(p).ok());
                     art_id += 1;
+                    art_until = Some(Instant::now() + Duration::from_secs(6));
+                    let again = events.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(1200));
+                        let _ = again.send(Cmd::Refresh);
+                        std::thread::sleep(Duration::from_millis(2800));
+                        let _ = again.send(Cmd::Refresh);
+                    });
                     start_lyrics(hwnd, lyrics.clone(), key, next.title.clone(), next.artist.clone(), next.dur);
+                } else if changed_props && art_until.is_some_and(|t| Instant::now() < t) {
+                    if let Some(new) = props.as_ref().and_then(|p| load_art(p).ok()) {
+                        if art.as_ref().is_none_or(|old| old.px != new.px) {
+                            art = Some(new);
+                            art_id += 1;
+                        }
+                    }
                 }
                 next.art = art.clone();
                 next.art_id = art_id;
@@ -425,22 +443,47 @@ fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: Str
         unsafe {
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
-        let lines = fetch_any(&title, &artist, dur);
-        let mut l = lyrics.lock().unwrap();
-        if l.key != key {
-            return;
-        }
-        match lines {
-            Some(v) if !v.is_empty() => {
-                l.lines = v;
-                l.status = LyrStatus::Ready;
+        // A service that is down says nothing about the song, so keep asking while it plays.
+        let mut attempt = 0;
+        loop {
+            let lines = fetch_any(&title, &artist, dur);
+            let mut l = lyrics.lock().unwrap();
+            if l.key != key {
+                return;
             }
-            _ => l.status = LyrStatus::Missing,
+            let failed = lines.is_err();
+            match lines {
+                Ok(Some(v)) if !v.is_empty() => {
+                    l.lines = v;
+                    l.status = LyrStatus::Ready;
+                }
+                _ => l.status = LyrStatus::Missing,
+            }
+            drop(l);
+            post(hwnd, WM_LYRICS);
+            if !failed {
+                return;
+            }
+            std::thread::sleep(retry_delay(attempt));
+            attempt += 1;
+            if lyrics.lock().unwrap().key != key {
+                return;
+            }
         }
-        drop(l);
-        post(hwnd, WM_LYRICS);
     });
 }
+
+/// How long to wait before asking a failing lyrics service again.
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 => 30,
+        1 => 120,
+        _ => 300,
+    })
+}
+
+/// The service could not be reached or gave a bad answer.
+struct Unreachable;
 
 fn clean_artist(a: &str) -> String {
     let a = a.trim();
@@ -485,7 +528,7 @@ fn strip_feat(t: &str) -> String {
 
 /// Tries progressively looser queries: as reported, then "Artist - Title" split out of a video
 /// title, then the title alone, then a free-text search.
-fn fetch_any(title: &str, artist: &str, dur: f64) -> Option<Vec<(f64, String)>> {
+fn fetch_any(title: &str, artist: &str, dur: f64) -> Result<Option<Vec<(f64, String)>>, Unreachable> {
     let t = strip_feat(&clean_title(title));
     let a = clean_artist(artist);
     let mut tries: Vec<(String, String)> = vec![(t.clone(), a.clone())];
@@ -494,8 +537,8 @@ fn fetch_any(title: &str, artist: &str, dur: f64) -> Option<Vec<(f64, String)>> 
     }
     tries.push((t.clone(), String::new()));
     for (tt, aa) in tries {
-        if let Some(v) = fetch(&tt, &aa, dur).filter(|v| !v.is_empty()) {
-            return Some(v);
+        if let Some(v) = fetch(&tt, &aa, dur)?.filter(|v| !v.is_empty()) {
+            return Ok(Some(v));
         }
     }
     fetch_query(&format!("{t} {a}"), dur)
@@ -510,7 +553,7 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn fetch(title: &str, artist: &str, dur: f64) -> Option<Vec<(f64, String)>> {
+fn fetch(title: &str, artist: &str, dur: f64) -> Result<Option<Vec<(f64, String)>>, Unreachable> {
     let mut url = format!("https://lrclib.net/api/search?track_name={}", enc(title));
     if !artist.is_empty() {
         url.push_str(&format!("&artist_name={}", enc(artist)));
@@ -518,22 +561,26 @@ fn fetch(title: &str, artist: &str, dur: f64) -> Option<Vec<(f64, String)>> {
     search(&url, dur, false)
 }
 
-fn fetch_query(q: &str, dur: f64) -> Option<Vec<(f64, String)>> {
+fn fetch_query(q: &str, dur: f64) -> Result<Option<Vec<(f64, String)>>, Unreachable> {
     // Free text can match other songs, so only accept a result whose length agrees.
     search(&format!("https://lrclib.net/api/search?q={}", enc(q.trim())), dur, true)
 }
 
-fn search(url: &str, dur: f64, strict: bool) -> Option<Vec<(f64, String)>> {
-    let client = HttpClient::new().ok()?;
+fn search(url: &str, dur: f64, strict: bool) -> Result<Option<Vec<(f64, String)>>, Unreachable> {
+    let client = HttpClient::new().map_err(|_| Unreachable)?;
     let _ = client
         .DefaultRequestHeaders()
         .and_then(|h| h.UserAgent())
         .and_then(|ua| ua.TryParseAdd(&HSTRING::from("Islet/0.1 (Windows)")));
-    let uri = Uri::CreateUri(&HSTRING::from(url)).ok()?;
-    let body = client.GetStringAsync(&uri).ok()?.join().ok()?.to_string();
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let items: Vec<&serde_json::Value> = v
-        .as_array()?
+    let uri = Uri::CreateUri(&HSTRING::from(url)).map_err(|_| Unreachable)?;
+    let body = client.GetStringAsync(&uri).and_then(|op| op.join()).map_err(|_| Unreachable)?.to_string();
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| Unreachable)?;
+    Ok(best_lyrics(v.as_array().ok_or(Unreachable)?, dur, strict))
+}
+
+/// The best match in a search result: synced lyrics closest in length, else plain ones.
+fn best_lyrics(results: &[serde_json::Value], dur: f64, strict: bool) -> Option<Vec<(f64, String)>> {
+    let items: Vec<&serde_json::Value> = results
         .iter()
         .filter(|it| !strict || (dur > 0.0 && it.get("duration").and_then(|d| d.as_f64()).is_some_and(|d| (d - dur).abs() < 4.0)))
         .collect();
@@ -586,6 +633,19 @@ mod tests {
 
     fn src(id: &str, playing: bool, song: bool, secs: u64) -> Source<'_> {
         Source { id, playing, song, played: Duration::from_secs(secs) }
+    }
+
+    #[test]
+    fn a_failing_service_is_asked_less_and_less_often() {
+        let waits: Vec<u64> = (0..5).map(|i| retry_delay(i).as_secs()).collect();
+        assert_eq!(waits, [30, 120, 300, 300, 300]);
+    }
+
+    #[test]
+    fn an_empty_search_means_no_lyrics_not_a_failure() {
+        assert_eq!(best_lyrics(&[], 200.0, false), None);
+        let found = serde_json::json!([{ "duration": 200.0, "syncedLyrics": "[00:01.00] Hello" }]);
+        assert_eq!(best_lyrics(found.as_array().unwrap(), 200.0, false), Some(vec![(1.0, "Hello".to_string())]));
     }
 
     #[test]
