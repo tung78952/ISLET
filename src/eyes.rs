@@ -473,13 +473,91 @@ const MINI_BLINK: Lens = ((-145.0, -20.0), (-10.0, 18.0), [(-100.0, -12.0), (-40
 const MINI_HAPPY: Lens = ((-158.0, 45.0), (-15.0, 45.0), [(-135.0, -70.0), (-50.0, -75.0)], [(-115.0, 0.0), (-60.0, -5.0)]);
 const MINI_NOD: Lens = ((-140.0, -45.0), (-10.0, 15.0), [(-95.0, -25.0), (-45.0, -10.0)], [(-150.0, 50.0), (-60.0, 60.0)]);
 
-/// The small eyes at the head of the lyrics: they read the words, blink, nod to the beat and
-/// perk up at each new line.
+/// How the small eyes hold themselves when nothing else is going on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Pose {
+    Right,
+    Left,
+    Smile,
+    Dreamy,
+    Wink,
+}
+
+/// The lyric bar now and then grows to one side for a moment, and the eyes come and dance there.
+pub struct Jam {
+    next: f32,
+    until: f32,
+    pub side: f32,
+    pub style: usize,
+    seed: u32,
+    /// Notes in the air: when each left and whether it is the beamed one.
+    pub notes: Vec<(f32, f32, bool)>,
+}
+
+/// The dances, used in turn at random, never the same twice running.
+pub const JAM_POSES: [Pose; 3] = [Pose::Smile, Pose::Dreamy, Pose::Wink];
+pub const NOTE_LIFE: f32 = 1.3;
+const JAM_LENGTH: f32 = 6.0;
+
+impl Jam {
+    pub fn new() -> Self {
+        Jam { next: 0.0, until: 0.0, side: 1.0, style: 0, seed: 0x7A3C_11D3, notes: Vec::new() }
+    }
+
+    fn roll(&mut self) -> f32 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 17;
+        self.seed ^= self.seed << 5;
+        (self.seed % 1000) as f32 / 1000.0
+    }
+
+    /// Time passes; returns whether the bar is out. Not `allowed`: it goes back at once.
+    pub fn tick(&mut self, t: f32, allowed: bool) -> bool {
+        if self.next == 0.0 {
+            self.next = t + 60.0 + 60.0 * self.roll();
+        }
+        if !allowed {
+            self.until = self.until.min(t);
+            return false;
+        }
+        if t >= self.next && t >= self.until {
+            self.begin(t);
+        }
+        t < self.until
+    }
+
+    fn begin(&mut self, t: f32) {
+        self.side = if self.roll() < 0.5 { -1.0 } else { 1.0 };
+        self.style = (self.style + 1 + (self.roll() * 2.0) as usize) % JAM_POSES.len();
+        self.until = t + JAM_LENGTH;
+        self.next = self.until + 60.0 + 60.0 * self.roll();
+        self.notes.clear();
+    }
+
+    /// The effect test wants it out whatever the time.
+    pub fn force(&mut self, t: f32) {
+        if t >= self.until {
+            self.begin(t);
+            self.side = -self.side;
+        }
+    }
+
+    pub fn beat(&mut self, t: f32) {
+        self.notes.retain(|n| t - n.0 < NOTE_LIFE);
+        if self.notes.len() < 4 {
+            let pair = self.roll() < 0.5;
+            self.notes.push((t, if self.notes.len() % 2 == 0 { -1.0 } else { 1.0 }, pair));
+        }
+    }
+}
+
+/// Small eyes beside the things they react to: props on the cards, the music in the lyric bar.
 pub struct Mini {
     pub pair: [Eye; 2],
     pub hop: Spring,
     beat: Beat,
     face: Option<(Lens, f32)>,
+    pub pose: Pose,
     blink_at: f32,
     blink_until: f32,
     seed: u32,
@@ -497,6 +575,7 @@ impl Mini {
             hop: Spring::new(0.0, 420.0, 16.0),
             beat: Beat::new(),
             face: None,
+            pose: Pose::Right,
             blink_at: 2.0,
             blink_until: 0.0,
             seed: 0x51F1_5EED,
@@ -508,7 +587,7 @@ impl Mini {
         let mut moved = false;
         if self.beat.feed(level) {
             self.hop.v = -15.0;
-            if self.face.is_none_or(|f| t >= f.1) {
+            if self.face.is_none_or(|f| t >= f.1) && matches!(self.pose, Pose::Right | Pose::Left) {
                 self.face = Some((MINI_NOD, t + 0.12));
             }
             moved = true;
@@ -524,19 +603,23 @@ impl Mini {
         moved
     }
 
-    pub fn new_line(&mut self, t: f32) {
-        self.face = Some((MINI_HAPPY, t + 0.5));
-        self.hop.v = -24.0;
-    }
-
     /// Returns whether anything is still moving.
     pub fn step(&mut self, t: f32, dt: f32) -> bool {
         let face = self.face.filter(|f| t < f.1).map(|f| f.0);
+        let pose = self.pose;
         let lens = |right: bool| match face {
             _ if t < self.blink_until => MINI_BLINK,
             Some(f) => f,
-            None if right => MINI_AHEAD_FAR,
-            None => MINI_AHEAD,
+            None => match pose {
+                Pose::Smile => MINI_HAPPY,
+                Pose::Dreamy => MINI_BLINK,
+                Pose::Wink if right => MINI_BLINK,
+                Pose::Wink => MINI_AHEAD,
+                Pose::Right if right => MINI_AHEAD_FAR,
+                Pose::Right => MINI_AHEAD,
+                Pose::Left if right => MINI_AHEAD,
+                Pose::Left => MINI_AHEAD_FAR,
+            },
         };
         let (a, b) = (trace(lens(false), false), trace(lens(true), true));
         let fastest = self.pair[0].ease(&a, 700.0, 36.0, dt).max(self.pair[1].ease(&b, 700.0, 36.0, dt));
@@ -766,6 +849,33 @@ mod tests {
         let blows = hits.windows(2).filter(|w| w[0].lunge <= 0.5 && w[1].lunge > 0.5).count();
         assert_eq!(blows, 2);
         assert!(!hits[89].show);
+    }
+
+    #[test]
+    fn the_bar_comes_out_every_minute_or_two_and_never_dances_the_same_twice() {
+        let mut j = Jam::new();
+        j.tick(1.0, true);
+        assert!(j.next >= 61.0 && j.next <= 121.0);
+        let mut t = j.next;
+        let mut last = j.style;
+        for _ in 0..30 {
+            assert!(j.tick(t, true));
+            assert_ne!(j.style, last);
+            last = j.style;
+            assert!(!j.tick(t + JAM_LENGTH + 0.1, true));
+            assert!((60.0..=120.0).contains(&(j.next - (t + JAM_LENGTH))));
+            t = j.next;
+        }
+    }
+
+    #[test]
+    fn the_bar_goes_back_when_something_needs_the_notch() {
+        let mut j = Jam::new();
+        j.tick(1.0, true);
+        let t = j.next;
+        assert!(j.tick(t, true));
+        assert!(!j.tick(t + 1.0, false));
+        assert!(!j.tick(t + 2.0, true), "it does not come back for the rest of its turn");
     }
 
     #[test]

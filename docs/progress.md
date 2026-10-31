@@ -271,6 +271,11 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   Small eyes (eyes::Mini) head the lyric pill: they read, blink, nod to the beat and perk up at
   each line; the meter runs only while the pill shows. Banners are hidden per phone app.
 
+- Round 25: props replace the drawn icons (assets/props, cut from effectvid/design/props.png):
+  white pictures, one part tinted with CHARACTER, moved by code beside the small eyes. The lyric
+  bar grows 90 u to one side every 1-2 min for 6 s, with the small eyes dancing to the beat and
+  notes; the lyrics stay put. The equalizer rides through pauses under 0.5 s.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

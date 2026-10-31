@@ -82,6 +82,10 @@ pub const PEEK: [f32; 2] = [208.0, 52.0];
 pub const EXPANDED: [f32; 2] = [420.0, 140.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
+/// How far the lyric bar grows for the eyes.
+pub const JAM_ROOM: f32 = 90.0;
+/// The accent of the character in use.
+pub const CHARACTER: u32 = 0xFF2D2D;
 /// A pause shorter than this leaves the equalizer running.
 const EQ_HOLD_MS: u64 = 500;
 pub const TOAST: [f32; 2] = [320.0, 36.0];
@@ -492,6 +496,11 @@ pub struct App {
     pub eyes: eyes::Eyes,
     eye_feel: eyes::Feel,
     pub mini: eyes::Mini,
+    pub jam: eyes::Jam,
+    pub jam_x: Spring,
+    jam_show: bool,
+    /// The props, plain and in the character's colour.
+    props: std::collections::HashMap<(&'static str, bool), Option<ID2D1Bitmap>>,
     /// How far the equalizer bars are up (0..1), and when music was last heard of.
     pub eq_mix: Spring,
     last_playing: Instant,
@@ -503,7 +512,7 @@ pub struct App {
     later_row: u32,
     last_drink: Instant,
     last_song: String,
-    /// Preview run (ISLET_DEMO "sample=tour|eyes|lyric|battery|0..11"): start and what it shows.
+    /// Preview run (ISLET_DEMO "sample=tour|eyes|jam|battery|0..11"): start and what it shows.
     sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
     pub device_kind: devices::DeviceKind,
@@ -709,6 +718,10 @@ impl App {
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
             mini: eyes::Mini::new(),
+            jam: eyes::Jam::new(),
+            jam_x: Spring::new(0.0, 170.0, 21.0),
+            jam_show: false,
+            props: std::collections::HashMap::new(),
             eq_mix: Spring::new(0.0, 170.0, 24.0),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
@@ -984,6 +997,12 @@ impl App {
             w += grow;
             cx += s.signum() * grow / 2.0;
         }
+        // The lyric bar grows to one side for the eyes; the lyrics stay where they are.
+        if self.mode == Mode::Compact {
+            let grow = JAM_ROOM * self.jam_x.x.max(0.0);
+            w += grow;
+            cx += self.jam.side * grow / 2.0;
+        }
         (cx, w)
     }
 
@@ -1034,6 +1053,32 @@ impl App {
         self.power.map_or(1.0, |p| p.pct as f32 / 100.0)
     }
 
+    /// A card with a prop and small eyes is showing.
+    fn stage_on_show(&self) -> bool {
+        self.sample.is_some() || self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Remind(_)))
+    }
+
+    /// A prop's picture, `tinted` for the part in the character's colour.
+    pub fn prop(&mut self, name: &'static str, tinted: bool) -> Option<ID2D1Bitmap> {
+        if let Some(b) = self.props.get(&(name, tinted)) {
+            return b.clone();
+        }
+        let bmp = ui::prop_bytes(name).and_then(|bytes| media::decode_art(bytes).ok()).and_then(|art| {
+            let mut px = art.px.clone();
+            if tinted {
+                let (r, g, b) = (CHARACTER >> 16 & 255, CHARACTER >> 8 & 255, CHARACTER & 255);
+                for p in px.chunks_exact_mut(4) {
+                    p[0] = (p[0] as u32 * b / 255) as u8;
+                    p[1] = (p[1] as u32 * g / 255) as u8;
+                    p[2] = (p[2] as u32 * r / 255) as u8;
+                }
+            }
+            self.gfx.bitmap(art.w, art.h, &px)
+        });
+        self.props.insert((name, tinted), bmp.clone());
+        bmp
+    }
+
     pub fn sample_running(&self) -> bool {
         self.sample.is_some()
     }
@@ -1042,6 +1087,7 @@ impl App {
     fn toggle_effect_test(&mut self) {
         if self.sample.take().is_some() {
             self.eye_feel = eyes::Feel::ASLEEP;
+            self.mini.pose = eyes::Pose::Right;
             if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Sample(_))) {
                 t.until = Instant::now();
             }
@@ -1077,9 +1123,14 @@ impl App {
                 self.eyes.step(self.eye_feel, dt);
                 return;
             }
-            "lyric" => {
+            "jam" => {
                 let now = self.eye_time();
-                self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 });
+                self.jam.force(now);
+                self.jam_show = true;
+                self.mini.pose = eyes::JAM_POSES[self.jam.style];
+                if self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) {
+                    self.jam.beat(now);
+                }
                 return;
             }
             n => (None, n.parse::<u8>().ok()),
@@ -1112,15 +1163,15 @@ impl App {
         };
         let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
         self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
-        if card == Some(10) {
-            let now = self.eye_time();
-            self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 });
+        let now = self.eye_time();
+        if self.mini.feed(now, if card == Some(10) && (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) && card == Some(10) {
+            self.jam.beat(now);
         }
         let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
         if shown != card {
             match card {
                 Some(i) => {
-                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu"), ("Mắt cạnh lời bài hát", "Nhìn chữ, chớp, nhún theo nhịp"), ("Bài mới", "Tên ca sĩ")][i as usize % 12];
+                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu"), ("Mắt nhún cạnh lời bài hát", "Thanh lời dài ra 1–2 phút một lần"), ("Bài mới", "Tên ca sĩ")][i as usize % 12];
                     self.toast(ToastKind::Sample(i), title, sub, None);
                     if let Some(t) = self.toast.as_mut() {
                         t.until = Instant::now() + Duration::from_secs(3600);
@@ -1203,6 +1254,13 @@ impl App {
                 self.kick();
             }
         }
+        // The small eyes are only stepped while they are on show: their outlines are not free.
+        if self.jam_show || self.jam_x.x > 0.01 || self.stage_on_show() {
+            let clock = self.born.elapsed().as_secs_f32();
+            self.mini_busy = (0..3).fold(false, |busy, _| self.mini.step(clock, dt / 3.0) | busy);
+        } else {
+            self.mini_busy = false;
+        }
         let t = self.target();
         let n = ((dt / 0.004).ceil() as usize).max(1);
         let sub = dt / n as f32;
@@ -1223,7 +1281,7 @@ impl App {
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
             moving |= self.eq_mix.step(eq_target, sub);
-            self.mini_busy = self.mini.step(self.born.elapsed().as_secs_f32(), sub);
+            moving |= self.jam_x.step(if self.jam_show { 1.0 } else { 0.0 }, sub);
             moving |= self.intro.step(0.0, sub);
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
@@ -1283,6 +1341,7 @@ impl App {
         self.effects()
             || self.sample.is_some()
             || self.mini_busy
+            || self.jam_show
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
@@ -1603,17 +1662,24 @@ impl App {
             self.last_song = song;
             self.meter_on = false;
         }
-        // The small eyes listen only while the lyrics are on show.
-        if playing && self.pill_mix.x > 0.5 {
+        // The bar grows for the eyes now and then, and they listen only while it is out.
+        let free = playing && self.pill_mix.x > 0.5 && self.toast.is_none() && self.mode == Mode::Compact && !self.yielded && !self.hidden && !self.minimal() && sys::key_idle_ms() >= 1000;
+        self.jam_show = self.jam.tick(t, free);
+        if self.jam_show {
+            self.mini.pose = eyes::JAM_POSES[self.jam.style];
             if !self.meter_on {
                 sys::open_meter();
                 self.meter_on = true;
             }
             if self.mini.feed(t, sys::audio_peak()) {
+                self.jam.beat(t);
                 self.kick();
             }
         } else {
             self.meter_on = false;
+            if self.stage_on_show() && self.mini.feed(t, 0.0) {
+                self.kick();
+            }
         }
         // Plugging in ends the battery scene at once.
         let plugged = self.eye_feel.battery && self.power.is_some_and(|p| p.ac);
