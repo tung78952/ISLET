@@ -1605,7 +1605,7 @@ fn header(a: &mut App, lx: f32) {
     }
     // Every page has its settings a click away.
     if a.panel.is_none() && !a.water_settings {
-        let gear = Rc::new(lx + 110.0, 8.0, 20.0, 20.0);
+        let gear = Rc::new(lx + 118.0, 8.0, 20.0, 20.0);
         let h = btn(a, gear, 0.15);
         icon::sliders(&a.gfx, gear.cx(), gear.cy(), mix(0x8A8A8A, WHITE, h), 1.0);
         a.gfx.unzoom();
@@ -2697,7 +2697,7 @@ fn todo(a: &mut App, lx: f32) {
         form(a, lx);
         return;
     }
-    let add = Rc::new(lx + 24.0 + tw, 9.0, 22.0, 22.0);
+    let add = Rc::new(lx + 18.0 + tw, 9.0, 20.0, 20.0);
     let h = btn(a, add, 0.15);
     icon::plus_circle(&a.gfx, add.cx(), add.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
     a.gfx.unzoom();
