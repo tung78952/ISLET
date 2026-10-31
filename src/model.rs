@@ -83,6 +83,8 @@ pub struct Settings {
     pub hide_banners: bool,
     /// The separate Luma app was turned off (Islet runs its reminders now).
     pub luma_app_off: bool,
+    /// Lyrics stay on across restarts.
+    pub lyrics: bool,
 }
 
 impl Settings {
@@ -94,6 +96,7 @@ impl Settings {
             lyric_size: num(&m, "lyric_size", 15.0f32).clamp(15.0, 26.0),
             hide_banners: num(&m, "hide_banners", 1u8) == 1,
             luma_app_off: num(&m, "luma_app_off", 0u8) == 1,
+            lyrics: num(&m, "lyrics", 1u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -105,6 +108,7 @@ impl Settings {
                 ("lyric_size", self.lyric_size.to_string()),
                 ("hide_banners", (self.hide_banners as u8).to_string()),
                 ("luma_app_off", (self.luma_app_off as u8).to_string()),
+                ("lyrics", (self.lyrics as u8).to_string()),
             ],
         );
     }

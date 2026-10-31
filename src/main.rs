@@ -784,6 +784,9 @@ impl App {
         notify::HIDE_BANNERS.store(self.settings.hide_banners, std::sync::atomic::Ordering::Relaxed);
         self.lyr_font.x = self.settings.lyric_size;
         self.lyr_font_target = self.settings.lyric_size;
+        if self.demo.is_none() {
+            self.lyrics_on = self.settings.lyrics;
+        }
         self.place();
         if self.demo.is_none() {
             self.tray(NIM_ADD);
@@ -2218,7 +2221,13 @@ impl App {
                 self.media_cmd(Cmd::Toggle);
             }
             Act::Next => self.media_cmd(Cmd::Next),
-            Act::Lyrics => self.lyrics_on = !self.lyrics_on,
+            Act::Lyrics => {
+                self.lyrics_on = !self.lyrics_on;
+                self.settings.lyrics = self.lyrics_on;
+                if self.demo.is_none() {
+                    self.settings.save();
+                }
+            }
             // Scrubbing is handled by the mouse down/move/up handlers.
             Act::Scrub(..) => {}
             Act::Seek(ms) => {
