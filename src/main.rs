@@ -467,14 +467,14 @@ pub struct App {
     springs_moving: bool,
     pub lyrics_on: bool,
     pub page: Page,
-    pub water_sub: u8,
-    pub water_settings: bool,
     /// The rolling pickers on show, by what they set.
-    pub wheels: [wheel::Wheel; 10],
+    pub wheels: [wheel::Wheel; 6],
     /// The settings panel on show, instead of the page.
     pub panel: Option<ui::Panel>,
-    /// The panel to go back to from the general one.
-    panel_back: Option<ui::Panel>,
+    pub panel_top: usize,
+    pub chev_mix: Spring,
+    chev_near: bool,
+    pub switches: std::collections::HashMap<(i32, i32), (Spring, bool)>,
     /// Glides between the steps of the reminder form.
     pub form_anim: Spring,
     wheel_held: Option<ui::WheelId>,
@@ -534,7 +534,6 @@ pub struct App {
     /// Hover/press feedback per button, keyed by its quantized position: (spring, target).
     pub hover: std::collections::HashMap<(i32, i32), (Spring, f32)>,
     /// Water reminder switch knob (0 = off, 1 = on) and the page-dot indicator position.
-    pub toggle_x: Spring,
     /// A short, local splash after recording a drink. It only drives drawing
     /// on the Water page and settles without keeping the app awake.
     pub water_pulse: Spring,
@@ -703,12 +702,13 @@ impl App {
             animating: false,
             springs_moving: false,
             lyrics_on: false,
-            page: Page::Music,
-            water_sub: 0,
-            water_settings: false,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(18, 4), wheel::Wheel::new(30, 4), wheel::Wheel::new(8, 3), wheel::Wheel::new(12, 0)],
+            page: Page::Today,
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(model::GOALS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 22).tall(ui::CLOCK_ROW), wheel::Wheel::new(4, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW)],
             panel: None,
-            panel_back: None,
+            panel_top: 0,
+            chev_mix: Spring::new(0.0, 170.0, 24.0),
+            chev_near: false,
+            switches: std::collections::HashMap::new(),
             form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
             wheels_moving: false,
@@ -750,7 +750,6 @@ impl App {
             mouse_in: false,
             down: None,
             hover: Default::default(),
-            toggle_x: Spring::new(1.0, 300.0, 30.0),
             water_pulse: Spring::new(0.0, 420.0, 18.0),
             dot_pos: Spring::new(0.0, 230.0, 26.0),
             hits: Vec::new(),
@@ -1235,7 +1234,6 @@ impl App {
         self.sh.tune(k, c);
         if self.mode == Mode::Expanded && m != Mode::Expanded {
             self.history_open = false;
-            self.water_settings = false;
             self.panel = None;
             self.old_notes = false;
         }
@@ -1353,7 +1351,10 @@ impl App {
                 }
             }
             moving |= self.lyr_mix.step(if self.lyrics_view() { 1.0 } else { 0.0 }, sub);
-            moving |= self.toggle_x.step(if self.brain.cfg.reminders.water.enabled { 1.0 } else { 0.0 }, sub);
+            for (spring, on) in self.switches.values_mut() {
+                moving |= spring.step(if *on { 1.0 } else { 0.0 }, sub);
+            }
+            moving |= self.chev_mix.step(if self.chev_near { 1.0 } else { 0.0 }, sub);
             moving |= self.water_pulse.step(0.0, sub);
             moving |= self.dot_pos.step(self.dot_target, sub);
             for (sp, target) in self.hover.values_mut() {
@@ -1531,14 +1532,21 @@ impl App {
             return;
         }
         if self.expanded() && self.history_open {
-            let last = self.history.len().saturating_sub(3);
+            let last = self.history.len().saturating_sub(2);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
+            self.render();
+            return;
+        }
+        if self.expanded() && self.panel.is_some() {
+            let last = ui::panel_rows(self).saturating_sub(2) as i32;
+            // Two rows to a screen, so a turn moves a whole screen.
+            self.panel_top = (self.panel_top as i32 - 2 * notches.signum() as i32).clamp(0, last.max(0)) as usize;
             self.render();
             return;
         }
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
             let rows = if self.old_notes { self.todo.tasks.len() } else { self.brain.cfg.custom.len() + (!self.todo.tasks.is_empty()) as usize };
-            self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(3) as i32) as usize;
+            self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
             self.render();
             return;
         }
@@ -2179,6 +2187,19 @@ impl App {
 
     /// The To-do page's list: today's timed tasks (Luma reminders) and untimed to-dos, open
     /// ones first.
+    /// What is still to come today: (name, time), soonest first.
+    pub fn upcoming(&self) -> Vec<(String, String)> {
+        use chrono::{Datelike, Timelike};
+        let now = chrono::Local::now();
+        let day = now.weekday().num_days_from_monday() as u8;
+        let clock = format!("{:02}:{:02}", now.hour(), now.minute());
+        self.reminders()
+            .into_iter()
+            .filter(|r| r.enabled && r.time.as_str() > clock.as_str() && (r.days.is_empty() || r.days.contains(&day)))
+            .map(|r| (r.title, r.time))
+            .collect()
+    }
+
     /// The user's own reminders, by time of day.
     pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
         let mut v = self.brain.cfg.custom.clone();
@@ -2294,7 +2315,6 @@ impl App {
         self.page = p;
         self.slide.x = 1.0;
         self.slide.v = 0.0;
-        self.water_settings = false;
         self.panel = None;
         self.old_notes = false;
         self.reminder_top = 0;
@@ -2492,27 +2512,25 @@ impl App {
                 self.dismiss_toast();
             }
             Act::NoticeClose => self.close_notice(),
-            Act::WaterOn => {
-                let on = !self.brain.cfg.reminders.water.enabled;
-                self.brain.set_water_enabled(on, chrono::Local::now());
-            }
-            Act::WaterSub(s) => self.water_sub = s,
-            Act::WaterSettings(on) => {
-                self.water_settings = on;
-                self.sync_wheels();
-            }
             Act::Wheel(_) => {}
             Act::Panel(p) => {
-                self.panel_back = if p == Some(ui::Panel::General) { self.panel } else { None };
                 self.panel = p;
+                self.panel_top = 0;
                 self.sync_wheels();
             }
-            Act::PanelBack => {
-                self.panel = self.panel_back.take();
-                self.sync_wheels();
+            Act::PomoPlan => {
+                let (work, rest) = match self.settings.pomo_work {
+                    25 => (50, 10),
+                    50 => (90, 15),
+                    _ => (25, 5),
+                };
+                self.settings.pomo_work = work;
+                self.settings.pomo_rest = rest;
+                if self.demo.is_none() {
+                    self.settings.save();
+                }
             }
             Act::Set(key) => self.change_setting(key),
-            Act::WaterReset => self.brain.reset_water(),
             Act::ReminderAdd => self.open_form(None),
             Act::ReminderEdit(i) => self.open_form(Some(i)),
             Act::ReminderSwitch(i) => {
@@ -2718,6 +2736,13 @@ impl App {
 
     fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.mouse = (x, y);
+        // The page arrows come out near either edge.
+        let (cx, w) = self.notch_geometry();
+        let near = self.expanded() && (x - (cx - w / 2.0) < 46.0 || (cx + w / 2.0) - x < 46.0);
+        if near != self.chev_near {
+            self.chev_near = near;
+            self.kick();
+        }
         if let Some(id) = self.wheel_held {
             let t = self.eye_time();
             self.wheels[id as usize].drag_to(y, t);
@@ -2811,10 +2836,6 @@ impl App {
         self.wheels[ui::WheelId::Goal as usize].set(goal);
         self.wheels[ui::WheelId::BedHour as usize].set(hour);
         self.wheels[ui::WheelId::BedMinute as usize].set(minute);
-        self.wheels[ui::WheelId::FocusWork as usize].set(self.settings.pomo_work as usize / 5 - 1);
-        self.wheels[ui::WheelId::FocusRest as usize].set(self.settings.pomo_rest as usize - 1);
-        self.wheels[ui::WheelId::FocusRounds as usize].set(self.settings.pomo_rounds as usize - 1);
-        self.wheels[ui::WheelId::LyricSize as usize].set((self.settings.lyric_size - 15.0).max(0.0) as usize);
     }
 
     fn change_setting(&mut self, key: ui::SetKey) {
@@ -2841,6 +2862,17 @@ impl App {
             K::Minimal => {
                 self.settings.minimal = !self.settings.minimal;
                 self.minimal_armed = true;
+            }
+            K::Water => self.brain.configure(|c| c.reminders.water.enabled ^= true, now),
+            K::LyricSize => {
+                let size = match self.settings.lyric_size as u32 {
+                    s if s < 18 => 18.0,
+                    s if s < 22 => 22.0,
+                    s if s < 26 => 26.0,
+                    _ => 15.0,
+                };
+                self.settings.lyric_size = size;
+                self.lyr_font_target = size;
             }
             K::Stretch => self.brain.configure(|c| c.reminders.stretch.enabled ^= true, now),
             K::RestEyes => self.brain.configure(|c| c.reminders.eyes.enabled ^= true, now),
@@ -2870,21 +2902,7 @@ impl App {
 
     /// A wheel came to rest: what it shows is now the setting.
     fn apply_wheels(&mut self) {
-        use ui::WheelId as W;
-        if self.panel.is_some() {
-            let index = |a: &App, id: W| a.wheels[id as usize].index() as u32;
-            self.settings.pomo_work = 5 + 5 * index(self, W::FocusWork);
-            self.settings.pomo_rest = 1 + index(self, W::FocusRest);
-            self.settings.pomo_rounds = 1 + index(self, W::FocusRounds);
-            let size = 15.0 + index(self, W::LyricSize) as f32;
-            self.settings.lyric_size = size;
-            self.lyr_font_target = size;
-            if self.demo.is_none() {
-                self.settings.save();
-            }
-            return;
-        }
-        if !self.water_settings {
+        if !matches!(self.panel, Some(ui::Panel::Water | ui::Panel::Bed)) {
             return;
         }
         let index = |a: &App, id: ui::WheelId| a.wheels[id as usize].index();
@@ -3015,7 +3033,7 @@ impl App {
         match cmd.0 {
             9 => {
                 self.set_mode(Mode::Expanded);
-                self.panel = Some(ui::Panel::General);
+                self.panel = Some(ui::Panel::Menu);
                 self.sync_wheels();
             }
             8 => self.toggle_effect_test(),
@@ -3375,6 +3393,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if let Some(p) = kv.get("page") {
         a.page = match *p {
+            "today" => Page::Today,
             "pomo" => Page::Pomo,
             "water" => Page::Water,
             "shelf" => Page::Shelf,
@@ -3402,10 +3421,13 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if let Some(v) = kv.get("panel") {
         a.panel = Some(match *v {
-            "focus" => ui::Panel::Focus,
+            "notices" => ui::Panel::Notices,
             "care" => ui::Panel::Care,
             "music" => ui::Panel::Music,
-            _ => ui::Panel::General,
+            "system" => ui::Panel::System,
+            "water" => ui::Panel::Water,
+            "bed" => ui::Panel::Bed,
+            _ => ui::Panel::Menu,
         });
         a.sync_wheels();
     }
@@ -3416,13 +3438,6 @@ fn demo_setup(a: &mut App, spec: &str) {
             f.step = step;
         }
         a.form_anim.x = step as f32;
-    }
-    if kv.get("watersettings") == Some(&"1") {
-        a.water_settings = true;
-        a.sync_wheels();
-    }
-    if let Some(s) = kv.get("watersub") {
-        a.water_sub = s.parse().unwrap_or(0);
     }
     // "todos=go@16:54-00:00~Read~Gym@18:00-19:30": tasks for screenshots.
     if let Some(list) = kv.get("todos") {

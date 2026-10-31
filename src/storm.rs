@@ -402,7 +402,7 @@ impl App {
                 ("pill_mix", &self.pill_mix), ("intro", &self.intro), ("intro_grow", &self.intro_grow), ("vol_stretch", &self.vol_stretch),
                 ("sun_rot", &self.sun_rot), ("lyr_user", &self.lyr_user), ("lyr_zoom", &self.lyr_zoom), ("caps_mix", &self.caps_mix),
                 ("tl_frac", &self.tl_frac), ("toast_swap", &self.toast_swap), ("roll_t", &self.roll_t), ("vol_level", &self.vol_level),
-                ("lyr_mix", &self.lyr_mix), ("toggle_x", &self.toggle_x), ("water_pulse", &self.water_pulse), ("dot_pos", &self.dot_pos),
+                ("lyr_mix", &self.lyr_mix), ("water_pulse", &self.water_pulse), ("dot_pos", &self.dot_pos),
                 ("aurora_lvl", &self.aurora_lvl),
             ];
             let moving: Vec<String> = springs.iter().filter(|(_, sp)| sp.v.abs() >= 0.05 || !sp.x.is_finite()).map(|(n, sp)| format!("{n} x={:.3} v={:.3}", sp.x, sp.v)).collect();

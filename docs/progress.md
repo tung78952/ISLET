@@ -282,6 +282,12 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   Other cards are plain with a bell, and their words slide in. Only looks, positions and timing
   are used, so another character can perform the same acts.
 
+- Round 27: the open notch rebuilt on effectvid/design/layout.png: one header (page name, centred
+  time, bell, settings), pages Today, Music, Focus, Care, Reminders, Shelf, at most two rows a
+  screen. Settings are four tiles leading to two-row lists; the reminder form is three steps
+  between a back and a next button. Page arrows appear near the edges. The care reminders run by
+  themselves: only on/off, level, the water goal and bedtime are set.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

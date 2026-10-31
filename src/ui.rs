@@ -16,12 +16,12 @@ const CHIP: u32 = 0x333333;
 const GREY: u32 = 0x8C8C8C;
 const LABEL: u32 = 0x999999;
 const BLUE: u32 = 0x4DBDFF;
-const TOGGLE: u32 = 0x2699FF;
 const CYAN: u32 = 0x66DBFF;
 const TODO_GREEN: u32 = 0x40B854;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Today,
     Music,
     Pomo,
     Water,
@@ -30,15 +30,15 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [Page::Music, Page::Pomo, Page::Water, Page::Shelf, Page::Todo];
+    pub const ALL: [Page; 6] = [Page::Today, Page::Music, Page::Pomo, Page::Water, Page::Todo, Page::Shelf];
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
     }
     pub fn next(self) -> Page {
-        Self::ALL[(self.index() + 1) % 5]
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
     }
     pub fn prev(self) -> Page {
-        Self::ALL[(self.index() + 4) % 5]
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -70,10 +70,6 @@ pub enum Act {
     PomoReset,
     PomoPhase(Phase),
     Drank,
-    WaterOn,
-    WaterSub(u8),
-    WaterSettings(bool),
-    WaterReset,
     /// A rolling picker: it is dragged, turned and tapped, not clicked.
     Wheel(WheelId),
     Panel(Option<Panel>),
@@ -87,7 +83,7 @@ pub enum Act {
     FormDelete,
     FormNext,
     FormBack,
-    PanelBack,
+    PomoPlan,
     FormClear,
     ShelfOpen(usize),
     ShelfRemove(usize),
@@ -223,12 +219,6 @@ mod icon {
     pub fn droplet(g: &Gfx, cx: f32, cy: f32, s: f32, hex: u32, a: f32) {
         g.droplet(cx, cy, s, hex, a);
     }
-    pub fn sliders(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
-        g.line(cx - 5.0, cy - 2.4, cx + 5.0, cy - 2.4, 1.3, hex, a);
-        g.line(cx - 5.0, cy + 2.4, cx + 5.0, cy + 2.4, 1.3, hex, a);
-        g.fill_circle(cx + 1.6, cy - 2.4, 1.7, 1.7, hex, a);
-        g.fill_circle(cx - 1.8, cy + 2.4, 1.7, 1.7, hex, a);
-    }
     pub fn bell(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         // Dome with a flared rim and a clapper below.
         let half = [(4.4f32, 2.6f32), (3.8, 1.8), (3.4, 0.0), (3.2, -2.4), (2.6, -3.8), (1.6, -4.6), (0.0, -4.9)];
@@ -250,11 +240,6 @@ mod icon {
         g.fill_circle(cx, cy, 6.8, 6.8, hex, a);
         g.line(cx - 3.2, cy, cx + 3.2, cy, 1.5, 0x000000, a);
         g.line(cx, cy - 3.2, cx, cy + 3.2, 1.5, 0x000000, a);
-    }
-    pub fn trash(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
-        g.line(cx - 3.8, cy - 3.2, cx + 3.8, cy - 3.2, 1.2, hex, a);
-        g.stroke_rrect(crate::gfx::Rc::new(cx - 2.8, cy - 2.2, 5.6, 6.6), 1.0, 1.1, hex, a);
-        g.line(cx - 1.2, cy - 4.6, cx + 1.2, cy - 4.6, 1.2, hex, a);
     }
     pub fn x_circle(g: &Gfx, cx: f32, cy: f32, r: f32, bg: u32, fg: u32, a: f32) {
         g.fill_circle(cx, cy, r, r, bg, a);
@@ -1123,6 +1108,10 @@ fn card_button(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, live: bool, ac
 
 pub fn prop_bytes(name: &str) -> Option<&'static [u8]> {
     Some(match name {
+        "cat_notice" => include_bytes!("../assets/props/cat_notice.png"),
+        "cat_care" => include_bytes!("../assets/props/cat_care.png"),
+        "cat_music" => include_bytes!("../assets/props/cat_music.png"),
+        "cat_gear" => include_bytes!("../assets/props/cat_gear.png"),
         "bell0" => include_bytes!("../assets/props/bell0.png"),
         "bell1" => include_bytes!("../assets/props/bell1.png"),
         "glass0" => include_bytes!("../assets/props/glass0.png"),
@@ -1576,28 +1565,17 @@ fn ring_angle(age: f32, amp: f32) -> f32 {
 
 // ---------------------------------------------------------------- expanded
 
-/// The top row, the same on every page: the title's side is the page's, the rest sits together
-/// on the right, the settings button in the corner.
+/// The top row, the same on every page: the page's name on the left, the time in the middle,
+/// the bell and the settings on the right.
 fn header(a: &mut App, lx: f32) {
-    const GEAR: f32 = 382.0;
-    const BELL: f32 = 346.0;
-    const EQ: f32 = 288.0;
-    if a.page == Page::Music && a.panel.is_none() {
-        let date = a.date_label();
-        a.gfx.ui(&date, Rc::new(lx + 24.0, 8.0, 180.0, 20.0), 13.0, 400, 0xC8C8C8, 1.0, Align::L);
-    }
     let time = a.clock().time_label();
-    a.gfx.ui(&time, Rc::new(lx + 214.0, 8.0, 60.0, 20.0), 14.0, 700, WHITE, 1.0, Align::R);
-    if a.power.is_some_and(|p| p.battery && p.ac) {
-        icon::charging(&a.gfx, lx + 196.0, 18.0, 8.2, a.charge_level(), 1.0);
-    }
+    a.gfx.ui(&time, Rc::new(lx + 170.0, 8.0, 80.0, 22.0), 16.0, 700, WHITE, 1.0, Align::C);
     if a.panel.is_some() || a.form.is_some() {
         return;
     }
-    right_indicator(a, lx + EQ, 18.0);
     // The bell appears once there is something to look back at.
     if !a.history.is_empty() {
-        let bell = Rc::new(lx + BELL - 12.0, 7.0, 24.0, 22.0);
+        let bell = Rc::new(lx + 338.0, 7.0, 26.0, 24.0);
         let h = btn(a, bell, 0.1);
         icon::bell(&a.gfx, bell.cx(), bell.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
         if a.history_unread > 0 {
@@ -1610,31 +1588,30 @@ fn header(a: &mut App, lx: f32) {
         a.gfx.unzoom();
         hit(a, bell, Act::History(true));
     }
-    if !a.water_settings {
-        let gear = Rc::new(lx + GEAR - 13.0, 5.0, 26.0, 26.0);
-        let h = btn(a, gear, 0.15);
-        a.gfx.fill_circle(gear.cx(), gear.cy(), 13.0, 13.0, 0xFFFFFF, 0.07 + 0.1 * h);
-        icon::sliders(&a.gfx, gear.cx(), gear.cy(), WHITE, 1.0);
-        a.gfx.unzoom();
-        hit(a, gear, match a.page {
-            Page::Music => Act::Panel(Some(Panel::Music)),
-            Page::Pomo => Act::Panel(Some(Panel::Focus)),
-            Page::Water => Act::WaterSettings(true),
-            Page::Shelf => Act::Panel(Some(Panel::General)),
-            Page::Todo => Act::Panel(Some(Panel::Care)),
-        });
+    let gear = Rc::new(lx + 374.0, 6.0, 26.0, 26.0);
+    let h = btn(a, gear, 0.15);
+    a.gfx.fill_circle(gear.cx(), gear.cy(), 13.0, 13.0, 0xFFFFFF, 0.1 + 0.12 * h);
+    if let Some(bmp) = a.prop("cat_gear", false) {
+        a.gfx.image(&bmp, Rc::new(gear.cx() - 8.0, gear.cy() - 8.0, 16.0, 16.0), 0.0, 1.0);
     }
+    a.gfx.unzoom();
+    hit(a, gear, Act::Panel(Some(Panel::Menu)));
 }
 
+/// The arrows only come out when the pointer nears the edge, so they never sit on the content.
 fn chevrons(a: &mut App, lx: f32) {
     if a.form.is_some() {
         return;
     }
-    for (x, left, act) in [(lx + 22.0, true, Act::PagePrev), (lx + 395.0, false, Act::PageNext)] {
-        let r = Rc::new(x - 11.0, 59.0, 22.0, 22.0);
+    let show = a.chev_mix.x.clamp(0.0, 1.0);
+    if show < 0.02 {
+        return;
+    }
+    for (x, left, act) in [(lx + 14.0, true, Act::PagePrev), (lx + 406.0, false, Act::PageNext)] {
+        let r = Rc::new(x - 12.0, 58.0, 24.0, 24.0);
         let h = btn(a, r, 0.18);
-        a.gfx.fill_circle(x, 70.0, 8.4, 8.4, mix(CHEVRON, 0x8A8A8A, h), 1.0);
-        icon::chevron(&a.gfx, x, 70.0, left, 0x000000, 1.0);
+        a.gfx.fill_circle(x, 70.0, 10.0, 10.0, mix(CHEVRON, 0x8A8A8A, h), show);
+        icon::chevron(&a.gfx, x, 70.0, left, 0x000000, show);
         a.gfx.unzoom();
         hit(a, r, act);
     }
@@ -1661,45 +1638,35 @@ fn dots(a: &mut App, lx: f32) {
     }
 }
 
-fn title(a: &mut App, lx: f32, first: &str, second: Option<(&str, u32)>) {
-    a.gfx.ui(first, Rc::new(lx + 15.0, 8.2, 200.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    if let Some((s, col)) = second {
-        let fw = a.gfx.measure(first, 15.0, 600);
-        a.gfx.ui(s, Rc::new(lx + 15.0 + fw, 8.2, 200.0, 22.0), 15.0, 600, col, 1.0, Align::L);
-    }
+fn title(a: &mut App, lx: f32, text: &str) {
+    a.gfx.ui(text, Rc::new(lx + 24.0, 8.0, 150.0, 22.0), 16.0, 700, WHITE, 1.0, Align::L);
 }
 
 /// Notification history: newest first, three rows at a time, the wheel scrolls.
 fn history(a: &mut App, lx: f32) {
-    let back = Rc::new(lx + 19.0, 8.0, 22.0, 22.0);
-    let h = btn(a, back, 0.18);
-    a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
-    icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
-    a.gfx.unzoom();
-    hit(a, back, Act::History(false));
-    a.gfx.ui("Notifications", Rc::new(lx + 46.0, 8.2, 160.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    let clear = Rc::new(lx + 346.0, 10.0, 46.0, 18.0);
+    back_title(a, lx, "Thông báo", Act::History(false));
+    let clear = Rc::new(lx + 330.0, 6.0, 64.0, 26.0);
     let h = btn(a, clear, 0.05);
-    a.gfx.fill_rrect(clear, 9.0, mix(0x222222, 0x3A3A3A, h), 1.0);
-    a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
+    a.gfx.fill_rrect(clear, 13.0, mix(0x242426, 0x3A3A3C, h), 1.0);
+    a.gfx.ui("Xóa hết", clear, 12.0, 500, WHITE, 1.0, Align::C);
     a.gfx.unzoom();
     hit(a, clear, Act::HistoryClear);
-    let rows: Vec<_> = a.history.iter().cloned().enumerate().skip(a.history_top).take(3).collect();
+    let rows: Vec<_> = a.history.iter().cloned().enumerate().skip(a.history_top).take(2).collect();
     for (row, (i, n)) in rows.into_iter().enumerate() {
-        let y = 34.0 + row as f32 * 33.0;
-        let r = Rc::new(lx + 19.0, y, 374.0, 31.0);
+        let y = 38.0 + row as f32 * 44.0;
+        let r = Rc::new(lx + 20.0, y, 380.0, 42.0);
         let h = btn(a, r, 0.01);
         if h > 0.0 {
-            a.gfx.fill_rrect(r, 9.0, 0x222222, h.min(1.0));
+            a.gfx.fill_rrect(r, 12.0, 0x222222, h.min(1.0));
         }
-        notice_badge(a, &n, lx + 38.0, y + 15.5, 11.0);
-        let (tx, tw) = (lx + 58.0, 276.0);
+        notice_badge(a, &n, lx + 44.0, y + 21.0, 16.0);
+        let tx = lx + 70.0;
         let secs = n.born.elapsed().as_secs();
         let age = if secs < 60 { "now".to_string() } else if secs < 3600 { format!("{} min", secs / 60) } else { format!("{} h", secs / 3600) };
-        a.gfx.ui(&age, Rc::new(lx + 330.0, y + 2.0, 56.0, 14.0), 10.0, 400, 0x8E8E93, 1.0, Align::R);
-        a.gfx.ui(&n.title, Rc::new(tx, y + 1.0, tw, 15.0), 12.0, 600, WHITE, 1.0, Align::L);
-        let sub = if n.body.is_empty() { n.source_name() } else { format!("{} · {}", n.source_name(), n.body) };
-        a.gfx.ui(&sub, Rc::new(tx, y + 16.0, 328.0, 14.0), 10.5, 400, 0xA0A0A5, 1.0, Align::L);
+        a.gfx.ui(&age, Rc::new(lx + 330.0, y + 3.0, 62.0, 16.0), 12.0, 400, 0x8E8E93, 1.0, Align::R);
+        a.gfx.ui(&n.title, Rc::new(tx, y + 1.0, 250.0, 20.0), 15.0, 600, WHITE, 1.0, Align::L);
+        let sub = if n.body.is_empty() { n.source_name() } else { n.body.clone() };
+        a.gfx.ui(&sub, Rc::new(tx, y + 21.0, 320.0, 18.0), 13.0, 400, 0xA0A0A5, 1.0, Align::L);
         a.gfx.unzoom();
         hit(a, r, Act::HistoryOpen(i));
     }
@@ -1727,7 +1694,7 @@ fn expanded(a: &mut App, lx: f32) {
         history(a, lx);
         return;
     }
-    let settings = a.page == Page::Water && a.water_settings || a.panel.is_some();
+    let settings = a.panel.is_some();
     let lyr = if a.page == Page::Music { a.lyr_mix.x.clamp(0.0, 1.0) } else { 0.0 };
     let base = a.gfx.alpha;
     a.gfx.alpha = base * (1.0 - lyr);
@@ -1770,15 +1737,10 @@ fn page(a: &mut App, p: Page, lx: f32) {
         return;
     }
     match p {
+        Page::Today => today(a, lx),
         Page::Music => music(a, lx),
         Page::Pomo => pomo(a, lx),
-        Page::Water => {
-            if a.water_settings {
-                water_settings(a, lx)
-            } else {
-                water(a, lx)
-            }
-        }
+        Page::Water => care(a, lx),
         Page::Shelf => shelf(a, lx),
         Page::Todo => todo(a, lx),
     }
@@ -2023,7 +1985,7 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
 // ---------------------------------------------------------------- pomodoro
 
 fn pomo(a: &mut App, lx: f32) {
-    title(a, lx, "Pomodoro", None);
+    title(a, lx, "Focus");
     let (cx, cy) = (lx + 80.0, 74.0);
     // Glow halo then the ring itself, lit from the top-left. The ring shows the time left: the
     // elapsed part opens clockwise from 12 o'clock.
@@ -2055,7 +2017,13 @@ fn pomo(a: &mut App, lx: f32) {
     icon::reset(&a.gfx, lx + 330.0, 50.4, 5.4, WHITE, 1.0);
     a.gfx.unzoom();
     hit(a, rr, Act::PomoReset);
-    a.gfx.ui(&phase_label, Rc::new(lx + 206.6, 67.4, 120.0, 16.0), 13.0, 400, LABEL, 1.0, Align::C);
+    // The label also shows the plan, and a press moves to the next one.
+    let plan = Rc::new(lx + 176.0, 64.0, 180.0, 22.0);
+    let shown = format!("{phase_label} · {}/{}", a.settings.pomo_work, a.settings.pomo_rest);
+    let h = btn(a, plan, 0.03);
+    a.gfx.ui(&shown, plan, 13.0, 400, mix(LABEL, WHITE, h), 1.0, Align::C);
+    a.gfx.unzoom();
+    hit(a, plan, Act::PomoPlan);
 
     let short = Rc::new(lx + 146.0, 92.0, 84.0, 28.0);
     let focus = Rc::new(lx + 302.0, 92.0, 83.2, 28.0);
@@ -2090,187 +2058,68 @@ fn pomo(a: &mut App, lx: f32) {
 
 // ---------------------------------------------------------------- water
 
-fn water(a: &mut App, lx: f32) {
-    title(a, lx, "Water", Some((" Reminder", BLUE)));
+/// The day at a glance: how it is going on the left, what comes next on the right.
+fn today(a: &mut App, lx: f32) {
+    title(a, lx, "Today");
+    let cfg = &a.brain.cfg;
+    let (taken, goal) = (a.brain.stats.water * cfg.cup_ml, cfg.water_goal * cfg.cup_ml);
+    let focus = a.brain.stats.focus;
+    let big = format!("{:.1}", taken as f32 / 1000.0);
+    a.gfx.ui(&big, Rc::new(lx + 28.0, 42.0, 80.0, 44.0), 36.0, 700, WHITE, 1.0, Align::L);
+    let bw = a.gfx.measure(&big, 36.0, 700);
+    a.gfx.ui(&format!("/ {:.1} L", goal as f32 / 1000.0), Rc::new(lx + 34.0 + bw, 54.0, 80.0, 24.0), 15.0, 500, 0xA0A0A5, 1.0, Align::L);
+    a.gfx.ui(&format!("Tập trung {focus} phút"), Rc::new(lx + 28.0, 92.0, 170.0, 22.0), 14.0, 400, 0xA0A0A5, 1.0, Align::L);
+    let next = a.upcoming();
+    if next.is_empty() {
+        a.gfx.ui("Hết nhắc hôm nay", Rc::new(lx + 210.0, 60.0, 180.0, 24.0), 15.0, 400, 0x8E8E93, 1.0, Align::R);
+    }
+    for (i, (name, time)) in next.iter().take(2).enumerate() {
+        let cy = 60.0 + i as f32 * 40.0;
+        a.gfx.ui(time, Rc::new(lx + 330.0, cy - 12.0, 60.0, 24.0), 15.0, 600, WHITE, 1.0, Align::R);
+        a.gfx.ui(name, Rc::new(lx + 200.0, cy - 12.0, 130.0, 24.0), 15.0, 400, 0xD8D8D8, 1.0, Align::L);
+    }
+}
+
+/// Water, big: the glass fills up, and one large button.
+fn care(a: &mut App, lx: f32) {
+    title(a, lx, "Care");
     let clock = a.clock();
     let cfg = &a.brain.cfg;
     let (taken, goal, on) = (a.brain.stats.water * cfg.cup_ml, cfg.water_goal * cfg.cup_ml, cfg.reminders.water.enabled);
-    let pct = (taken as f32 * 100.0 / goal.max(1) as f32).round() as u32;
-    // The next reminder, as a clock time (demo captures keep their fixed clock).
     let next = match a.brain.water_in(chrono::Local::now()) {
         Some(s) if a.demo.is_none() => (clock.minutes() + (s as u32).div_ceil(60)) % (24 * 60),
         _ => clock.minutes() + 60,
     };
-    let big = format!("{:.1}", taken as f32 / 1000.0);
-    a.gfx.ui(&big, Rc::new(lx + 43.8, 30.4, 80.0, 32.0), 30.0, 700, WHITE, 1.0, Align::L);
-    let bw = a.gfx.measure(&big, 30.0, 700);
-    let of = format!("/ {:.1} L", goal as f32 / 1000.0);
-    a.gfx.ui(&of, Rc::new(lx + 43.8 + bw + 5.0, 45.2, 70.0, 16.0), 13.0, 600, GREY, 1.0, Align::L);
-
-    // The knob slides and the track color blends with the eased switch position.
-    let tg = Rc::new(lx + 162.0, 36.8, 34.4, 20.8);
-    let _ = on;
-    let k = a.toggle_x.x;
-    let h = btn(a, tg, 0.06);
-    a.gfx.fill_rrect(tg, 10.4, mix(0x3A3A3A, TOGGLE, k), 1.0);
-    let kx = tg.x + 10.0 + (tg.w - 20.0) * k;
-    let kr = 8.0 + 0.6 * h.max(0.0);
-    a.gfx.fill_circle(kx, tg.cy() - 0.4, kr, kr, WHITE, 1.0);
-    icon::bell(&a.gfx, kx, tg.cy() - 0.4, mix(0x7A7A7A, TOGGLE, k), 1.0);
-    a.gfx.unzoom();
-    hit(a, tg, Act::WaterOn);
-
-    a.gfx.ui("Today ·", Rc::new(lx + 44.0, 63.4, 60.0, 16.0), 11.5, 400, GREY, 1.0, Align::L);
-    let pct_s = format!("{pct}%");
-    a.gfx.ui(&pct_s, Rc::new(lx + 84.1, 63.4, 60.0, 16.0), 11.5, 700, BLUE, 1.0, Align::L);
-    let nx = lx + 84.1 + a.gfx.measure(&pct_s, 11.5, 700) + 4.9;
-    a.gfx.ui(&format!("· Next {}", hm_pad(next)), Rc::new(nx, 63.4, 120.0, 16.0), 11.5, 400, GREY, 1.0, Align::L);
-    let bar = Rc::new(lx + 43.2, 82.4, 153.2, 4.8);
-    a.gfx.fill_rrect(bar, 2.4, 0x212121, 1.0);
-    if taken > 0 {
-        a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * pct as f32 / 100.0).clamp(bar.h, bar.w), bar.h), 2.4, 0x64DFFF, 1.0);
+    let done = (taken as f32 / goal.max(1) as f32).clamp(0.0, 1.0);
+    const S: f32 = 76.0;
+    let glass = Rc::new(lx + 30.0, 42.0, S, S);
+    // The water shows up to how far along the day's goal is.
+    let top = glass.y + S * (0.9 - 0.62 * done);
+    a.gfx.push_clip(Rc::new(glass.x, top, S, glass.y + S - top));
+    if let Some(water) = a.prop("glass1", true) {
+        a.gfx.image(&water, glass, 0.0, 1.0);
     }
-
-    let drink = Rc::new(lx + 43.6, 97.6, 59.2, 26.4);
-    let h = btn(a, drink, 0.07);
-    a.gfx.fill_rrect(drink, 13.2, mix(0x0D457F, 0x1663B0, h), 1.0);
-    icon::droplet(&a.gfx, drink.x + 14.4, drink.cy() + 2.1, 8.1, CYAN, 1.0);
-    a.gfx.ui("Drink", Rc::new(drink.x + 26.4, drink.y, 40.0, drink.h), 10.0, 400, WHITE, 1.0, Align::L);
+    a.gfx.pop_clip();
+    if let Some(cup) = a.prop("glass0", false) {
+        a.gfx.image(&cup, glass, 0.0, 1.0);
+    }
+    let big = format!("{:.1}", taken as f32 / 1000.0);
+    a.gfx.ui(&big, Rc::new(lx + 122.0, 44.0, 90.0, 50.0), 40.0, 700, WHITE, 1.0, Align::L);
+    let bw = a.gfx.measure(&big, 40.0, 700);
+    a.gfx.ui(&format!("/ {:.1} L", goal as f32 / 1000.0), Rc::new(lx + 128.0 + bw, 58.0, 80.0, 26.0), 16.0, 500, 0xA0A0A5, 1.0, Align::L);
+    let sub = if on { format!("Lần tới {}", hm_pad(next)) } else { "Nhắc đang tắt".to_string() };
+    a.gfx.ui(&sub, Rc::new(lx + 122.0, 96.0, 170.0, 20.0), 13.0, 400, 0x8E8E93, 1.0, Align::L);
+    let drink = Rc::new(lx + 296.0, 54.0, 94.0, 46.0);
+    let h = btn(a, drink, 0.05);
+    a.gfx.fill_rrect(drink, 23.0, mix(WHITE, 0xC8C8C8, h), 1.0);
+    a.gfx.line(drink.cx() - 9.0, drink.cy(), drink.cx() + 9.0, drink.cy(), 3.0, 0x000000, 1.0);
+    a.gfx.line(drink.cx(), drink.cy() - 9.0, drink.cx(), drink.cy() + 9.0, 3.0, 0x000000, 1.0);
     a.gfx.unzoom();
     hit(a, drink, Act::Drank);
-
-    a.gfx.fill_rrect(Rc::new(lx + 205.2, 36.0, 1.6, 84.0), 0.8, 0x131313, 1.0);
-    for (i, dx) in [359.6f32, 366.8].iter().enumerate() {
-        let active = a.water_sub as usize == i;
-        let r = Rc::new(lx + dx - 4.0, 35.0, 8.0, 12.0);
-        let h = btn(a, r, 0.4);
-        a.gfx.fill_circle(lx + dx, 40.8, 2.0, 2.0, if active { 0xE5E5E5 } else { mix(0x555555, 0x9A9A9A, h) }, 1.0);
-        a.gfx.unzoom();
-        hit(a, r, Act::WaterSub(i as u8));
-    }
-    if a.water_sub == 0 {
-        gauge(a, lx + 293.2, 78.4, pct);
-    } else {
-        chart(a, lx);
-    }
 }
 
 fn hm_pad(min: u32) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
-}
-
-fn gauge(a: &mut App, cx: f32, cy: f32, pct: u32) {
-    use std::f32::consts::PI;
-    let r = 32.8;
-    let (from, to) = (PI * 0.75, PI * 2.25);
-    // Drinking produces a restrained pulse in the gauge, rather than a
-    // static number jump. It is drawn before the dial so text stays crisp.
-    let splash = a.water_pulse.x.max(0.0).min(0.22) / 0.22;
-    if splash > 0.0 {
-        for (radius, alpha) in [(r + 5.0, 0.30), (r + 12.0, 0.16)] {
-            a.gfx.stroke_circle(cx, cy, radius + (1.0 - splash) * 7.0, 1.4, CYAN, alpha * splash);
-        }
-    }
-    a.gfx.arc_between(cx, cy, r, from, to, 6.4, 0x0F2640, 1.0);
-    let f = (pct as f32 / 100.0).clamp(0.0, 1.0);
-    if f > 0.0 {
-        a.gfx.arc_between(cx, cy, r, from, from + (to - from) * f, 6.4, 0x2AA8FF, 1.0);
-    }
-    let end = from + (to - from) * f;
-    let ex = cx + r * end.cos();
-    let ey = cy + r * end.sin();
-    if splash > 0.0 {
-        a.gfx.glow(ex, ey, 14.0, CYAN, 0.32 * splash);
-    }
-    a.gfx.fill_circle(ex, ey, 3.6 + splash * 1.3, 3.6 + splash * 1.3, BLUE, 1.0);
-    a.gfx.ui(&pct.to_string(), Rc::new(cx - 30.0, cy - 19.4, 60.0, 30.0), 27.0, 700, WHITE, 1.0, Align::C);
-    icon::droplet(&a.gfx, cx - 6.0, cy + 17.6, 5.3, CYAN, 1.0);
-    a.gfx.ui("%", Rc::new(cx + 0.7, cy + 9.9, 14.0, 14.0), 11.5, 400, 0xD9D9D9, 1.0, Align::L);
-}
-
-fn chart(a: &mut App, lx: f32) {
-    let x0 = lx + 219.6;
-    let x1 = lx + 336.4;
-    for (y, label) in [(56.4f32, "500"), (81.2, "250"), (106.0, "0 ml")] {
-        a.gfx.line(x0, y, x1, y, 0.8, if label == "0 ml" { 0x1B4259 } else { 0x373737 }, 1.0);
-        a.gfx.ui(label, Rc::new(lx + 344.4, y - 6.0, 40.0, 12.0), 9.5, 400, 0x808080, 1.0, Align::L);
-    }
-    // One bar per hour of the user's day, from when it usually starts to bedtime.
-    let (day, bed) = a.brain.water_day();
-    let start = (chrono::Timelike::hour(&day) * 60).min(20 * 60);
-    let mut end = chrono::Timelike::hour(&bed) * 60;
-    if end <= start {
-        end = (end + 24 * 60).min(24 * 60);
-    }
-    let cups = a.brain.cups_by_hour(chrono::Local::now());
-    let cup = a.brain.cfg.cup_ml as f32;
-    let slots = ((end - start) / 60).max(1);
-    let bw = (x1 - x0) / slots as f32;
-    let max = 500.0;
-    for k in 0..slots {
-        let hour = ((start / 60 + k) % 24) as usize;
-        let per = cups[hour] as f32 * cup;
-        let x = x0 + k as f32 * bw + bw * 0.25;
-        a.gfx.fill_rrect(Rc::new(x, 58.0, bw * 0.5, 48.0), 0.8, 0x0F2640, 0.8);
-        if per > 0.0 {
-            let hgt = (per / max * 49.6).min(49.6);
-            a.gfx.fill_rrect(Rc::new(x, 106.0 - hgt, bw * 0.5, hgt), 0.8, 0x2AA8FF, 1.0);
-        }
-    }
-    let span = (end - start) as f32;
-    for hour in [9u32, 12, 15] {
-        let m = hour * 60;
-        if m >= start && m <= end {
-            let x = x0 + (m - start) as f32 / span * (x1 - x0);
-            a.gfx.ui(&format!("{hour:02}"), Rc::new(x - 10.0, 110.0, 20.0, 12.0), 9.5, 400, 0x808080, 1.0, Align::C);
-        }
-    }
-}
-
-fn water_settings(a: &mut App, lx: f32) {
-    let back = Rc::new(lx + 19.0, 8.0, 22.0, 22.0);
-    let h = btn(a, back, 0.18);
-    a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
-    icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
-    a.gfx.unzoom();
-    hit(a, back, Act::WaterSettings(false));
-    a.gfx.ui("Settings", Rc::new(lx + 46.0, 8.2, 100.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-
-    let (cups, every) = (a.brain.cfg.water_goal, a.brain.cfg.reminders.water.minutes);
-    // Four wheels share one band across the middle, as on a phone.
-    const CY: f32 = 88.0;
-    a.gfx.fill_rrect(Rc::new(lx + 20.0, CY - 11.0, 278.0, 22.0), 7.0, 0xFFFFFF, 0.09);
-    for (label, x, w) in [("Cup", 24.0, 76.0), ("Goal", 104.0, 76.0), ("Bedtime", 188.0, 104.0)] {
-        a.gfx.ui(label, Rc::new(lx + x, 38.0, w, 13.0), 10.0, 400, 0x808080, 1.0, Align::C);
-    }
-    let cup_text: Vec<String> = model::CUPS.iter().map(|c| format!("{c} ml")).collect();
-    let goal_text: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
-    let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
-    let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
-    wheel(a, WheelId::Cup, Rc::new(lx + 24.0, CY - 30.0, 76.0, 60.0), &cup_text);
-    wheel(a, WheelId::Goal, Rc::new(lx + 104.0, CY - 30.0, 76.0, 60.0), &goal_text);
-    wheel(a, WheelId::BedHour, Rc::new(lx + 192.0, CY - 30.0, 46.0, 60.0), &hours);
-    a.gfx.ui(":", Rc::new(lx + 234.0, CY - 10.0, 12.0, 20.0), 14.0, 600, WHITE, 1.0, Align::C);
-    wheel(a, WheelId::BedMinute, Rc::new(lx + 242.0, CY - 30.0, 46.0, 60.0), &quarters);
-
-    let card = Rc::new(lx + 306.0, 36.0, 92.0, 62.4);
-    a.gfx.fill_rrect(card, 12.0, 0x0F1926, 1.0);
-    a.gfx.ui(&cups.to_string(), Rc::new(card.x, 38.4, card.w, 26.0), 22.0, 700, CYAN, 1.0, Align::C);
-    a.gfx.ui("cups", Rc::new(card.x, 59.6, card.w, 13.0), 10.0, 400, 0x93979D, 1.0, Align::C);
-    a.gfx.fill_rrect(Rc::new(lx + 331.6, 75.2, 40.8, 1.6), 0.8, 0x212A36, 1.0);
-    let rs = format!("~{every}");
-    let rw = a.gfx.measure(&rs, 15.0, 700) + 3.0 + a.gfx.measure("min", 10.0, 400);
-    let rx = card.cx() - rw / 2.0 + 0.8;
-    a.gfx.ui(&rs, Rc::new(rx, 80.8, 40.0, 16.0), 15.0, 700, CYAN, 1.0, Align::L);
-    let nw = a.gfx.measure(&rs, 15.0, 700);
-    a.gfx.ui("min", Rc::new(rx + nw + 3.0, 83.8, 40.0, 13.0), 10.0, 400, 0x93979D, 1.0, Align::L);
-    let reset = Rc::new(lx + 306.0, 104.0, 92.0, 18.4);
-    let h = btn(a, reset, 0.05);
-    a.gfx.fill_rrect(reset, 9.2, mix(0x19191C, 0x3A2020, h), 1.0);
-    icon::trash(&a.gfx, lx + 318.0, reset.cy(), 0xC5C5C6, 1.0);
-    a.gfx.ui("Reset", Rc::new(lx + 328.4, reset.y, 50.0, reset.h), 9.5, 400, 0xC5C5C6, 1.0, Align::L);
-    a.gfx.unzoom();
-    hit(a, reset, Act::WaterReset);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2283,24 +2132,28 @@ pub enum WheelId {
     BedMinute,
     FormHour,
     FormMinute,
-    FocusWork,
-    FocusRest,
-    FocusRounds,
-    LyricSize,
 }
 
 /// The settings panels.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
-    General,
-    Focus,
+    /// The four categories.
+    Menu,
+    Notices,
     Care,
     Music,
+    System,
+    /// Choosing the cup and the daily goal.
+    Water,
+    /// Choosing bedtime.
+    Bed,
 }
 
 /// A setting flipped or stepped from a panel.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SetKey {
+    Water,
+    LyricSize,
     Banners,
     Text,
     Eyes,
@@ -2315,106 +2168,142 @@ pub enum SetKey {
     Lyrics,
 }
 
-/// A label and a switch.
-fn switch_row(a: &mut App, x: f32, y: f32, w: f32, label: &str, on: bool, key: SetKey) {
-    a.gfx.ui(label, Rc::new(x, y, w - 36.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
-    toggle(a, Rc::new(x + w - 30.0, y + 3.0, 28.0, 16.0), on, Act::Set(key));
+
+
+/// What a settings row does.
+enum Row {
+    Switch(bool, SetKey),
+    Choice(String, Act),
 }
 
-/// A label and a value that steps on when pressed.
-fn choice_row(a: &mut App, x: f32, y: f32, w: f32, label: &str, value: &str, key: SetKey) {
-    a.gfx.ui(label, Rc::new(x, y, w - 76.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
-    let r = Rc::new(x + w - 72.0, y + 1.0, 70.0, 20.0);
-    let h = btn(a, r, 0.06);
-    a.gfx.fill_rrect(r, 10.0, mix(0x2A2A2C, 0x48484C, h), 1.0);
-    a.gfx.ui(value, r, 10.5, 600, WHITE, 1.0, Align::C);
-    a.gfx.unzoom();
-    hit(a, r, Act::Set(key));
-}
-
-fn panel(a: &mut App, lx: f32, p: Panel) {
-    let back = Rc::new(lx + 19.0, 8.0, 22.0, 22.0);
-    let h = btn(a, back, 0.18);
-    a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
-    icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
-    a.gfx.unzoom();
-    hit(a, back, Act::PanelBack);
-    let title = match p {
-        Panel::General => "Cài đặt",
-        Panel::Focus => "Tập trung",
-        Panel::Care => "Chăm sóc",
-        Panel::Music => "Nhạc",
-    };
-    a.gfx.ui(title, Rc::new(lx + 46.0, 8.2, 120.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    if p != Panel::General {
-        let r = Rc::new(lx + 340.0, 6.0, 58.0, 24.0);
-        let h = btn(a, r, 0.06);
-        a.gfx.fill_rrect(r, 12.0, mix(0x242426, 0x3A3A3C, h), 1.0);
-        a.gfx.ui("Chung", r, 12.0, 500, WHITE, 1.0, Align::C);
-        a.gfx.unzoom();
-        hit(a, r, Act::Panel(Some(Panel::General)));
-    }
-    const LEFT: f32 = 30.0;
-    const RIGHT: f32 = 222.0;
-    const W: f32 = 170.0;
-    const ROWS: [f32; 3] = [46.0, 76.0, 106.0];
+fn rows_of(a: &App, p: Panel) -> Vec<(&'static str, Row)> {
+    use Row::{Choice, Switch};
+    let s = &a.settings;
+    let cfg = &a.brain.cfg;
+    let r = &cfg.reminders;
     match p {
-        Panel::General => {
-            let s = &a.settings;
-            let (banners, text, eyes, jam, minimal) = (s.hide_banners, s.show_text, s.pet, s.jam_mode, s.minimal);
-            let autostart = crate::sys::autostart_enabled();
-            switch_row(a, lx + LEFT, ROWS[0], W, "Ẩn banner Windows", banners, SetKey::Banners);
-            switch_row(a, lx + LEFT, ROWS[1], W, "Hiện nội dung ngay", text, SetKey::Text);
-            switch_row(a, lx + LEFT, ROWS[2], W, "Khởi động cùng máy", autostart, SetKey::Autostart);
-            switch_row(a, lx + RIGHT, ROWS[0], W, "Đôi mắt", eyes, SetKey::Eyes);
-            choice_row(a, lx + RIGHT, ROWS[1], W, "Mắt nhún", ["Tắt", "1–2 phút", "3–5 phút"][jam as usize], SetKey::Jam);
-            switch_row(a, lx + RIGHT, ROWS[2], W, "Notch tối giản", minimal, SetKey::Minimal);
-        }
-        Panel::Focus => {
-            const CY: f32 = 92.0;
-            a.gfx.fill_rrect(Rc::new(lx + 56.0, CY - 11.0, 306.0, 22.0), 7.0, 0xFFFFFF, 0.09);
-            for (label, x) in [("Làm", 62.0), ("Nghỉ", 164.0), ("Số vòng", 266.0)] {
-                a.gfx.ui(label, Rc::new(lx + x, 44.0, 90.0, 13.0), 10.0, 400, 0x808080, 1.0, Align::C);
-            }
-            let work: Vec<String> = (1..=18).map(|m| format!("{} phút", m * 5)).collect();
-            let rest: Vec<String> = (1..=30).map(|m| format!("{m} phút")).collect();
-            let rounds: Vec<String> = (1..=8).map(|n| n.to_string()).collect();
-            wheel(a, WheelId::FocusWork, Rc::new(lx + 62.0, CY - 30.0, 90.0, 60.0), &work);
-            wheel(a, WheelId::FocusRest, Rc::new(lx + 164.0, CY - 30.0, 90.0, 60.0), &rest);
-            wheel(a, WheelId::FocusRounds, Rc::new(lx + 266.0, CY - 30.0, 90.0, 60.0), &rounds);
-        }
+        Panel::Notices => vec![("Ẩn banner Windows", Switch(s.hide_banners, SetKey::Banners)), ("Hiện nội dung ngay", Switch(s.show_text, SetKey::Text))],
         Panel::Care => {
-            let cfg = &a.brain.cfg;
-            let r = &cfg.reminders;
-            let (stretch, eyes, breathe, sleep) = (r.stretch.enabled, r.eyes.enabled, r.breathe.enabled, r.sleep.enabled);
             let level = match cfg.care {
                 crate::luma::config::Care::Light => "Nhẹ",
                 crate::luma::config::Care::Normal => "Vừa",
                 crate::luma::config::Care::Strict => "Mạnh",
             };
-            switch_row(a, lx + LEFT, ROWS[0], W, "Giãn cơ", stretch, SetKey::Stretch);
-            switch_row(a, lx + LEFT, ROWS[1], W, "Nghỉ mắt", eyes, SetKey::RestEyes);
-            switch_row(a, lx + LEFT, ROWS[2], W, "Hít thở", breathe, SetKey::Breathe);
-            switch_row(a, lx + RIGHT, ROWS[1], W, "Đi ngủ", sleep, SetKey::Sleep);
-            choice_row(a, lx + RIGHT, ROWS[2], W, "Mức nhắc", level, SetKey::Care);
+            vec![
+                ("Uống nước", Switch(r.water.enabled, SetKey::Water)),
+                ("Giãn cơ", Switch(r.stretch.enabled, SetKey::Stretch)),
+                ("Nghỉ mắt", Switch(r.eyes.enabled, SetKey::RestEyes)),
+                ("Hít thở", Switch(r.breathe.enabled, SetKey::Breathe)),
+                ("Đi ngủ", Switch(r.sleep.enabled, SetKey::Sleep)),
+                ("Mức nhắc", Choice(level.to_string(), Act::Set(SetKey::Care))),
+                ("Mục tiêu nước", Choice(format!("{:.1} L", (cfg.water_goal * cfg.cup_ml) as f32 / 1000.0), Act::Panel(Some(Panel::Water)))),
+                ("Giờ ngủ", Choice(r.sleep.time.clone(), Act::Panel(Some(Panel::Bed)))),
+            ]
         }
-        Panel::Music => {
-            let on = a.lyrics_on;
-            switch_row(a, lx + LEFT, ROWS[0], W, "Hiện lời bài hát", on, SetKey::Lyrics);
-            const CY: f32 = 92.0;
-            a.gfx.ui("Cỡ chữ lời", Rc::new(lx + LEFT, CY - 11.0, 120.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
-            a.gfx.fill_rrect(Rc::new(lx + 170.0, CY - 11.0, 70.0, 22.0), 7.0, 0xFFFFFF, 0.09);
-            let sizes: Vec<String> = (15..=26).map(|s| s.to_string()).collect();
-            wheel(a, WheelId::LyricSize, Rc::new(lx + 170.0, CY - 30.0, 70.0, 60.0), &sizes);
+        Panel::Music => vec![
+            ("Hiện lời bài hát", Switch(a.lyrics_on, SetKey::Lyrics)),
+            ("Mắt nhún", Choice(["Tắt", "1–2 phút", "3–5 phút"][s.jam_mode as usize].to_string(), Act::Set(SetKey::Jam))),
+            ("Cỡ chữ lời", Choice(format!("{}", s.lyric_size as u32), Act::Set(SetKey::LyricSize))),
+        ],
+        Panel::System => vec![
+            ("Đôi mắt", Switch(s.pet, SetKey::Eyes)),
+            ("Notch tối giản", Switch(s.minimal, SetKey::Minimal)),
+            ("Khởi động cùng máy", Switch(crate::sys::autostart_enabled(), SetKey::Autostart)),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// How many rows the list on show has.
+pub fn panel_rows(a: &App) -> usize {
+    a.panel.map_or(0, |p| rows_of(a, p).len())
+}
+
+fn back_title(a: &mut App, lx: f32, title: &str, act: Act) {
+    let back = Rc::new(lx + 16.0, 6.0, 26.0, 26.0);
+    let h = btn(a, back, 0.18);
+    a.gfx.fill_circle(back.cx(), back.cy(), 13.0, 13.0, 0xFFFFFF, 0.1 + 0.12 * h);
+    icon::chevron(&a.gfx, back.cx(), back.cy(), true, WHITE, 1.0);
+    a.gfx.unzoom();
+    hit(a, back, act);
+    a.gfx.ui(title, Rc::new(lx + 50.0, 8.0, 130.0, 22.0), 16.0, 700, WHITE, 1.0, Align::L);
+}
+
+fn panel(a: &mut App, lx: f32, p: Panel) {
+    let (title, back) = match p {
+        Panel::Menu => ("Settings", None),
+        Panel::Notices => ("Thông báo", Some(Panel::Menu)),
+        Panel::Care => ("Nhắc", Some(Panel::Menu)),
+        Panel::Music => ("Nhạc", Some(Panel::Menu)),
+        Panel::System => ("Hệ thống", Some(Panel::Menu)),
+        Panel::Water => ("Mục tiêu", Some(Panel::Care)),
+        Panel::Bed => ("Giờ ngủ", Some(Panel::Care)),
+    };
+    back_title(a, lx, title, Act::Panel(back));
+    match p {
+        Panel::Menu => {
+            // Four large tiles, one for each kind of setting.
+            let tiles = [("Thông báo", "cat_notice", Panel::Notices), ("Nhắc", "cat_care", Panel::Care), ("Nhạc", "cat_music", Panel::Music), ("Hệ thống", "cat_gear", Panel::System)];
+            let (w, gap) = (90.0, 8.0);
+            let x0 = lx + 210.0 - (4.0 * w + 3.0 * gap) / 2.0;
+            for (i, (label, image, to)) in tiles.into_iter().enumerate() {
+                let r = Rc::new(x0 + i as f32 * (w + gap), 38.0, w, 92.0);
+                let h = btn(a, r, 0.03);
+                a.gfx.fill_rrect(r, 16.0, mix(0x1A1A1C, 0x2C2C2E, h), 1.0);
+                if let Some(bmp) = a.prop(image, false) {
+                    a.gfx.image(&bmp, Rc::new(r.cx() - 17.0, r.y + 14.0, 34.0, 34.0), 0.0, 1.0);
+                }
+                a.gfx.ui(label, Rc::new(r.x, r.y + 56.0, r.w, 22.0), 14.0, 500, WHITE, 1.0, Align::C);
+                a.gfx.unzoom();
+                hit(a, r, Act::Panel(Some(to)));
+            }
+        }
+        Panel::Water => {
+            let cups: Vec<String> = model::CUPS.iter().map(|c| format!("{c} ml")).collect();
+            let goals: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
+            wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 34.0, 140.0, 92.0), &cups, 24.0);
+            wheel_sized(a, WheelId::Goal, Rc::new(lx + 220.0, 34.0, 140.0, 92.0), &goals, 24.0);
+        }
+        Panel::Bed => {
+            let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+            let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
+            wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 34.0, 76.0, 92.0), &hours, 34.0);
+            a.gfx.ui(":", Rc::new(lx + 198.0, 56.0, 24.0, 44.0), 30.0, 600, WHITE, 1.0, Align::C);
+            wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 34.0, 76.0, 92.0), &quarters, 34.0);
+        }
+        _ => {
+            let rows = rows_of(a, p);
+            let total = rows.len();
+            let top = a.panel_top.min(total.saturating_sub(2));
+            for (n, (label, row)) in rows.into_iter().enumerate().skip(top).take(2) {
+                let cy = 58.0 + (n - top) as f32 * 42.0;
+                a.gfx.ui(label, Rc::new(lx + 30.0, cy - 14.0, 240.0, 28.0), 16.0, 500, WHITE, 1.0, Align::L);
+                match row {
+                    Row::Switch(on, key) => toggle(a, Rc::new(lx + 344.0, cy - 13.0, 46.0, 26.0), on, Act::Set(key)),
+                    Row::Choice(value, act) => {
+                        let r = Rc::new(lx + 290.0, cy - 16.0, 100.0, 32.0);
+                        let h = btn(a, r, 0.06);
+                        a.gfx.fill_rrect(r, 16.0, mix(0x2A2A2C, 0x48484C, h), 1.0);
+                        a.gfx.ui(&value, r, 14.0, 600, WHITE, 1.0, Align::C);
+                        a.gfx.unzoom();
+                        hit(a, r, act);
+                    }
+                }
+            }
+            // A list longer than the screen says so.
+            if total > 2 {
+                let screens = total.div_ceil(2);
+                let at = top.div_ceil(2);
+                for i in 0..screens {
+                    let x = lx + 210.0 + (i as f32 - (screens - 1) as f32 / 2.0) * 10.0;
+                    a.gfx.fill_circle(x, 133.0, 2.0, 2.0, if i == at { WHITE } else { 0x5C5C5C }, 1.0);
+                }
+            }
         }
     }
 }
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.
-fn wheel(a: &mut App, id: WheelId, r: Rc, labels: &[String]) {
-    wheel_sized(a, id, r, labels, 14.0);
-}
-
 fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
     let row = a.wheels[id as usize].row;
     let pos = a.wheels[id as usize].pos;
@@ -2426,11 +2315,11 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
             continue;
         }
         // Rows bend back around a drum: closer together away from the middle.
-        let y = r.cy() + row * 1.15 * (d * 0.85).sin() / 0.85 * 0.9;
+        let y = r.cy() + row * 1.2 * (d * 0.85).sin() / 0.85;
         let near = (1.0 - d.abs()).clamp(0.0, 1.0);
-        let size = big * (0.82 + 0.18 * near);
-        let tone = mix(0x8A8A8A, WHITE, near);
-        let alpha = (1.05 - 0.42 * d.abs()).clamp(0.0, 1.0);
+        let size = big * (0.52 + 0.48 * near);
+        let tone = mix(0x6A6A6A, WHITE, near);
+        let alpha = (1.05 - 0.5 * d.abs()).clamp(0.0, 1.0);
         a.gfx.ui(&labels[i as usize], Rc::new(r.x, y - big, r.w, big * 2.0), size, if near > 0.5 { 600 } else { 400 }, tone, alpha, Align::C);
     }
     a.gfx.pop_clip();
@@ -2440,7 +2329,7 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
 // ---------------------------------------------------------------- shelf
 
 fn shelf(a: &mut App, lx: f32) {
-    title(a, lx, "Shelf", None);
+    title(a, lx, "Shelf");
     let area = Rc::new(lx + 43.6, 32.0, 336.8, 91.2);
     let drag = a.drag_over;
     let items = a.shelf.items.clone();
@@ -2674,23 +2563,17 @@ fn drop_wave(a: &mut App) {
 
 // ---------------------------------------------------------------- to-do
 
-/// A reminder's days in words.
-pub fn days_label(days: &[u8]) -> String {
-    const NAMES: [&str; 7] = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"];
-    match days {
-        [] => "Một lần".to_string(),
-        [0, 1, 2, 3, 4, 5, 6] => "Mỗi ngày".to_string(),
-        [0, 1, 2, 3, 4] => "T2–T6".to_string(),
-        [5, 6] => "Cuối tuần".to_string(),
-        days => days.iter().map(|d| NAMES[*d as usize % 7]).collect::<Vec<_>>().join(" "),
-    }
-}
-
+/// A switch: the knob glides, the track and knob swap between white and black.
 fn toggle(a: &mut App, r: Rc, on: bool, act: Act) {
-    let h = btn(a, r, 0.05);
-    a.gfx.fill_rrect(r, r.h / 2.0, mix(if on { crate::CHARACTER } else { 0x3A3A3C }, 0xFFFFFF, 0.12 * h), 1.0);
-    let knob = if on { r.x + r.w - r.h / 2.0 } else { r.x + r.h / 2.0 };
-    a.gfx.fill_circle(knob, r.cy(), r.h / 2.0 - 2.0, r.h / 2.0 - 2.0, WHITE, 1.0);
+    let key = ((r.x * 2.0) as i32, (r.y * 2.0) as i32);
+    let entry = a.switches.entry(key).or_insert((crate::Spring::new(if on { 1.0 } else { 0.0 }, 300.0, 30.0), on));
+    entry.1 = on;
+    let k = entry.0.x.clamp(0.0, 1.0);
+    let h = btn(a, r, 0.04);
+    a.gfx.fill_rrect(r, r.h / 2.0, mix(mix(0x3A3A3C, 0x48484C, h), WHITE, k), 1.0);
+    let knob = r.x + r.h / 2.0 + (r.w - r.h) * k;
+    let radius = r.h / 2.0 - 3.0;
+    a.gfx.fill_circle(knob, r.cy(), radius, radius, mix(WHITE, 0x000000, k), 1.0);
     a.gfx.unzoom();
     hit(a, r, act);
 }
@@ -2700,8 +2583,8 @@ fn todo(a: &mut App, lx: f32) {
         form(a, lx);
         return;
     }
-    title(a, lx, "Reminders", None);
-    let tw = a.gfx.measure("Reminders", 15.0, 600);
+    title(a, lx, "Reminders");
+    let tw = a.gfx.measure("Reminders", 16.0, 700);
     let add = Rc::new(lx + 24.0 + tw, 6.0, 24.0, 24.0);
     let h = btn(a, add, 0.15);
     icon::plus_circle(&a.gfx, add.cx(), add.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
@@ -2711,57 +2594,60 @@ fn todo(a: &mut App, lx: f32) {
     let top = a.reminder_top;
     if a.old_notes {
         let notes: Vec<String> = a.todo.tasks.iter().map(|t| t.title.clone()).collect();
-        for (n, note) in notes.iter().enumerate().skip(top).take(3) {
-            let y = 38.0 + (n - top) as f32 * 29.0;
-            a.gfx.ui(note, Rc::new(lx + 28.0, y, 320.0, 26.0), 13.0, 400, 0xC8C8C8, 1.0, Align::L);
-            let x = Rc::new(lx + 366.0, y + 3.0, 20.0, 20.0);
-            icon::x_circle(&a.gfx, x.cx(), x.cy(), 6.4, 0x8A8A8A, 0x000000, 1.0);
+        for (n, note) in notes.iter().enumerate().skip(top).take(2) {
+            let cy = 58.0 + (n - top) as f32 * 42.0;
+            a.gfx.ui(note, Rc::new(lx + 30.0, cy - 14.0, 310.0, 28.0), 16.0, 400, 0xD8D8D8, 1.0, Align::L);
+            let x = Rc::new(lx + 362.0, cy - 13.0, 26.0, 26.0);
+            icon::x_circle(&a.gfx, x.cx(), x.cy(), 8.0, 0x8A8A8A, 0x000000, 1.0);
             hit(a, x, Act::OldDelete(n));
         }
-        let back = Rc::new(lx + 170.0, 122.0, 80.0, 14.0);
-        a.gfx.ui("Quay lại", back, 10.0, 400, 0x8A8A8A, 1.0, Align::C);
+        let back = Rc::new(lx + 170.0, 118.0, 80.0, 16.0);
+        a.gfx.ui("Quay lại", back, 12.0, 400, 0x8A8A8A, 1.0, Align::C);
         hit(a, back, Act::OldNotes(false));
         return;
     }
     let rows = a.reminders();
     if rows.is_empty() && old == 0 {
-        a.gfx.ui("Chưa có nhắc nào", Rc::new(lx, 66.0, 420.0, 20.0), 13.0, 400, 0x6D6D6D, 1.0, Align::C);
+        a.gfx.ui("Chưa có nhắc nào", Rc::new(lx, 62.0, 420.0, 24.0), 15.0, 400, 0x6D6D6D, 1.0, Align::C);
         return;
     }
     // Old notes come after the last reminder.
-    if old > 0 && rows.len() >= top && rows.len() - top < 3 {
-        let row = Rc::new(lx + 38.0, 36.0 + (rows.len() - top) as f32 * 29.0, 310.0, 27.0);
-        a.gfx.ui(&format!("Ghi chú cũ ({old})"), Rc::new(row.x + 8.0, row.y, 200.0, row.h), 12.0, 400, 0x8A8A8A, 1.0, Align::L);
+    if old > 0 && rows.len() >= top && rows.len() - top < 2 {
+        let cy = 58.0 + (rows.len() - top) as f32 * 42.0;
+        let row = Rc::new(lx + 24.0, cy - 18.0, 366.0, 36.0);
+        a.gfx.ui(&format!("Ghi chú cũ ({old})"), Rc::new(row.x + 6.0, row.y, 260.0, row.h), 15.0, 400, 0x8A8A8A, 1.0, Align::L);
         hit(a, row, Act::OldNotes(true));
     }
-    for (n, r) in rows.iter().enumerate().skip(top).take(3) {
-        let y = 36.0 + (n - top) as f32 * 29.0;
-        let row = Rc::new(lx + 38.0, y, 310.0, 27.0);
+    for (n, r) in rows.iter().enumerate().skip(top).take(2) {
+        let cy = 58.0 + (n - top) as f32 * 42.0;
+        let row = Rc::new(lx + 24.0, cy - 18.0, 308.0, 36.0);
         let h = btn(a, row, 0.04);
-        a.gfx.fill_rrect(row, 9.0, 0xFFFFFF, 0.05 * h.min(1.0));
+        a.gfx.fill_rrect(row, 12.0, 0xFFFFFF, 0.05 * h.min(1.0));
         let tone = if r.enabled { WHITE } else { 0x6D6D6D };
-        a.gfx.ui(&r.title, Rc::new(row.x + 8.0, y, 170.0, 27.0), 13.0, 500, tone, 1.0, Align::L);
-        let when = format!("{} · {}", r.time, days_label(&r.days));
-        a.gfx.ui(&when, Rc::new(row.x + 130.0, y, 172.0, 27.0), 11.0, 400, 0x8E8E93, 1.0, Align::R);
+        a.gfx.ui(&r.title, Rc::new(row.x + 6.0, cy - 14.0, 220.0, 28.0), 16.0, 500, tone, 1.0, Align::L);
+        a.gfx.ui(&r.time, Rc::new(row.x + 232.0, cy - 14.0, 70.0, 28.0), 15.0, 500, if r.enabled { 0xC8C8C8 } else { 0x6D6D6D }, 1.0, Align::R);
         a.gfx.unzoom();
         hit(a, row, Act::ReminderEdit(n));
-        toggle(a, Rc::new(lx + 352.0, y + 5.5, 28.0, 16.0), r.enabled, Act::ReminderSwitch(n));
+        toggle(a, Rc::new(lx + 344.0, cy - 13.0, 46.0, 26.0), r.enabled, Act::ReminderSwitch(n));
     }
 }
 
 /// Row height of the big clock in the reminder form.
 pub const CLOCK_ROW: f32 = 34.0;
 
-fn pill(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, act: Act) {
-    let h = btn(a, r, 0.07);
-    a.gfx.fill_rrect(r, r.h / 2.0, mix(bg, 0x8A8A8A, 0.2 * h), 1.0);
-    a.gfx.ui(label, r, 14.0, 600, fg, 1.0, Align::C);
+/// A round button at the side of the reminder form.
+fn form_button(a: &mut App, cx: f32, cy: f32, left: bool, solid: bool, act: Act) {
+    let r = Rc::new(cx - 20.0, cy - 20.0, 40.0, 40.0);
+    let h = btn(a, r, 0.1);
+    let fill = if solid { mix(WHITE, 0xC8C8C8, h) } else { mix(0x2A2A2C, 0x48484C, h) };
+    a.gfx.fill_circle(cx, cy, 20.0, 20.0, fill, 1.0);
+    icon::chevron(&a.gfx, cx, cy, left, if solid { 0x000000 } else { WHITE }, 1.0);
     a.gfx.unzoom();
     hit(a, r, act);
 }
 
-/// The reminder form, one thing at a time: the name, then a big clock that shrinks up out of the
-/// way when the days come in. The steps glide into each other and back.
+/// The reminder form, one thing at a time, between a back and a next button: the name, then a
+/// big clock that shrinks up out of the way when the days come in.
 fn form(a: &mut App, lx: f32) {
     let (text, days, editing, step) = {
         let f = a.form.as_ref().unwrap();
@@ -2769,18 +2655,18 @@ fn form(a: &mut App, lx: f32) {
     };
     let x = a.form_anim.x.clamp(0.0, 2.0);
     let (to_time, to_days) = (x.min(1.0), (x - 1.0).max(0.0));
-    let back = Rc::new(lx + 18.0, 6.0, 24.0, 24.0);
-    let h = btn(a, back, 0.18);
-    a.gfx.fill_circle(back.cx(), back.cy(), 12.0, 12.0, mix(CHEVRON, 0x8A8A8A, h), 1.0);
-    icon::chevron(&a.gfx, back.cx(), back.cy(), true, 0x000000, 1.0);
-    a.gfx.unzoom();
-    hit(a, back, Act::FormBack);
+    const CY: f32 = 80.0;
     let base = a.gfx.alpha;
+    // Beside the title once the clock has moved up there.
+    a.gfx.alpha = base * (1.0 - to_days);
+    a.gfx.ui(if editing { "Sửa nhắc" } else { "Nhắc mới" }, Rc::new(lx + 24.0, 8.0, 130.0, 22.0), 16.0, 700, WHITE, 1.0, Align::L);
+    a.gfx.alpha = base;
+    form_button(a, lx + 44.0, CY, true, false, Act::FormBack);
     // The name.
     let name = 1.0 - to_time;
     if name > 0.01 {
         a.gfx.alpha = base * name;
-        let tf = Rc::new(lx + 30.0 - 60.0 * to_time, 44.0, 360.0, 40.0);
+        let tf = Rc::new(lx + 78.0 - 50.0 * to_time, CY - 21.0, 264.0, 42.0);
         a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
         let inner = Rc::new(tf.x + 16.0, tf.y, tf.w - 44.0, tf.h);
         if text.is_empty() {
@@ -2794,31 +2680,31 @@ fn form(a: &mut App, lx: f32) {
         }
         if step == 0 && (a.born.elapsed().as_millis() / 530) % 2 == 0 {
             let cw = a.gfx.measure(&text, 16.0, 500).min(inner.w);
-            a.gfx.line(inner.x + cw + 1.0, tf.y + 10.0, inner.x + cw + 1.0, tf.y + tf.h - 10.0, 1.4, WHITE, 1.0);
+            a.gfx.line(inner.x + cw + 1.0, tf.y + 11.0, inner.x + cw + 1.0, tf.y + tf.h - 11.0, 1.4, WHITE, 1.0);
         }
-        if editing {
-            pill(a, Rc::new(tf.x, 96.0, 90.0, 32.0), "Xóa", 0x2A1416, 0xFF6B6B, Act::FormDelete);
+        if editing && step == 0 {
+            let del = Rc::new(lx + 170.0, 112.0, 80.0, 18.0);
+            a.gfx.ui("Xóa nhắc", del, 12.0, 500, 0xFF6B6B, 1.0, Align::C);
+            hit(a, del, Act::FormDelete);
         }
     }
     // The clock: big to choose, then small and out of the way.
     let (hour, minute) = (a.wheels[WheelId::FormHour as usize].index(), a.wheels[WheelId::FormMinute as usize].index());
     if to_time > 0.01 {
         a.gfx.alpha = base * to_time;
-        let big = 34.0;
+        let big = 36.0;
         if to_days < 0.01 {
-            let cy = 80.0;
-            let cx = lx + 170.0 + 60.0 * (1.0 - to_time);
-            a.gfx.fill_rrect(Rc::new(cx - 90.0, cy - 25.0, 180.0, 50.0), 14.0, 0xFFFFFF, 0.09);
+            let cx = lx + 210.0 + 50.0 * (1.0 - to_time);
             let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
             let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 88.0, 34.0, 76.0, 92.0), &hours, big);
-            a.gfx.ui(":", Rc::new(cx - 12.0, cy - 24.0, 24.0, 44.0), big, 600, WHITE, 1.0, Align::C);
-            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 12.0, 34.0, 76.0, 92.0), &minutes, big);
+            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 34.0, 76.0, 92.0), &hours, big);
+            a.gfx.ui(":", Rc::new(cx - 12.0, CY - 24.0, 24.0, 44.0), big, 600, WHITE, 1.0, Align::C);
+            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 34.0, 76.0, 92.0), &minutes, big);
         } else {
-            // The same numbers flying up beside the title.
+            // The same numbers flying up to the corner.
             let k = to_days;
-            let (cx, cy) = (lx + 170.0 + (lx + 110.0 - (lx + 170.0)) * k, 80.0 + (19.0 - 80.0) * k);
-            let size = big + (17.0 - big) * k;
+            let (cx, cy) = (lx + 210.0 + (-140.0) * k, CY + (19.0 - CY) * k);
+            let size = big + (16.0 - big) * k;
             a.gfx.ui(&format!("{hour:02} : {minute:02}"), Rc::new(cx - 100.0, cy - size, 200.0, size * 2.0), size, 700, WHITE, 1.0, Align::C);
         }
     }
@@ -2826,36 +2712,21 @@ fn form(a: &mut App, lx: f32) {
     if to_days > 0.01 {
         a.gfx.alpha = base * to_days;
         let grow = 0.82 + 0.18 * to_days;
-        let (w, h, gap) = (46.0 * grow, 40.0 * grow, 8.0 * grow);
+        let (w, h, gap) = (34.0 * grow, 40.0 * grow, 4.0 * grow);
         let x0 = lx + 210.0 - (7.0 * w + 6.0 * gap) / 2.0;
         for (i, name) in ["T2", "T3", "T4", "T5", "T6", "T7", "CN"].into_iter().enumerate() {
-            let r = Rc::new(x0 + i as f32 * (w + gap), 40.0, w, h);
+            let r = Rc::new(x0 + i as f32 * (w + gap), CY - h / 2.0, w, h);
             let on = days[i];
             let hov = btn(a, r, 0.06);
             a.gfx.fill_rrect(r, 12.0, mix(if on { WHITE } else { 0x1E1E20 }, 0x8A8A8A, 0.25 * hov), 1.0);
-            a.gfx.ui(name, r, 15.0, 600, if on { 0x000000 } else { 0xB0B0B0 }, 1.0, Align::C);
+            a.gfx.ui(name, r, 14.0, 600, if on { 0x000000 } else { 0xB0B0B0 }, 1.0, Align::C);
             a.gfx.unzoom();
             if step == 2 {
                 hit(a, r, Act::FormDay(i as u8));
             }
         }
-        let on: Vec<u8> = (0..7).filter(|d| days[*d as usize]).collect();
-        a.gfx.ui(&days_label(&on), Rc::new(lx + 30.0, 96.0, 200.0, 32.0), 14.0, 400, 0xB0B0B0, 1.0, Align::L);
     }
     a.gfx.alpha = base;
-    let label = if step == 2 { "Lưu" } else { "Tiếp" };
-    pill(a, Rc::new(lx + 300.0, 96.0, 90.0, 32.0), label, WHITE, 0x000000, Act::FormNext);
+    form_button(a, lx + 376.0, CY, false, true, Act::FormNext);
 }
 
-#[cfg(test)]
-mod reminder_tests {
-    use super::days_label;
-
-    #[test]
-    fn days_read_naturally() {
-        assert_eq!(days_label(&[]), "Một lần");
-        assert_eq!(days_label(&[0, 1, 2, 3, 4, 5, 6]), "Mỗi ngày");
-        assert_eq!(days_label(&[0, 1, 2, 3, 4]), "T2–T6");
-        assert_eq!(days_label(&[0, 6]), "T2 CN");
-    }
-}
