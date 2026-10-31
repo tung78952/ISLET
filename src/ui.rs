@@ -1173,7 +1173,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         (b1, b2)
     };
     match kind {
-        ToastKind::Song => {
+        ToastKind::Song | ToastKind::Sample(11) => {
             // What has just started: cover, title and artist, the music moving on the right.
             let cy = h / 2.0;
             let cover = Rc::new(left + 18.0, cy - 19.0, 38.0, 38.0);
@@ -1207,7 +1207,8 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
                 6 => crate::anim::study(&a.gfx, ix, cy, 22.0, clock),
                 7 => crate::anim::stretch(&a.gfx, ix, cy, 22.0, clock),
                 8 => crate::anim::look(&a.gfx, ix, cy, 22.0, clock),
-                _ => crate::anim::breathe(&a.gfx, ix, cy, 22.0, clock),
+                9 => crate::anim::breathe(&a.gfx, ix, cy, 22.0, clock),
+                _ => mini_eyes(a, ix, cy),
             }
             let tx = x0 + ICON + GAP;
             a.gfx.ui(title, Rc::new(tx, cy - 17.6, text_w + 8.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);

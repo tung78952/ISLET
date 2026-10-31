@@ -498,7 +498,7 @@ pub struct App {
     later_row: u32,
     last_drink: Instant,
     last_song: String,
-    /// Preview run (ISLET_DEMO "sample=eyes|lyric|battery|0|1"): start and what it shows.
+    /// Preview run (ISLET_DEMO "sample=tour|eyes|lyric|battery|0..11"): start and what it shows.
     sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
     pub device_kind: devices::DeviceKind,
@@ -1031,10 +1031,33 @@ impl App {
         self.sample.is_some()
     }
 
+    /// Starts the tour of every effect, or stops it and leaves the notch as it was.
+    fn toggle_effect_test(&mut self) {
+        if self.sample.take().is_some() {
+            self.eye_feel = eyes::Feel::ASLEEP;
+            if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Sample(_))) {
+                t.until = Instant::now();
+            }
+        } else {
+            self.sample = Some((Instant::now(), "tour".to_string()));
+        }
+        self.kick();
+    }
+
     /// Plays the eyes and icons on a fixed timeline for review.
     fn sample_step(&mut self, dt: f32) {
         let Some((start, what)) = self.sample.clone() else { return };
         let t = start.elapsed().as_secs_f32();
+        // The tour plays every effect in turn until it is stopped.
+        let (what, t) = if what == "tour" {
+            match t % 59.0 {
+                c if c < 17.5 => ("eyes".to_string(), c),
+                c if c < 23.0 => ("battery".to_string(), c - 17.5),
+                c => (((c - 23.0) / 3.0).min(11.0).to_string().split('.').next().unwrap_or("0").to_string(), c),
+            }
+        } else {
+            (what, t)
+        };
         let (eyes_at, card) = match what.as_str() {
             "eyes" => (Some(t % 17.5), None),
             "battery" => {
@@ -1082,11 +1105,15 @@ impl App {
         };
         let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
         self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
+        if card == Some(10) {
+            let now = self.eye_time();
+            self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 });
+        }
         let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
         if shown != card {
             match card {
                 Some(i) => {
-                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu")][i as usize % 10];
+                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu"), ("Mắt cạnh lời bài hát", "Nhìn chữ, chớp, nhún theo nhịp"), ("Bài mới", "Tên ca sĩ")][i as usize % 12];
                     self.toast(ToastKind::Sample(i), title, sub, None);
                     if let Some(t) = self.toast.as_mut() {
                         t.until = Instant::now() + Duration::from_secs(3600);
@@ -1588,7 +1615,10 @@ impl App {
             blocked,
             acted: down || sys::key_idle_ms() < 700,
         };
-        self.eye_feel = self.eyes.mind.tick(&sense);
+        // The effect test drives the eyes itself.
+        if self.sample.is_none() {
+            self.eye_feel = self.eyes.mind.tick(&sense);
+        }
         if self.eye_feel.show {
             self.kick();
         }
@@ -1888,7 +1918,7 @@ impl App {
 
     /// The eyes look down at a reminder before it appears; if they can't, it appears at once.
     fn present_after_look(&mut self, due: Due) {
-        if self.demo.is_some() || self.eyes_blocked() || sys::key_idle_ms() < 700 {
+        if self.demo.is_some() || self.sample.is_some() || self.eyes_blocked() || sys::key_idle_ms() < 700 {
             self.present_luma(&due);
             return;
         }
@@ -2733,6 +2763,11 @@ impl App {
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.minimal), 3, w!("Minimal notch"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.hide_banners), 6, w!("Hide Windows banners"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.show_text), 7, w!("Show notification text without hover"));
+        if self.sample.is_some() {
+            let _ = AppendMenuW(m, MF_STRING, 8, w!("Stop effect test"));
+        } else {
+            let _ = AppendMenuW(m, MF_STRING, 8, w!("Test all effects"));
+        }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING, 4, w!("About Islet"));
         let _ = AppendMenuW(m, MF_STRING, 5, w!("Exit"));
@@ -2747,6 +2782,7 @@ impl App {
                 self.settings.pet = !self.settings.pet;
                 self.settings.save();
             }
+            8 => self.toggle_effect_test(),
             7 => {
                 self.settings.show_text = !self.settings.show_text;
                 self.settings.save();
