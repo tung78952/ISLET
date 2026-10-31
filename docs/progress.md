@@ -276,6 +276,12 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   bar grows 90 u to one side every 1-2 min for 6 s, with the small eyes dancing to the beat and
   notes; the lyrics stay put. The equalizer rides through pauses under 0.5 s.
 
+- Round 26: the main reminders are acts (eyes::act): the eyes wind up and hit a prop, which pushes
+  the words out; then each does its own business (water sloshes, the moon rises, a breath swells
+  notch and eyes, the eyes pull the notch apart). The cards wait quietly and nudge every 15 s.
+  Other cards are plain with a bell, and their words slide in. Only looks, positions and timing
+  are used, so another character can perform the same acts.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

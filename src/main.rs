@@ -82,6 +82,7 @@ pub const PEEK: [f32; 2] = [208.0, 52.0];
 pub const EXPANDED: [f32; 2] = [420.0, 140.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
+pub const ACT_TOAST: [f32; 2] = [470.0, 58.0];
 /// How far the lyric bar grows for the eyes.
 pub const JAM_ROOM: f32 = 90.0;
 /// The accent of the character in use.
@@ -946,6 +947,8 @@ impl App {
             Mode::Compact => {
                 if self.eye_feel_wide() {
                     LYRIC_PILL
+                } else if self.act_now().is_some() {
+                    ACT_TOAST
                 } else if self.toast_open && self.notice_toast() {
                     NOTICE_OPEN
                 } else if let Some(t) = &self.toast {
@@ -996,6 +999,11 @@ impl App {
             let grow = w * 0.08 * s.abs();
             w += grow;
             cx += s.signum() * grow / 2.0;
+        }
+        // An act can pull the notch wider, or breathe it in and out.
+        if let Some((kind, e)) = self.act_now() {
+            let f = eyes::act(kind, e);
+            w += 76.0 * f.stretch + 16.0 * f.swell.max(0.0);
         }
         // The lyric bar grows to one side for the eyes; the lyrics stay where they are.
         if self.mode == Mode::Compact {
@@ -1053,9 +1061,20 @@ impl App {
         self.power.map_or(1.0, |p| p.pct as f32 / 100.0)
     }
 
-    /// A card with a prop and small eyes is showing.
-    fn stage_on_show(&self) -> bool {
-        self.sample.is_some() || self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Remind(_)))
+    /// The reminder being acted out on the card, and how long it has been going.
+    pub fn act_now(&self) -> Option<(eyes::ActKind, f32)> {
+        use eyes::ActKind as A;
+        use luma::config::Kind as K;
+        let t = self.toast.as_ref()?;
+        let kind = match t.kind {
+            ToastKind::Water | ToastKind::Sample(0) => A::Water,
+            ToastKind::Sample(1) | ToastKind::Remind(K::Sleep | K::Water) => A::Sleep,
+            ToastKind::Sample(2) | ToastKind::Remind(K::Breathe) => A::Breathe,
+            ToastKind::Sample(3) | ToastKind::Remind(K::Stretch) => A::Stretch,
+            ToastKind::Sample(4) | ToastKind::Remind(K::Eyes) => A::Rest,
+            _ => return None,
+        };
+        Some((kind, t.born.elapsed().as_secs_f32()))
     }
 
     /// A prop's picture, `tinted` for the part in the character's colour.
@@ -1103,10 +1122,11 @@ impl App {
         let t = start.elapsed().as_secs_f32();
         // The tour plays every effect in turn until it is stopped.
         let (what, t) = if what == "tour" {
-            match t % 59.0 {
+            match t % 62.0 {
                 c if c < 17.5 => ("eyes".to_string(), c),
                 c if c < 23.0 => ("battery".to_string(), c - 17.5),
-                c => (((c - 23.0) / 3.0).min(11.0).to_string().split('.').next().unwrap_or("0").to_string(), c),
+                c if c < 53.0 => ((((c - 23.0) / 6.0) as u8).to_string(), c),
+                c => ((5 + ((c - 53.0) / 3.0) as u8).to_string(), c),
             }
         } else {
             (what, t)
@@ -1164,19 +1184,17 @@ impl App {
         let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
         self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
         let now = self.eye_time();
-        if self.mini.feed(now, if card == Some(10) && (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) && card == Some(10) {
+        if self.mini.feed(now, if card == Some(6) && (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) && card == Some(6) {
             self.jam.beat(now);
         }
         let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
         if shown != card {
             match card {
                 Some(i) => {
-                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu"), ("Mắt nhún cạnh lời bài hát", "Thanh lời dài ra 1–2 phút một lần"), ("Bài mới", "Tên ca sĩ")][i as usize % 12];
+                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Hít thở", "Chậm và sâu"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Mắt nhún cạnh lời bài hát", "Thanh lời dài ra 1–2 phút một lần"), ("Bài mới", "Tên ca sĩ")][i as usize % 8];
                     self.toast(ToastKind::Sample(i), title, sub, None);
                     if let Some(t) = self.toast.as_mut() {
                         t.until = Instant::now() + Duration::from_secs(3600);
-                        // A held card measures the running icon, not the arrival.
-                        t.born -= Duration::from_secs(6);
                     }
                 }
                 None => {
@@ -1236,7 +1254,11 @@ impl App {
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
         self.sample_step(dt);
-        if self.sample.is_none() {
+        if let Some((kind, e)) = self.act_now() {
+            let f = eyes::act(kind, e);
+            let feel = eyes::Feel { show: true, look: f.look, blink: f.blink, gaze: f.gaze, lunge: f.lunge, ..eyes::Feel::ASLEEP };
+            self.eyes.step(feel, dt);
+        } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
         }
         // Pages set without go_page (startup, demo) snap the dots instead of sliding.
@@ -1255,7 +1277,7 @@ impl App {
             }
         }
         // The small eyes are only stepped while they are on show: their outlines are not free.
-        if self.jam_show || self.jam_x.x > 0.01 || self.stage_on_show() {
+        if self.jam_show || self.jam_x.x > 0.01 || self.sample.is_some() {
             let clock = self.born.elapsed().as_secs_f32();
             self.mini_busy = (0..3).fold(false, |busy, _| self.mini.step(clock, dt / 3.0) | busy);
         } else {
@@ -1345,8 +1367,8 @@ impl App {
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
-            || !self.hidden && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Task | ToastKind::Remind(_)))
-            || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Water)
+            || !self.hidden && self.act_now().is_some_and(|(_, e)| eyes::act_moving(e))
+            || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
     }
@@ -1677,9 +1699,6 @@ impl App {
             }
         } else {
             self.meter_on = false;
-            if self.stage_on_show() && self.mini.feed(t, 0.0) {
-                self.kick();
-            }
         }
         // Plugging in ends the battery scene at once.
         let plugged = self.eye_feel.battery && self.power.is_some_and(|p| p.ac);
@@ -1695,6 +1714,10 @@ impl App {
             blocked,
             acted: down || sys::key_idle_ms() < 700,
         };
+        // A card waiting for an answer wakes up for its nudges and blinks.
+        if self.act_now().is_some_and(|(_, e)| eyes::act_moving(e)) {
+            self.kick();
+        }
         // The effect test drives the eyes itself.
         if self.sample.is_none() {
             self.eye_feel = self.eyes.mind.tick(&sense);

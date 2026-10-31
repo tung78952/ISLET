@@ -902,11 +902,6 @@ enum Glyph {
     /// What a connected device is (headphones, mouse, drive...).
     Device(DeviceKind),
     Usb,
-    /// Luma's breaks.
-    Stretch,
-    Eye,
-    Breath,
-    Moon,
 }
 
 fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
@@ -914,8 +909,6 @@ fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
         Glyph::Device(k) => icon::device(&a.gfx, k, cx, cy, hex, 1.0),
         Glyph::Usb => icon::usb(&a.gfx, cx, cy, hex, 1.0),
         Glyph::Blank => {}
-        // Drawn by `live_badge`.
-        Glyph::Stretch | Glyph::Eye | Glyph::Breath | Glyph::Moon => {}
         Glyph::Bluetooth => icon::bluetooth(&a.gfx, cx, cy, hex, 1.0),
         // The arcs' bounding box is centred on (cx, cy): dot 4.6 below, outer arc 7.4 above.
         Glyph::Wifi(arcs, _) => icon::wifi_centered(&a.gfx, cx, cy, arcs, hex, 1.0),
@@ -982,19 +975,8 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
     let tx = left + 62.0;
     // Badge: a ripple leaves it once, the ring breathes gently.
     let q = (age / 0.8).clamp(0.0, 1.0);
-    let scene = match c.badge {
-        Glyph::Bell => Some(Scene::Bell),
-        Glyph::Stretch => Some(Scene::Stretch),
-        Glyph::Eye => Some(Scene::Rest),
-        Glyph::Breath => Some(Scene::Breathe),
-        Glyph::Moon => Some(Scene::Night),
-        _ => None,
-    };
-    let tx = if scene.is_some() { left + 112.0 } else { tx };
-    if let Some(scene) = scene {
-        // A prop with the eyes beside it stands in for the badge and keeps moving while the card waits.
-        stage(a, scene, left + 36.0, cy, age);
-        a.loop_rect = Some(Rc::new(left + 8.0, 0.0, 100.0, h));
+    if matches!(c.badge, Glyph::Bell) {
+        bell(a, bx, cy, 28.0, age);
     } else {
         if q < 1.0 {
             a.gfx.stroke_circle(bx, cy, 14.4 + 8.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
@@ -1013,8 +995,16 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
     }
     let right_w = if c.ring.is_some() { 56.0 } else { c.reserve };
     let tw = w - (tx - left) - right_w - 8.0;
-    a.gfx.ui(title, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-    a.gfx.ui(sub, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+    // The words slide out from behind the icon, the second line a beat later.
+    let settle = |d: f32| {
+        let k = ((age - d) / 0.32).clamp(0.0, 1.0) - 1.0;
+        1.0 + 2.7 * k * k * k + 1.7 * k * k
+    };
+    a.gfx.push_clip(Rc::new(tx - 4.0, 0.0, tw + 8.0, h));
+    let (k1, k2) = (settle(0.04), settle(0.12));
+    a.gfx.ui(title, Rc::new(tx - 34.0 * (1.0 - k1), cy - 17.6, tw, 20.0), 15.0, 700, WHITE, k1.clamp(0.0, 1.0), Align::L);
+    a.gfx.ui(sub, Rc::new(tx - 34.0 * (1.0 - k2), cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, k2.clamp(0.0, 1.0), Align::L);
+    a.gfx.pop_clip();
     if let Some((g, level)) = c.ring {
         let ex = left + w - 36.0;
         for d in [0.0f32, 0.35] {
@@ -1169,36 +1159,14 @@ fn card_button(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, live: bool, ac
     }
 }
 
-/// What a card is about: a prop from the design sheet and how the eyes take it.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Scene {
-    Water,
-    Bell,
-    Hello,
-    Night,
-    Cheer,
-    Walk,
-    Study,
-    Stretch,
-    Rest,
-    Breathe,
-}
-
 pub fn prop_bytes(name: &str) -> Option<&'static [u8]> {
     Some(match name {
         "bell0" => include_bytes!("../assets/props/bell0.png"),
         "bell1" => include_bytes!("../assets/props/bell1.png"),
-        "book0" => include_bytes!("../assets/props/book0.png"),
-        "book1" => include_bytes!("../assets/props/book1.png"),
-        "book2" => include_bytes!("../assets/props/book2.png"),
-        "book3" => include_bytes!("../assets/props/book3.png"),
-        "fist0" => include_bytes!("../assets/props/fist0.png"),
         "glass0" => include_bytes!("../assets/props/glass0.png"),
         "glass1" => include_bytes!("../assets/props/glass1.png"),
-        "hand0" => include_bytes!("../assets/props/hand0.png"),
         "moon0" => include_bytes!("../assets/props/moon0.png"),
         "moon1" => include_bytes!("../assets/props/moon1.png"),
-        "shoe0" => include_bytes!("../assets/props/shoe0.png"),
         "wind0" => include_bytes!("../assets/props/wind0.png"),
         "wind1" => include_bytes!("../assets/props/wind1.png"),
         _ => return None,
@@ -1213,87 +1181,88 @@ fn part(a: &mut App, name: &'static str, tinted: bool, r: Rc, pivot: (f32, f32),
     a.gfx.unzoom();
 }
 
-/// A prop moving at `x`, with the small eyes beside it.
-fn stage(a: &mut App, scene: Scene, x: f32, y: f32, t: f32) {
-    use crate::eyes::Pose;
-    const S: f32 = 42.0;
-    let at = |dx: f32, dy: f32, s: f32| Rc::new(x + dx - s / 2.0, y + dy - s / 2.0, s, s);
-    let base = at(0.0, 0.0, S);
-    let foot = (x, y + S / 2.0);
-    let swing = |t: f32, cycle: f32, reach: f32| {
-        let q = (t.rem_euclid(cycle) / (cycle * 0.65)).clamp(0.0, 1.0);
+/// The bell on plain cards: it rings for a moment, then waits.
+fn bell(a: &mut App, x: f32, y: f32, s: f32, t: f32) {
+    let swing = |t: f32, reach: f32| {
+        let q = (t.rem_euclid(2.6) / 1.7).clamp(0.0, 1.0);
         reach * (std::f32::consts::PI * q).sin().max(0.0).powf(0.7) * (1.0 - q) * (q * 22.0).sin()
     };
-    let pose = match scene {
-        Scene::Water => {
-            let tip = 0.09 * (t * 1.8).sin();
-            part(a, "glass1", true, at(0.0, 0.6 * (t * 3.4).sin(), S), foot, tip * 1.3);
-            part(a, "glass0", false, base, foot, tip);
-            Pose::Left
-        }
-        Scene::Bell => {
-            let top = (x, y - S / 2.0);
-            part(a, "bell1", true, base, top, swing(t - 0.07, 2.6, 0.55));
-            part(a, "bell0", false, base, top, swing(t, 2.6, 0.38));
-            Pose::Left
-        }
-        Scene::Hello => {
-            let wave = 0.32 * (t * 7.0).sin() * (0.5 + 0.5 * (t * 2.4).cos());
-            part(a, "hand0", false, base, foot, wave);
-            Pose::Smile
-        }
-        Scene::Night => {
-            part(a, "moon0", false, base, (x, y), 0.1 * (t * 1.3).sin());
-            let k = 1.0 + 0.1 * (t * 2.4).sin();
-            part(a, "moon1", true, Rc::new(x - S * k / 2.0, y - S * k / 2.0, S * k, S * k), (x, y), 0.0);
-            Pose::Dreamy
-        }
-        Scene::Cheer => {
-            let up = ((t % 1.1) / 1.1 * std::f32::consts::PI).sin().powi(2);
-            part(a, "fist0", false, at(0.0, 3.0 - 7.0 * up, S * (1.0 + 0.05 * up)), (0.0, 0.0), 0.0);
-            Pose::Smile
-        }
-        Scene::Walk => {
-            let step = (t * 4.2).sin();
-            part(a, "shoe0", false, at(0.0, -3.5 * step.abs(), S), (x - S * 0.4, y + S * 0.3), -0.22 * step);
-            Pose::Left
-        }
-        Scene::Study => {
-            let turn = ((t % 3.4) / 3.4 * 2.0 - 1.0).abs().powf(4.0);
-            part(a, "book2", false, base, (x, y), 0.0);
-            part(a, "book3", false, base, (x, y), 0.0);
-            let w = S * (1.0 - 0.3 * turn);
-            let pages = Rc::new(x - w / 2.0, y - S / 2.0, w, S);
-            part(a, "book0", true, pages, (x, y), 0.0);
-            part(a, "book1", true, pages, (x, y), 0.0);
-            Pose::Left
-        }
-        Scene::Stretch => {
-            let up = 0.5 - 0.5 * (t * 2.1).cos();
-            part(a, "hand0", false, at(0.0, 5.0 - 9.0 * up, S * (0.9 + 0.14 * up)), (0.0, 0.0), 0.0);
-            Pose::Left
-        }
-        Scene::Breathe => {
-            let k = (t * 1.6).sin();
-            part(a, "wind0", false, at(2.2 * k, 0.0, S), (x, y), 0.0);
-            part(a, "wind1", true, at(-2.2 * k, 0.0, S), (x, y), 0.0);
-            Pose::Dreamy
-        }
-        // Resting the eyes takes no prop: they close, then look far away.
-        Scene::Rest => {
-            if t % 6.0 < 3.0 {
-                Pose::Dreamy
-            } else {
-                Pose::Right
-            }
-        }
-    };
-    a.mini.pose = pose;
-    if scene == Scene::Rest {
-        mini_eyes(a, x + 24.0, y, 0.15);
-    } else {
-        mini_eyes(a, x + 48.0, y, 0.085);
+    let r = Rc::new(x - s / 2.0, y - s / 2.0, s, s);
+    let top = (x, y - s / 2.0);
+    part(a, "bell1", true, r, top, swing(t - 0.07, 0.55));
+    part(a, "bell0", false, r, top, swing(t, 0.38));
+}
+
+/// The large eyes on an act's card, drawn apart by `spread`.
+fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
+    const RED: u32 = crate::CHARACTER;
+    let hop = a.eyes.hop.x;
+    let lean = a.eyes.lean.x * 7.0;
+    for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let x = cx + side * spread + lean;
+        a.gfx.glow_ellipse(x + side * 22.0 * scale / 0.13, cy, 24.0, 15.0, RED, 0.22);
+        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (cx + side * spread + lean + p.0 * scale, cy + hop + p.1 * scale)).collect();
+        a.gfx.fill_poly(&outline, WHITE, 1.0);
+        let mut rim = outline;
+        rim.push(rim[0]);
+        a.gfx.polyline(&rim, 1.4, RED, 1.0);
     }
+}
+
+/// A main reminder played out: the eyes hit the prop, which pushes the words out from behind it.
+fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, kind: crate::eyes::ActKind, e: f32) {
+    use crate::eyes::ActKind as K;
+    const S: f32 = 40.0;
+    let f = crate::eyes::act(kind, e);
+    let cy = h / 2.0;
+    let centre = left + w / 2.0;
+    let out = f.title;
+    let (shove, rock) = (a.eyes.shove.x, a.eyes.rock.x);
+    // The prop slides out from the eyes as they hit it.
+    let px = centre - 110.0 + shove - 46.0 * (1.0 - out);
+    let box_at = |dx: f32, dy: f32, s: f32| Rc::new(px + dx - s / 2.0, cy + dy - s / 2.0, s, s);
+    let shown = out.clamp(0.0, 1.0);
+    if shown > 0.01 {
+        let base = a.gfx.alpha;
+        a.gfx.alpha = base * shown;
+        match kind {
+            K::Water => {
+                let slosh = 0.2 * (-(e - crate::eyes::ACT_END * 0.3).max(0.0) * 1.2).exp() * (e * 9.0).sin();
+                let foot = (px, cy + S / 2.0);
+                let tip = 0.09 * rock + 0.03 * (e * 1.6).sin();
+                part(a, "glass1", true, box_at(0.0, 0.6 * (e * 3.4).sin(), S), foot, tip + slosh);
+                part(a, "glass0", false, box_at(0.0, 0.0, S), foot, tip);
+            }
+            K::Sleep => {
+                let lift = 7.0 * f.play;
+                part(a, "moon0", false, box_at(0.0, 3.0 - lift, S), (px, cy), 0.1 * rock);
+                let fall = (e * 0.8).fract();
+                let star = box_at(0.0, -lift + 26.0 * fall * fall, S);
+                part(a, "moon1", true, star, (px, cy), 0.0);
+            }
+            K::Breathe => {
+                let k = 1.0 + 0.12 * f.swell;
+                part(a, "wind0", false, box_at(3.0 * f.swell, 0.0, S * k), (px, cy), 0.0);
+                part(a, "wind1", true, box_at(-3.0 * f.swell, 0.0, S * k), (px, cy), 0.0);
+            }
+            K::Stretch | K::Rest => {}
+        }
+        a.gfx.alpha = base;
+    }
+    let prop = !matches!(kind, K::Stretch | K::Rest);
+    let scale = 0.13 * (1.0 + 0.14 * f.swell);
+    let eyes_at = if prop { centre - 176.0 } else { centre - 150.0 };
+    let reach = if prop { 22.0 } else { 0.0 };
+    act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 40.0 * f.stretch);
+    // The words come out from behind the prop, the second line a beat later.
+    let tx = centre - 72.0 + if kind == K::Rest { -24.0 } else { 0.0 };
+    let tw = 170.0;
+    a.gfx.push_clip(Rc::new(tx - 4.0, 0.0, tw + 12.0, h));
+    let drift = 6.0 * f.swell;
+    let (k1, k2) = (f.title, f.subtitle);
+    a.gfx.ui(title, Rc::new(tx - 60.0 * (1.0 - k1) + 0.5 * shove + drift, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, k1.clamp(0.0, 1.0), Align::L);
+    a.gfx.ui(value, Rc::new(tx - 60.0 * (1.0 - k2) + 0.3 * shove + drift, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, k2.clamp(0.0, 1.0), Align::L);
+    a.gfx.pop_clip();
 }
 
 /// A notification's text on its small card: hidden until hovered unless the user wants it shown.
@@ -1319,7 +1288,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         (b1, b2)
     };
     match kind {
-        ToastKind::Song | ToastKind::Sample(11) => {
+        ToastKind::Song | ToastKind::Sample(7) => {
             // What has just started: cover, title and artist, the music moving on the right.
             let cy = h / 2.0;
             let cover = Rc::new(left + 18.0, cy - 19.0, 38.0, 38.0);
@@ -1334,22 +1303,25 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             a.gfx.ui(value, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
             right_indicator(a, left + w - 42.0, cy);
         }
+        ToastKind::Sample(i) if i <= 4 => {
+            if let Some((act, e)) = a.act_now() {
+                act_card(a, left, w, h, title, value, act, e);
+            }
+        }
         ToastKind::Sample(i) => {
-            // Nothing on the right, so the prop and text sit together in the middle of the card.
-            const ICON: f32 = 88.0;
+            // Nothing on the right, so the picture and text sit together in the middle of the card.
+            const ICON: f32 = 60.0;
             const GAP: f32 = 14.0;
             let cy = h / 2.0;
             let clock = a.born.elapsed().as_secs_f32();
             let text_w = a.gfx.measure(title, 15.0, 700).max(a.gfx.measure(value, 11.5, 400));
             let x0 = left + (w - (ICON + GAP + text_w)) / 2.0;
-            let scene = [Scene::Water, Scene::Bell, Scene::Hello, Scene::Night, Scene::Cheer, Scene::Walk, Scene::Study, Scene::Stretch, Scene::Rest, Scene::Breathe];
-            match scene.get(i as usize) {
-                Some(s) => stage(a, *s, x0 + 21.0, cy, clock),
-                None => {
-                    a.mini.pose = crate::eyes::JAM_POSES[(clock / 3.0) as usize % 3];
-                    mini_eyes(a, x0 + 44.0, cy, 0.085);
-                    jam_notes(a, x0 + 44.0, 34.0, h);
-                }
+            if i == 5 {
+                bell(a, x0 + 30.0, cy, 34.0, clock);
+            } else {
+                a.mini.pose = crate::eyes::JAM_POSES[(clock / 3.0) as usize % 3];
+                mini_eyes(a, x0 + 30.0, cy, 0.085);
+                jam_notes(a, x0 + 30.0, 24.0, h);
             }
             let tx = x0 + ICON + GAP;
             a.gfx.ui(title, Rc::new(tx, cy - 17.6, text_w + 8.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
@@ -1559,16 +1531,21 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         ToastKind::Remind(k) => {
             let (b1, b2) = buttons(56.0, 64.0);
             use crate::luma::config::Kind as K;
-            let (glyph, accent, dark, done) = match k {
-                K::Stretch => (Glyph::Stretch, 0xFF9F43, 0x2E1D08, "Done"),
-                K::Eyes => (Glyph::Eye, 0x7BD88F, 0x0E2A14, "Done"),
-                K::Breathe => (Glyph::Breath, 0x66DBFF, 0x0B2A33, "Done"),
-                K::Sleep | K::Water => (Glyph::Moon, 0xA78BFA, 0x1F1636, "Sleep"),
+            let (accent, dark, done) = match k {
+                K::Stretch => (0xFF9F43, 0x2E1D08, "Done"),
+                K::Eyes => (0x7BD88F, 0x0E2A14, "Done"),
+                K::Breathe => (0x66DBFF, 0x0B2A33, "Done"),
+                K::Sleep | K::Water => (0xA78BFA, 0x1F1636, "Sleep"),
             };
-            let c = Card { accent, dark, badge: glyph, shake: 0.14, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
-            card(a, left, w, h, t, title, value, &c);
-            later_button(a, b1, t, live);
-            card_button(a, b2, done, mix(dark, accent, 0.25), accent, live, Act::LumaDone);
+            if let Some((act, e)) = a.act_now() {
+                act_card(a, left, w, h, title, value, act, e);
+                let base = a.gfx.alpha;
+                let shown = crate::eyes::act(act, e).buttons;
+                a.gfx.alpha = base * shown;
+                later_button(a, b1, t, live && shown > 0.6);
+                card_button(a, b2, done, mix(dark, accent, 0.25), accent, live && shown > 0.6, Act::LumaDone);
+                a.gfx.alpha = base;
+            }
         }
         ToastKind::HeadsUp => {
             let (b1, b2) = buttons(56.0, 56.0);
@@ -1581,21 +1558,22 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         }
         ToastKind::LumaApp => {
             let (b1, b2) = buttons(56.0, 72.0);
-            let c = Card { accent: 0xA78BFA, dark: 0x1F1636, badge: Glyph::Moon, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
+            let c = Card { accent: 0xA78BFA, dark: 0x1F1636, badge: Glyph::Bell, shake: 0.0, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
             card(a, left, w, h, t, title, value, &c);
             card_button(a, b1, "Later", 0x2E2E2E, 0xE6E6E6, live, Act::ToastDismiss);
             card_button(a, b2, "Turn off", 0x1F1636, 0xC9B8FF, live, Act::LumaAppOff);
         }
         ToastKind::Water => {
             let (b1, b2) = buttons(62.0, 56.0);
-            let (cy, tx) = (h / 2.0, left + 112.0);
-            stage(a, Scene::Water, left + 36.0, cy, a.born.elapsed().as_secs_f32());
-            let tw = b1.x - tx - 8.0;
-            a.gfx.ui(title, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-            a.gfx.ui(value, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
-            a.loop_rect = Some(Rc::new(left + 8.0, 0.0, 100.0, h));
-            later_button(a, b1, t, live);
-            card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live, Act::LumaDone);
+            if let Some((act, e)) = a.act_now() {
+                act_card(a, left, w, h, title, value, act, e);
+                let base = a.gfx.alpha;
+                let shown = crate::eyes::act(act, e).buttons;
+                a.gfx.alpha = base * shown;
+                later_button(a, b1, t, live && shown > 0.6);
+                card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live && shown > 0.6, Act::LumaDone);
+                a.gfx.alpha = base;
+            }
         }
         _ => {
             // App notification: the app's icon on its own colour, sender over message.

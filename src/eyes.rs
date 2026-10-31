@@ -473,6 +473,125 @@ const MINI_BLINK: Lens = ((-145.0, -20.0), (-10.0, 18.0), [(-100.0, -12.0), (-40
 const MINI_HAPPY: Lens = ((-158.0, 45.0), (-15.0, 45.0), [(-135.0, -70.0), (-50.0, -75.0)], [(-115.0, 0.0), (-60.0, -5.0)]);
 const MINI_NOD: Lens = ((-140.0, -45.0), (-10.0, 15.0), [(-95.0, -25.0), (-45.0, -10.0)], [(-150.0, 50.0), (-60.0, 60.0)]);
 
+/// One of the main reminders, played out by the eyes. Everything here is expressions, positions
+/// and timing, so any character with the same set of looks can perform it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ActKind {
+    Water,
+    Sleep,
+    Breathe,
+    Stretch,
+    Rest,
+}
+
+/// One moment of an act.
+#[derive(Clone, Copy, Debug)]
+pub struct ActFrame {
+    pub look: Look,
+    pub gaze: f32,
+    pub blink: bool,
+    /// The eyes' run at the prop (-1 back to 1 hit).
+    pub lunge: f32,
+    /// How far the title, the subtitle and the buttons have come out (the first two overshoot).
+    pub title: f32,
+    pub subtitle: f32,
+    pub buttons: f32,
+    /// The eyes pulling the notch apart (0..1).
+    pub stretch: f32,
+    /// In and out of a breath (-1..1).
+    pub swell: f32,
+    /// How far along the act's own business is (0..1).
+    pub play: f32,
+}
+
+/// When the blow lands and the card opens up.
+const ACT_HIT: f32 = 0.9;
+/// When the act is over and the card just waits.
+pub const ACT_END: f32 = 3.2;
+/// How often a waiting card gives a little nudge.
+pub const ACT_NUDGE: f32 = 15.0;
+
+fn overshoot(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0) - 1.0;
+    1.0 + 2.7 * k * k * k + 1.7 * k * k
+}
+
+fn smooth(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
+}
+
+/// The act at `e` seconds: the wind-up and the blow are shared, then each reminder does its own.
+pub fn act(kind: ActKind, e: f32) -> ActFrame {
+    let waiting = (e - ACT_END).max(0.0) % ACT_NUDGE;
+    let nudge = e >= ACT_END + ACT_NUDGE;
+    let lunge = match e {
+        e if (0.5..ACT_HIT).contains(&e) => -0.35 * smooth((e - 0.5) / 0.2),
+        e if (ACT_HIT..ACT_HIT + 0.15).contains(&e) => 1.0,
+        _ if nudge && waiting < 0.2 => -0.2,
+        _ if nudge && waiting < 0.34 => 0.6,
+        _ => 0.0,
+    };
+    let play = ((e - 1.2) / (ACT_END - 1.2)).clamp(0.0, 1.0);
+    let mut look = if (0.5..ACT_HIT + 0.15).contains(&e) { Look::Squint } else { Look::Neutral };
+    let mut gaze = if e < 0.5 { 0.0 } else { 0.7 };
+    let (mut stretch, mut swell) = (0.0, 0.0);
+    if e >= 1.2 && e < ACT_END {
+        match kind {
+            ActKind::Water => gaze = if play < 0.7 { 0.8 } else { -0.25 },
+            ActKind::Sleep => {
+                gaze = 0.0;
+                look = match play {
+                    p if p < 0.45 => Look::Sleepy,
+                    p if p < 0.65 => Look::Closed,
+                    p if p < 0.8 => Look::Sleepy,
+                    _ => Look::Closed,
+                };
+            }
+            ActKind::Breathe => {
+                gaze = 0.0;
+                swell = (play * std::f32::consts::TAU).sin();
+                look = if swell > 0.0 { Look::Surprised } else { Look::Sleepy };
+            }
+            ActKind::Stretch => {
+                gaze = 0.0;
+                // Two pulls: strain to the limit, trembling at the top, then let go.
+                let q = (play * 2.0).fract();
+                let pulling = q < 0.72;
+                stretch = if pulling { smooth(q / 0.5) * (1.0 + 0.035 * (e * 46.0).sin() * smooth((q - 0.4) / 0.2)) } else { 0.0 };
+                look = if pulling { Look::Squint } else { Look::Happy };
+            }
+            ActKind::Rest => {
+                look = if play < 0.55 { Look::Closed } else { Look::Neutral };
+                gaze = if play < 0.55 { 0.0 } else if play < 0.8 { -0.9 } else { 0.9 };
+            }
+        }
+    } else if e >= ACT_END {
+        look = match kind {
+            ActKind::Sleep => Look::Sleepy,
+            _ => Look::Neutral,
+        };
+        gaze = if kind == ActKind::Sleep { 0.0 } else { 0.5 };
+    }
+    ActFrame {
+        look,
+        gaze,
+        blink: e > 1.2 && (e % 4.3) < 0.11 && look == Look::Neutral,
+        lunge,
+        title: overshoot((e - ACT_HIT) / 0.36),
+        subtitle: overshoot((e - ACT_HIT - 0.14) / 0.34),
+        buttons: smooth((e - ACT_HIT - 0.4) / 0.25),
+        stretch,
+        swell,
+        play,
+    }
+}
+
+/// Whether the act needs frames at `e`: not while a card simply waits.
+pub fn act_moving(e: f32) -> bool {
+    e < ACT_END + 0.8 || (e - ACT_END) % ACT_NUDGE < 0.9 || e % 4.3 < 0.4
+}
+
 /// How the small eyes hold themselves when nothing else is going on.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Pose {
@@ -849,6 +968,38 @@ mod tests {
         let blows = hits.windows(2).filter(|w| w[0].lunge <= 0.5 && w[1].lunge > 0.5).count();
         assert_eq!(blows, 2);
         assert!(!hits[89].show);
+    }
+
+    #[test]
+    fn an_act_winds_up_hits_and_lets_the_words_out_in_turn() {
+        for kind in [ActKind::Water, ActKind::Sleep, ActKind::Breathe, ActKind::Stretch, ActKind::Rest] {
+            assert_eq!(act(kind, 0.3).title, 0.0);
+            assert!(act(kind, 0.7).lunge < 0.0);
+            assert_eq!(act(kind, 1.0).lunge, 1.0);
+            assert!(act(kind, 1.05).title > act(kind, 1.05).subtitle);
+            assert!(act(kind, 1.05).subtitle > 0.0 || act(kind, 1.1).subtitle > 0.0);
+            assert_eq!(act(kind, 2.0).buttons, 1.0);
+        }
+    }
+
+    #[test]
+    fn stretching_pulls_twice_and_lets_go() {
+        let peaks = (0..400)
+            .map(|i| act(ActKind::Stretch, i as f32 * 0.01).stretch)
+            .collect::<Vec<_>>()
+            .windows(2)
+            .filter(|w| w[0] > 0.3 && w[1] == 0.0)
+            .count();
+        assert_eq!(peaks, 2);
+    }
+
+    #[test]
+    fn a_waiting_card_nudges_now_and_then_and_otherwise_rests() {
+        let e = ACT_END + ACT_NUDGE;
+        assert!(act(ActKind::Water, e + 0.3).lunge > 0.0);
+        assert_eq!(act(ActKind::Water, e + 5.0).lunge, 0.0);
+        assert!(act_moving(e + 0.2));
+        assert!(!act_moving(ACT_END + 6.0));
     }
 
     #[test]
