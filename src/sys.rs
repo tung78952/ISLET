@@ -781,6 +781,59 @@ pub fn hide_banner(aumid: &str) {
     }
 }
 
+/// Windows keeps a setting per phone app, each under its own name.
+const PHONE_KEY: &str = "Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneNotifications_";
+
+/// The phone app an icon of Phone Link's belongs to: `app_icon_<bundle id>1.0.jpg`.
+fn bundle_of_icon(file: &str) -> Option<&str> {
+    let name = file.strip_prefix("app_icon_")?.strip_suffix(".jpg")?;
+    let name = name.strip_suffix("1.0").unwrap_or(name);
+    (!name.is_empty()).then_some(name)
+}
+
+/// The names of Windows' per-app notification settings.
+fn notification_keys() -> Vec<String> {
+    let mut names = Vec::new();
+    let path = HSTRING::from(NOTIF_KEY);
+    let mut key = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &path, None, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return names;
+        }
+        let mut i = 0;
+        loop {
+            let mut buf = [0u16; 256];
+            let mut len = buf.len() as u32;
+            if RegEnumKeyExW(key, i, Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS {
+                break;
+            }
+            names.push(String::from_utf16_lossy(&buf[..len as usize]));
+            i += 1;
+        }
+        let _ = RegCloseKey(key);
+    }
+    names
+}
+
+/// Turns off the banner of every phone app Phone Link knows, those it has only an icon for too,
+/// so a new app's first notification stays out of the corner.
+pub fn hide_phone_banners() {
+    let mut keys: Vec<String> = notification_keys().into_iter().filter(|k| k.starts_with(PHONE_KEY)).collect();
+    let icons = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("Packages\\Microsoft.YourPhone_8wekyb3d8bbwe\\TempState\\app_icons"));
+    if let Some(dir) = icons.and_then(|d| std::fs::read_dir(d).ok()) {
+        for file in dir.flatten() {
+            if let Some(bundle) = bundle_of_icon(&file.file_name().to_string_lossy()) {
+                keys.push(format!("{PHONE_KEY}{bundle}"));
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    for key in keys.iter().filter(|k| show_banner_value(k) != Some(0)) {
+        hide_banner(key);
+    }
+}
+
 /// Puts every banner setting Islet changed back the way it was.
 pub fn restore_banners() {
     for (aumid, old) in read_banner_backup() {
@@ -909,5 +962,18 @@ pub fn make_icon(size: i32) -> HICON {
         let _ = DeleteObject(color.into());
         let _ = DeleteObject(mask.into());
         icon
+    }
+}
+
+#[cfg(test)]
+mod phone_tests {
+    use super::bundle_of_icon;
+
+    #[test]
+    fn icon_names_give_the_phone_app() {
+        assert_eq!(bundle_of_icon("app_icon_com.ss.iphone.ugc.Ame1.0.jpg"), Some("com.ss.iphone.ugc.Ame"));
+        assert_eq!(bundle_of_icon("app_icon_vn.com.vng.zingalo.jpg"), Some("vn.com.vng.zingalo"));
+        assert_eq!(bundle_of_icon("other.jpg"), None);
+        assert_eq!(bundle_of_icon("app_icon_.jpg"), None);
     }
 }

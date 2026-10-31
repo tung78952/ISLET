@@ -792,6 +792,9 @@ impl App {
             sys::watch_audio_devices(self.hwnd);
             notify::spawn(self.hwnd);
             sys::spawn_focus_watch();
+            if self.settings.hide_banners {
+                sys::hide_phone_banners();
+            }
             self.poll_power();
             self.take_over_from_luma();
         }
@@ -2948,6 +2951,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let body = if n.body.is_empty() { n.app.clone() } else { n.body.clone() };
             if a.settings.hide_banners {
                 sys::hide_banner(&n.aumid);
+                if n.phone_app.is_some() {
+                    sys::hide_phone_banners();
+                }
             }
             sys::timelog(&format!("notice phone_connected={}", bt::phone_connected()));
             match &n.phone_app {
