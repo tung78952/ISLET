@@ -169,9 +169,10 @@ mod icon {
         let d = if left { 1.0 } else { -1.0 };
         g.polyline(&[(cx + d * 1.6, cy - 3.6), (cx - d * 2.0, cy), (cx + d * 1.6, cy + 3.6)], 1.9, hex, a);
     }
-    pub fn charging(g: &Gfx, cx: f32, cy: f32, r: f32, hex: u32, a: f32) {
-        // Green ring with a white bolt.
-        g.stroke_circle(cx, cy, r - 0.6, 3.0, hex, a);
+    pub fn charging(g: &Gfx, cx: f32, cy: f32, r: f32, level: f32, a: f32) {
+        // The charge as a ring in the battery's colour, with a white bolt.
+        g.stroke_circle(cx, cy, r - 0.6, 3.0, 0x3A3A3C, a);
+        g.arc(cx, cy, r - 0.6, level, 3.0, super::battery_tone(level).0, a);
         g.bolt(cx, cy, r * 0.56, 0xFFFFFF, a);
     }
     pub fn play(g: &Gfx, cx: f32, cy: f32, s: f32, hex: u32, a: f32) {
@@ -632,7 +633,7 @@ fn compact(a: &mut App, left: f32, w: f32) {
     // The eyes have the notch to themselves: everything else steps back while they are open.
     let rest = 1.0 - (show / 0.3).min(1.0);
     if charging {
-        icon::charging(&a.gfx, left + 20.0, cy, 8.2, GREEN, rest);
+        icon::charging(&a.gfx, left + 20.0, cy, 8.2, a.charge_level(), rest);
     }
     let time = a.clock().time_label();
     a.gfx.ui(&time, Rc::new(left, 5.0, w, 20.0), 16.0, 700, WHITE, rest, Align::C);
@@ -823,7 +824,7 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             icon::caps(&a.gfx, ix, cy, true, WHITE, k, 0.0);
             icon::caps_bar(&a.gfx, ix, cy, WHITE, 0.35 + 0.65 * k);
         }
-        ToastKind::Charging(_) | ToastKind::Battery => icon::charging(&a.gfx, ix, cy, 8.2, GREEN, 1.0),
+        ToastKind::Charging(_) | ToastKind::Battery => icon::charging(&a.gfx, ix, cy, 8.2, level.unwrap_or_else(|| a.charge_level()), 1.0),
         ToastKind::Focus | ToastKind::Break | ToastKind::Task => icon::stopwatch(&a.gfx, ix, cy + 1.6, 6.0, RED, 1.0),
         ToastKind::Net(ok) => {
             for r in [9.0f32, 5.8, 2.6] {
@@ -1490,7 +1491,7 @@ fn ring_angle(age: f32, amp: f32) -> f32 {
 fn header(a: &mut App, lx: f32) {
     let charging = a.power.is_some_and(|p| p.battery && p.ac);
     if charging {
-        icon::charging(&a.gfx, lx + 146.0, 18.0, 8.2, GREEN, 1.0);
+        icon::charging(&a.gfx, lx + 146.0, 18.0, 8.2, a.charge_level(), 1.0);
     }
     let date = a.date_label();
     let time = a.clock().time_label();

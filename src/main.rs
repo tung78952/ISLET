@@ -1022,6 +1022,11 @@ impl App {
         self.lyrics_on && self.page == Page::Music && self.has_media()
     }
 
+    /// How full the battery is (0..1).
+    pub fn charge_level(&self) -> f32 {
+        self.power.map_or(1.0, |p| p.pct as f32 / 100.0)
+    }
+
     pub fn sample_running(&self) -> bool {
         self.sample.is_some()
     }
@@ -2519,6 +2524,9 @@ impl App {
     fn poll_power(&mut self) {
         let Some(p) = sys::power() else { return };
         if let Some(old) = self.power {
+            if old.pct != p.pct {
+                self.kick();
+            }
             if p.battery {
                 let lv = Some(p.pct as f32 / 100.0);
                 if p.ac != old.ac {
@@ -3114,7 +3122,8 @@ fn demo_setup(a: &mut App, spec: &str) {
         };
     }
     if kv.get("charging") == Some(&"1") {
-        a.power = Some(sys::Power { ac: true, pct: 100, battery: true });
+        let pct = kv.get("pct").and_then(|v| v.parse().ok()).unwrap_or(100);
+        a.power = Some(sys::Power { ac: true, pct, battery: true });
     }
     if kv.get("expanded") == Some(&"1") {
         a.mode = Mode::Expanded;
