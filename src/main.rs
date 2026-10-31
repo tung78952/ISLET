@@ -1138,7 +1138,7 @@ impl App {
                 if self.eye_feel.battery == false && t % 6.0 < 0.1 {
                     self.eyes.mind.ask(eyes::Peek::Battery, now);
                 }
-                let sense = eyes::Sense { t: now, x: 0.0, y: 0.0, scale: 1.0, follow: 0.0, lift: 0.0, near: false, blocked: false, acted: false };
+                let sense = eyes::Sense { t: now, x: 0.0, y: 0.0, scale: 1.0, follow: 0.0, lift: 0.0, near: false, around: false, blocked: false, acted: false };
                 self.eye_feel = self.eyes.mind.tick(&sense);
                 self.eyes.step(self.eye_feel, dt);
                 return;
@@ -1712,6 +1712,7 @@ impl App {
             follow: (along / (w / 2.0 + 90.0)).clamp(-1.0, 1.0),
             lift: (dy / eyes::RANGE).clamp(0.0, 1.0) * 0.5,
             near: dx.hypot(dy) < eyes::RANGE,
+            around: dx.hypot(dy) < eyes::RANGE_OUT,
             blocked,
             acted: down || sys::key_idle_ms() < 700,
         };

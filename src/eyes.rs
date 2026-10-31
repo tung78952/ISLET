@@ -103,6 +103,13 @@ fn outline(look: Look, right: bool, gaze: f32, lift: f32) -> Vec<P> {
 
 /// How far the pointer can be from the notch for the eyes to notice it, in notch units.
 pub const RANGE: f32 = 170.0;
+/// How far it must go before they count it as gone, so its edge does not make them flicker.
+pub const RANGE_OUT: f32 = 230.0;
+/// A pointer must stay this long before they open: one just passing through is ignored.
+const NOTICE: f32 = 0.25;
+/// How long they watch a pointer leave before their lids drop, and then shut.
+const WATCH_LEAVE: f32 = 0.95;
+const DROP_LIDS: f32 = 0.3;
 /// Seconds of a resting pointer before they lose interest.
 const BORED: f32 = 3.0;
 /// The longest they stay out in one go; a pointer still moving around here is someone working.
@@ -170,6 +177,8 @@ pub struct Sense {
     pub follow: f32,
     pub lift: f32,
     pub near: bool,
+    /// Still within `RANGE_OUT`.
+    pub around: bool,
     /// Something more important has the notch: stepping aside, a card, the open panel.
     pub blocked: bool,
     /// The user clicked or typed: they are working, not playing with the eyes.
@@ -200,6 +209,8 @@ pub struct Mind {
     seed: u32,
     last: Option<(f32, f32, f32)>,
     awake: bool,
+    near_since: Option<f32>,
+    left_at: Option<f32>,
     since: f32,
     rest_until: f32,
     closing_until: f32,
@@ -229,6 +240,8 @@ impl Mind {
             seed: 0x2F6E_2B1D,
             last: None,
             awake: false,
+            near_since: None,
+            left_at: None,
             since: 0.0,
             rest_until: 0.0,
             closing_until: 0.0,
@@ -358,10 +371,14 @@ impl Mind {
             return self.asleep(t);
         }
         if !self.awake {
-            if !(s.near && moving && t >= self.rest_until) {
+            self.near_since = if s.near { self.near_since.or(Some(t)) } else { None };
+            let noticed = self.near_since.is_some_and(|at| t - at >= NOTICE);
+            if !(noticed && moving && t >= self.rest_until) {
                 return self.asleep(t);
             }
             self.awake = true;
+            self.near_since = None;
+            self.left_at = None;
             self.since = t;
             self.moved_at = t;
             self.fixed = s.follow;
@@ -380,9 +397,20 @@ impl Mind {
             return Feel { show: true, look: Look::Dizzy, ..Feel::ASLEEP };
         }
         let still = t - self.moved_at;
-        let rest = if !s.near {
-            Some(1.0)
-        } else if still > BORED {
+        // A pointer leaving is watched out of sight, then the lids drop slowly.
+        if s.around {
+            self.left_at = None;
+        } else {
+            let gone = t - *self.left_at.get_or_insert(t);
+            if gone >= WATCH_LEAVE + DROP_LIDS {
+                self.left_at = None;
+                self.sleep(t, 1.0);
+                return self.asleep(t);
+            }
+            let look = if gone < WATCH_LEAVE { Look::Neutral } else { Look::Sleepy };
+            return Feel { show: true, look, gaze: s.follow, lift: s.lift, ..Feel::ASLEEP };
+        }
+        let rest = if still > BORED {
             Some(REST_BORED)
         } else if t - self.since > LONGEST {
             Some(REST_WORKING)
@@ -863,7 +891,7 @@ mod tests {
     }
 
     fn sense(t: f32, x: f32) -> Sense {
-        Sense { t, x, y: 0.0, scale: 1.0, follow: 0.2, lift: 0.0, near: true, blocked: false, acted: false }
+        Sense { t, x, y: 0.0, scale: 1.0, follow: 0.2, lift: 0.0, near: true, around: true, blocked: false, acted: false }
     }
 
     /// Runs a moving pointer for `secs` and returns the mind and the last tick's time.
@@ -881,7 +909,8 @@ mod tests {
         let mut m = Mind::new();
         assert!(!m.tick(&sense(0.0, 100.0)).show);
         assert!(!m.tick(&sense(0.05, 100.0)).show, "a still pointer wakes nothing");
-        assert!(m.tick(&sense(0.1, 130.0)).show);
+        assert!(!m.tick(&sense(0.1, 130.0)).show, "a pointer passing through is ignored");
+        assert!(m.tick(&sense(0.3, 200.0)).show);
     }
 
     #[test]
@@ -922,8 +951,22 @@ mod tests {
     fn a_pointer_leaving_closes_them() {
         let mut m = Mind::new();
         let t = awake(&mut m, 0.5);
-        m.tick(&Sense { near: false, ..sense(t, t * 200.0) });
-        assert!(!m.tick(&Sense { near: false, ..sense(t + 0.3, 0.0) }).show);
+        let gone = |d: f32| Sense { near: false, around: false, ..sense(t + d, t * 200.0) };
+        assert!(m.tick(&gone(0.0)).show, "they watch it go");
+        assert_eq!(m.tick(&gone(0.6)).look, Look::Neutral);
+        assert_eq!(m.tick(&gone(1.1)).look, Look::Sleepy);
+        m.tick(&gone(1.3));
+        assert!(!m.tick(&gone(1.6)).show);
+    }
+
+    #[test]
+    fn the_edge_of_the_range_does_not_make_them_flicker() {
+        let mut m = Mind::new();
+        let t = awake(&mut m, 0.5);
+        for i in 0..40 {
+            let x = t * 200.0 + i as f32 * 8.0;
+            assert!(m.tick(&Sense { near: false, around: true, ..sense(t + i as f32 * 0.05, x) }).show);
+        }
     }
 
     #[test]
@@ -1068,7 +1111,7 @@ mod tests {
         // Moving on or leaving does not cut it short.
         let t = t + 0.8;
         for i in 0..30 {
-            let tick = Sense { near: i < 15, ..sense(t + i as f32 * 0.05, i as f32 * 80.0) };
+            let tick = Sense { near: i < 15, around: i < 15, ..sense(t + i as f32 * 0.05, i as f32 * 80.0) };
             assert_eq!(m.tick(&tick).look, Look::Dizzy, "at {i}");
         }
     }
