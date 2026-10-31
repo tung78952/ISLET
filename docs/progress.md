@@ -252,6 +252,15 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   the first half, detail in the second), so a taller phone card no longer shows both. The "Show
   message content" setting is gone: hovering showed the text anyway.
 
+- Round 22: eyes in the real notch (src/eyes.rs): lens outlines traced from design sheets, every
+  expression the same point count so they morph on springs. Mind wakes on a pointer arriving
+  (170 u from the notch), yields to step-aside, clicks, typing, cards and the open panel, tires
+  after 3 s still or 12 s moving. Eyes replace the lyric pill for a moment. Typing now steps the
+  notch aside only when the field touches the notch itself (no 24 u margin). Water card uses the
+  animated glass (src/anim.rs). Old cat mascot removed. Waiting: peeks on events, expression
+  wiring, bell on real cards, eight more icons (need images), character choice, eye CPU on its
+  own, moving the Spider-Man lenses out of the code before any release, removing ISLET_TIMELOG.
+
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
 2. Bluetooth/notice toast icons (currently a letter badge), mascot reactions.

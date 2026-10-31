@@ -566,13 +566,28 @@ pub fn draw(a: &mut App) {
         if base > 0.01 && h > 18.0 && !a.minimal() && !a.yielded {
             a.gfx.alpha = na * small_alpha * base;
             compact(a, left, w);
+        } else if a.yielded && a.eyes.show.x > 0.3 {
+            // The eyes shut as the notch leaves, inside its shrinking outline.
+            let clipped = a.gfx.push_notch_clip(cx, w, h, radius, ear);
+            a.gfx.alpha = 1.0;
+            eyes(a, left + w / 2.0, 14.8, (a.eyes.show.x.clamp(0.0, 1.0) - 0.3) / 0.7, 14.0);
+            if clipped {
+                a.gfx.pop_layer();
+            }
         }
         // While the notch steps aside only its sliver remains: nothing may be drawn over the app
         // below (reminders that need an answer keep their size and stay).
         let urgent = a.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break));
         if pm > 0.01 && a.lyric_line().is_some() && !a.yielded {
-            a.gfx.alpha = na * small_alpha * pm;
+            // The eyes take over from the lyrics for a moment, in a notch that keeps its size.
+            let show = a.eyes.show.x.clamp(0.0, 1.0);
+            a.gfx.alpha = na * small_alpha * pm * (1.0 - (show / 0.3).min(1.0));
             lyric_pill(a, left, w);
+            a.gfx.alpha = na * small_alpha * pm;
+            if show > 0.3 {
+                eyes(a, left + w / 2.0, h / 2.0, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
+            }
+            a.gfx.alpha = 1.0;
         }
         if tm > 0.01 && (!a.yielded || urgent) {
             let sw = a.toast_swap.x.clamp(0.0, 1.0);
@@ -612,17 +627,24 @@ pub fn draw(a: &mut App) {
 
 fn compact(a: &mut App, left: f32, w: f32) {
     let cy = 14.8;
-    let t = a.born.elapsed().as_secs_f32();
     let charging = a.power.is_some_and(|p| p.battery && p.ac);
+    let show = a.eyes.show.x.clamp(0.0, 1.0);
+    // The eyes have the notch to themselves: everything else steps back while they are open.
+    let rest = 1.0 - (show / 0.3).min(1.0);
     if charging {
-        icon::charging(&a.gfx, left + 20.0, cy, 8.2, GREEN, 1.0);
-    } else if a.settings.pet {
-        let look = ((a.mouse.0 - (left + 20.0)) / 80.0).clamp(-1.0, 1.0) * 1.0;
-        mascot(a, left + 20.0, cy, 20.0, t, look);
+        icon::charging(&a.gfx, left + 20.0, cy, 8.2, GREEN, rest);
     }
     let time = a.clock().time_label();
-    a.gfx.ui(&time, Rc::new(left, 5.0, w, 20.0), 16.0, 700, WHITE, 1.0, Align::C);
+    a.gfx.ui(&time, Rc::new(left, 5.0, w, 20.0), 16.0, 700, WHITE, rest, Align::C);
+    a.gfx.alpha = rest;
     right_indicator(a, left + w - 28.0, cy);
+    a.gfx.alpha = 1.0;
+    if show > 0.3 {
+        eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
+    }
+    if show > 0.01 || a.sample_running() {
+        a.loop_rect = Some(Rc::new(left + 2.0, 0.0, w - 4.0, 30.0));
+    }
 }
 
 /// Equalizer bars while music plays, or the focus-timer pie while it runs.
@@ -648,18 +670,45 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
     }
 }
 
-fn mascot(a: &mut App, cx: f32, cy: f32, s: f32, t: f32, look: f32) {
-    const FUR: u32 = 0xF7C873;
+/// White mask lenses with a thin red rim, as on the design sheet.
+fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
+    const RED: u32 = 0xFF1F1F;
+    /// Notch units per pixel of the design sheet.
+    const SCALE: f32 = 0.175;
+    let e = &a.eyes;
+    let lean = e.lean.x;
+    let t = a.born.elapsed().as_secs_f32();
+    let breath = 0.35 * (t * 1.7).sin();
     let g = &a.gfx;
-    g.triangle([(cx - s * 0.42, cy - s * 0.08), (cx - s * 0.34, cy - s * 0.52), (cx - s * 0.08, cy - s * 0.34)], FUR, 1.0);
-    g.triangle([(cx + s * 0.42, cy - s * 0.08), (cx + s * 0.34, cy - s * 0.52), (cx + s * 0.08, cy - s * 0.34)], FUR, 1.0);
-    g.fill_circle(cx, cy + s * 0.04, s * 0.46, s * 0.4, FUR, 1.0);
-    let blink = if t % 3.7 < 0.13 { 0.15 } else { 1.0 };
-    for side in [-1.0f32, 1.0] {
-        g.fill_circle(cx + side * s * 0.16 + look, cy + s * 0.02, s * 0.06, s * 0.09 * blink, 0x2B1D0E, 1.0);
-        g.fill_circle(cx + side * s * 0.29, cy + s * 0.17, s * 0.07, s * 0.04, 0xFF8A80, 0.7);
+    for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + p.1 * SCALE)).collect();
+        g.glow_ellipse(cx + lean * reach + side * 32.0, cy, 28.0, 16.0, RED, 0.3 * show);
+        let lens = show * (1.0 - e.dizzy.x.clamp(0.0, 1.0));
+        g.fill_poly(&outline, WHITE, lens);
+        let mut rim = outline;
+        rim.push(rim[0]);
+        g.polyline(&rim, 1.6, RED, lens);
+        let (ex, ey) = (cx + lean * reach + side * 29.0, cy + breath + e.hop.x);
+        let dizzy = e.dizzy.x.clamp(0.0, 1.0);
+        if dizzy > 0.01 {
+            let turn = t * 7.0 * side;
+            let spiral: Vec<(f32, f32)> = (0..=44)
+                .map(|n| {
+                    let k = n as f32 / 44.0;
+                    let a = turn + k * 15.0;
+                    (ex + 15.0 * k * a.cos(), ey + 10.5 * k * a.sin())
+                })
+                .collect();
+            g.polyline(&spiral, 3.6, RED, show * dizzy);
+            g.polyline(&spiral, 1.7, WHITE, show * dizzy);
+        }
+        let tear = e.tear.x.clamp(0.0, 1.0);
+        if tear > 0.01 {
+            let k = (t % 1.5) / 1.5;
+            let dy = 9.0 + 5.0 * k * k;
+            g.droplet(cx + side * 52.0, cy + dy, 4.2, WHITE, show * tear * (1.0 - k * k));
+        }
     }
-    g.fill_circle(cx + look, cy + s * 0.14, s * 0.035, s * 0.025, 0x2B1D0E, 1.0);
 }
 
 fn lyric_pill(a: &mut App, left: f32, w: f32) {
@@ -1084,6 +1133,24 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         (b1, b2)
     };
     match kind {
+        ToastKind::Sample(i) => {
+            // Nothing on the right, so the icon and text sit together in the middle of the card.
+            const ICON: f32 = 54.0;
+            const GAP: f32 = 14.0;
+            let cy = h / 2.0;
+            let clock = a.born.elapsed().as_secs_f32();
+            let text_w = a.gfx.measure(title, 15.0, 700).max(a.gfx.measure(value, 11.5, 400));
+            let x0 = left + (w - (ICON + GAP + text_w)) / 2.0;
+            let ix = x0 + ICON / 2.0;
+            match i {
+                0 => crate::anim::water(&a.gfx, ix, cy, 22.0, clock),
+                _ => crate::anim::bell(&a.gfx, ix, cy, 22.0, clock, 0xFDB825),
+            }
+            let tx = x0 + ICON + GAP;
+            a.gfx.ui(title, Rc::new(tx, cy - 17.6, text_w + 8.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+            a.gfx.ui(value, Rc::new(tx, cy + 2.4, text_w + 8.0, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+            a.loop_rect = Some(Rc::new(x0 - 2.0, 0.0, ICON + 4.0, h));
+        }
         ToastKind::Message => {
             // iPhone lock-screen style: app icon, sender + "now", then two lines of message.
             let k = (age / 0.35).clamp(0.0, 1.0);
@@ -1315,8 +1382,12 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         }
         ToastKind::Water => {
             let (b1, b2) = buttons(62.0, 56.0);
-            let c = Card { accent: CYAN, dark: 0x0B2A33, badge: Glyph::Drop, shake: 0.16, ring: None, reserve: b2.x + b2.w - b1.x + 14.0 };
-            card(a, left, w, h, t, title, value, &c);
+            let (ix, cy, tx) = (left + 38.0, h / 2.0, left + 70.0);
+            crate::anim::water(&a.gfx, ix, cy, 22.0, a.born.elapsed().as_secs_f32());
+            let tw = b1.x - tx - 8.0;
+            a.gfx.ui(title, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+            a.gfx.ui(value, Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
+            a.loop_rect = Some(Rc::new(ix - 24.0, 0.0, 48.0, h));
             later_button(a, b1, t, live);
             card_button(a, b2, "Drank", 0x1E50C8, 0xDCE8FF, live, Act::LumaDone);
         }

@@ -1,9 +1,11 @@
 #![windows_subsystem = "windows"]
 //! Islet: a living notch for Windows.
 
+mod anim;
 mod bt;
 mod devices;
 mod drop;
+mod eyes;
 mod gfx;
 mod luma;
 mod media;
@@ -105,12 +107,12 @@ impl Spring {
     pub const fn new(x: f32, k: f32, c: f32) -> Self {
         Spring { x, v: 0.0, k, c }
     }
-    fn tune(&mut self, k: f32, c: f32) {
+    pub fn tune(&mut self, k: f32, c: f32) {
         self.k = k;
         self.c = c;
     }
     /// Returns true while still moving.
-    fn step(&mut self, target: f32, dt: f32) -> bool {
+    pub fn step(&mut self, target: f32, dt: f32) -> bool {
         self.v += (-(self.x - target) * self.k - self.c * self.v) * dt;
         self.x += self.v * dt;
         if self.v.abs() < 0.05 && (self.x - target).abs() < 0.002 * target.abs().max(1.0) {
@@ -152,6 +154,8 @@ pub enum ToastKind {
     LumaApp,
     /// Someone is calling (Accept / Decline): caller in `value`, app in `title`.
     Call,
+    /// Preview of an animated icon.
+    Sample(u8),
 }
 
 impl ToastKind {
@@ -159,6 +163,7 @@ impl ToastKind {
         matches!(
             self,
             ToastKind::Bluetooth(_)
+                | ToastKind::Sample(_)
                 | ToastKind::Device(_)
                 | ToastKind::Notice
                 | ToastKind::Message
@@ -212,6 +217,13 @@ pub struct Form {
     pub digits: String,
     /// 0 = title field, 1 = time field.
     pub field: u8,
+}
+
+/// Left, top, right, bottom in layout units.
+type Zone = (f32, f32, f32, f32);
+
+fn touches(a: Zone, b: Zone) -> bool {
+    a.0 <= b.2 && a.2 >= b.0 && a.1 <= b.3 && a.3 >= b.1
 }
 
 /// Fixed state for pixel comparisons against reference captures (ISLET_DEMO).
@@ -472,6 +484,10 @@ pub struct App {
     zone_every: u32,
     /// Capture exclusion stays on until this moment after the last message card.
     private_until: Option<Instant>,
+    pub eyes: eyes::Eyes,
+    eye_feel: eyes::Feel,
+    /// Preview run (ISLET_DEMO "sample=eyes|0|1"): start and what it shows.
+    sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
     pub device_kind: devices::DeviceKind,
     pub device_root: Option<String>,
@@ -544,6 +560,7 @@ pub struct App {
     buttons_down: bool,
     /// The last click landed in the zone next to the notch (likely focusing a field there).
     click_in_zone: bool,
+    click_covered: bool,
     /// Cursor position when the hover timer was armed (expand only once the cursor rests).
     hover_anchor: (f32, f32),
     /// Screen capture exclusion currently applied (message privacy).
@@ -672,6 +689,9 @@ impl App {
             drawn_minute: u32::MAX,
             zone_every: 50,
             private_until: None,
+            eyes: eyes::Eyes::new(),
+            eye_feel: eyes::Feel::ASLEEP,
+            sample: None,
             device_kind: devices::DeviceKind::Other,
             device_root: None,
             devices: None,
@@ -712,6 +732,7 @@ impl App {
             near_since: None,
             buttons_down: false,
             click_in_zone: false,
+            click_covered: false,
             hover_anchor: (0.0, 0.0),
             private: false,
             aurora_lvl: Spring::new(0.0, 60.0, 15.0),
@@ -964,6 +985,67 @@ impl App {
         (None, String::new())
     }
 
+    pub fn sample_running(&self) -> bool {
+        self.sample.is_some()
+    }
+
+    /// Plays the eyes and icons on a fixed timeline for review.
+    fn sample_step(&mut self, dt: f32) {
+        let Some((start, what)) = self.sample.clone() else { return };
+        let t = start.elapsed().as_secs_f32();
+        let (eyes_at, card) = match what.as_str() {
+            "eyes" => (Some(t % 17.5), None),
+            n => (None, n.parse::<u8>().ok()),
+        };
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let centre = self.pos.0 as f32 + WIN_W * self.gfx.scale / 2.0;
+        let cursor = ((pt.x as f32 - centre) / (200.0 * self.gfx.scale)).clamp(-1.0, 1.0);
+        use eyes::Look;
+        let (look, gaze) = match eyes_at {
+            Some(e) if e < 2.4 => (Look::Neutral, cursor),
+            Some(e) if e < 3.0 => (Look::Neutral, -0.9),
+            Some(e) if e < 3.6 => (Look::Neutral, 0.9),
+            Some(e) if e < 4.5 => (Look::Wink, 0.0),
+            Some(e) if e < 5.6 => (Look::Happy, 0.0),
+            Some(e) if e < 6.5 => (Look::Surprised, 0.0),
+            Some(e) if e < 7.5 => (Look::Squint, 0.0),
+            Some(e) if e < 8.8 => (Look::Sleepy, 0.0),
+            Some(e) if e < 9.7 => (Look::Angry, 0.0),
+            Some(e) if e < 10.6 => (Look::Sad, 0.0),
+            Some(e) if e < 11.8 => (Look::Cry, 0.0),
+            Some(e) if e < 12.7 => (Look::Love, 0.0),
+            Some(e) if e < 14.0 => (Look::Dizzy, 0.0),
+            Some(e) if e < 14.8 => (Look::Up, 0.0),
+            Some(e) if e < 15.6 => (Look::Down, 0.0),
+            Some(e) if e < 16.4 => (Look::Smug, 0.0),
+            _ => (Look::Closed, 0.0),
+        };
+        let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
+        self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, lift: 0.0 }, dt);
+        let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
+        if shown != card {
+            match card {
+                Some(i) => {
+                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa")][i as usize % 2];
+                    self.toast(ToastKind::Sample(i), title, sub, None);
+                    if let Some(t) = self.toast.as_mut() {
+                        t.until = Instant::now() + Duration::from_secs(3600);
+                        // A held card measures the running icon, not the arrival.
+                        t.born -= Duration::from_secs(6);
+                    }
+                }
+                None => {
+                    if let Some(t) = self.toast.as_mut() {
+                        t.until = Instant::now();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn kick(&mut self) {
         self.springs_moving = true;
         if !self.animating {
@@ -1011,6 +1093,10 @@ impl App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
+        self.sample_step(dt);
+        if self.sample.is_none() {
+            self.eyes.step(self.eye_feel, dt);
+        }
         // Pages set without go_page (startup, demo) snap the dots instead of sliding.
         let pages = Page::ALL.len() as f32;
         if (self.dot_target.rem_euclid(pages).round() as usize) % Page::ALL.len() != self.page.index() {
@@ -1097,6 +1183,10 @@ impl App {
     /// Looping visuals (the equalizer) that need frames even when no spring moves.
     fn continuous(&self) -> bool {
         self.effects()
+            || self.sample.is_some()
+            || self.eye_feel.show
+            || self.eyes.show.x > 0.01
+            || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Water)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
     }
@@ -1295,10 +1385,9 @@ impl App {
     /// Polled every 50 ms: arms the window-wide drop zone while a button is held near the notch,
     /// and closes the shelf once the cursor has left after a drop.
     /// Notch footprint ignoring any yield, with a working margin around it, in layout units.
-    fn yield_zone(&self) -> (f32, f32, f32, f32) {
+    fn yield_zone(&self, m: f32) -> Zone {
         let [w, h] = self.base_target();
         let cx = WIN_W / 2.0;
-        let m = 24.0;
         (cx - w / 2.0 - m, 0.0, cx + w / 2.0 + m, h + m)
     }
 
@@ -1312,7 +1401,14 @@ impl App {
         let s = self.gfx.scale;
         let (wx, wy) = (self.pos.0 as f32, self.pos.1 as f32);
         let to_u = |x: i32, y: i32| ((x as f32 - wx) / s, (y as f32 - wy) / s);
-        let (x0, y0, x1, y1) = self.yield_zone();
+        let (x0, y0, x1, y1) = self.yield_zone(24.0);
+        // Typing only counts when the notch really covers it: a wide field that merely passes
+        // below the notch is not hidden by it.
+        let covered = self.yield_zone(0.0);
+        let rect_of = |r: RECT| {
+            let ((l, t), (rt, b)) = (to_u(r.left, r.top), to_u(r.right, r.bottom));
+            (l, t, rt, b)
+        };
         let in_zone = |(x, y): (f32, f32)| x >= x0 && x <= x1 && y >= y0 && y <= y1;
         let cur = to_u(pt.x, pt.y);
         let now = Instant::now();
@@ -1325,6 +1421,7 @@ impl App {
         let clicked = (down && !self.buttons_down) || (l & 1) != 0 || (r & 1) != 0;
         if clicked {
             self.click_in_zone = in_zone(cur) && !self.mouse_in;
+            self.click_covered = touches((cur.0, cur.1, cur.0, cur.1), covered) && !self.mouse_in;
             if self.click_in_zone {
                 reason = true;
             }
@@ -1342,22 +1439,12 @@ impl App {
         // 3. Typing into a field that sits under the notch.
         if sys::key_idle_ms() < 1000 {
             match sys::caret_rect() {
-                Some(r) => {
-                    if in_zone(to_u(r.left, r.top)) || in_zone(to_u(r.right, r.bottom)) {
-                        reason = true;
-                    }
-                }
+                Some(r) => reason |= touches(rect_of(r), covered),
                 // Chromium/Electron apps report no Win32 caret: ask UI Automation for the focused
                 // field, else assume it is where the last click landed.
                 None => match sys::focused_rect() {
-                    Some(r) => {
-                        let (l, t) = to_u(r.left, r.top);
-                        let (rr, b) = to_u(r.right, r.bottom);
-                        if l <= x1 && rr >= x0 && t <= y1 && b >= y0 {
-                            reason = true;
-                        }
-                    }
-                    None => reason |= self.click_in_zone,
+                    Some(r) => reason |= touches(rect_of(r), covered),
+                    None => reason |= self.click_covered,
                 },
             }
         }
@@ -1392,11 +1479,46 @@ impl App {
         self.render();
     }
 
+    /// Tells the eyes what is happening. Whatever the user is doing outranks them, so they never
+    /// touch the step-aside rule: they only watch it.
+    fn sense_eyes(&mut self, pt: POINT, down: bool) {
+        let s = self.gfx.scale;
+        let [w, h] = self.base_target();
+        let (ux, uy) = ((pt.x as f32 - self.pos.0 as f32) / s, (pt.y as f32 - self.pos.1 as f32) / s);
+        let along = ux - WIN_W / 2.0;
+        let (dx, dy) = ((along.abs() - w / 2.0).max(0.0), (uy - h).max(0.0));
+        let held = self.no_hover_until.is_some_and(|t| Instant::now() < t);
+        let sense = eyes::Sense {
+            t: self.born.elapsed().as_secs_f32(),
+            x: pt.x as f32,
+            y: pt.y as f32,
+            scale: s,
+            follow: (along / (w / 2.0 + 90.0)).clamp(-1.0, 1.0),
+            lift: (dy / eyes::RANGE).clamp(0.0, 1.0) * 0.5,
+            near: dx.hypot(dy) < eyes::RANGE,
+            blocked: !self.settings.pet
+                || self.minimal()
+                || self.yielded
+                || held
+                || self.hidden
+                || self.mouse_in
+                || self.mode != Mode::Compact
+                || self.toast.is_some()
+                || self.drag_over,
+            acted: down || sys::key_idle_ms() < 700,
+        };
+        self.eye_feel = self.eyes.mind.tick(&sense);
+        if self.eye_feel.show {
+            self.kick();
+        }
+    }
+
     fn poll_drag_zone(&mut self) {
         let mut pt = POINT::default();
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         let _ = unsafe { GetCursorPos(&mut pt) };
         self.poll_yield(pt);
+        self.sense_eyes(pt, down);
         // Fast polling only matters with the pointer near the notch, a button held or typing;
         // otherwise four checks a second are enough.
         let s = self.gfx.scale;
@@ -3098,6 +3220,10 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.storm = Some(Box::new(storm::Storm::new(secs, seed, log)));
         storm::timer(a.hwnd);
     }
+    if let Some(v) = kv.get("sample") {
+        a.sample = Some((Instant::now(), v.to_string()));
+        a.kick();
+    }
     if let Some(deg) = kv.get("sun").and_then(|v| v.parse::<f32>().ok()) {
         a.sun_rot.x = deg;
         a.sun_target = deg;
@@ -3170,5 +3296,18 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::touches;
+
+    #[test]
+    fn a_wide_field_below_the_notch_is_not_covered_by_it() {
+        let notch = (300.0, 0.0, 450.0, 30.0);
+        assert!(!touches((0.0, 46.0, 1600.0, 80.0), notch), "address bar under the notch");
+        assert!(touches((0.0, 20.0, 1600.0, 60.0), notch), "a field reaching into the notch");
+        assert!(!touches((0.0, 0.0, 200.0, 60.0), notch), "a field beside the notch");
     }
 }

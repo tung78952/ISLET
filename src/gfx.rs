@@ -473,7 +473,24 @@ impl Gfx {
     /// Clips subsequent drawing to the notch shape (so light effects never spill past its rim).
     pub fn push_notch_clip(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32) -> bool {
         let Some(g) = self.notch_geom(cx, w, h, r, ear) else { return false };
-        let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(&g) else { return false };
+        self.push_mask(&g)
+    }
+
+    /// Clips drawing to a closed outline until `pop_layer`.
+    pub fn push_outline_clip(&self, pts: &[(f32, f32)]) -> bool {
+        let Some((first, rest)) = pts.split_first() else { return false };
+        let g = self.path(|p| unsafe {
+            p.BeginFigure(v2(first.0, first.1), D2D1_FIGURE_BEGIN_FILLED);
+            for q in rest {
+                p.AddLine(v2(q.0, q.1));
+            }
+            p.EndFigure(D2D1_FIGURE_END_CLOSED);
+        });
+        g.is_some_and(|g| self.push_mask(&g))
+    }
+
+    fn push_mask(&self, g: &ID2D1PathGeometry) -> bool {
+        let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(g) else { return false };
         unsafe {
             let Ok(layer) = self.rt.CreateLayer(None) else { return false };
             let mut params = D2D1_LAYER_PARAMETERS {
@@ -579,6 +596,20 @@ impl Gfx {
             p.BeginFigure(v2(cx + pts[0].0 * s, cy + pts[0].1 * s), D2D1_FIGURE_BEGIN_FILLED);
             for &(x, y) in &pts[1..] {
                 p.AddLine(v2(cx + x * s, cy + y * s));
+            }
+            p.EndFigure(D2D1_FIGURE_END_CLOSED);
+        });
+        if let Some(g) = g {
+            self.fill_geom(&g, hex, a);
+        }
+    }
+
+    pub fn fill_poly(&self, pts: &[(f32, f32)], hex: u32, a: f32) {
+        let Some((first, rest)) = pts.split_first() else { return };
+        let g = self.path(|p| unsafe {
+            p.BeginFigure(v2(first.0, first.1), D2D1_FIGURE_BEGIN_FILLED);
+            for q in rest {
+                p.AddLine(v2(q.0, q.1));
             }
             p.EndFigure(D2D1_FIGURE_END_CLOSED);
         });
