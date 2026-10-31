@@ -82,6 +82,8 @@ pub const PEEK: [f32; 2] = [208.0, 52.0];
 pub const EXPANDED: [f32; 2] = [420.0, 140.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
+/// A pause shorter than this leaves the equalizer running.
+const EQ_HOLD_MS: u64 = 500;
 pub const TOAST: [f32; 2] = [320.0, 36.0];
 /// Two-line toasts (Bluetooth devices, app notifications); the water reminder adds buttons.
 pub const TALL_TOAST: [f32; 2] = [320.0, 56.0];
@@ -490,6 +492,9 @@ pub struct App {
     pub eyes: eyes::Eyes,
     eye_feel: eyes::Feel,
     pub mini: eyes::Mini,
+    /// How far the equalizer bars are up (0..1), and when music was last heard of.
+    pub eq_mix: Spring,
+    last_playing: Instant,
     meter_on: bool,
     mini_busy: bool,
     /// A reminder held back for a moment while the eyes look down at it.
@@ -704,6 +709,8 @@ impl App {
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
             mini: eyes::Mini::new(),
+            eq_mix: Spring::new(0.0, 170.0, 24.0),
+            last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
             card_after: None,
@@ -1203,6 +1210,11 @@ impl App {
         let fade_target = if self.expanded() { 1.0 } else { 0.0 };
         let toast_target = if self.toast.is_some() { 1.0 } else { 0.0 };
         let pill_target = if self.toast.is_none() && self.playing() && self.lyric_line().is_some() { 1.0 } else { 0.0 };
+        // Moving to the next video pauses for an instant: the bars ride through it.
+        if self.playing() {
+            self.last_playing = now;
+        }
+        let eq_target = if now.duration_since(self.last_playing) < Duration::from_millis(EQ_HOLD_MS) { 1.0 } else { 0.0 };
         for _ in 0..n {
             moving |= self.sw.step(t[0], sub);
             moving |= self.sh.step(t[1], sub);
@@ -1210,6 +1222,7 @@ impl App {
             moving |= self.slide.step(0.0, sub);
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
+            moving |= self.eq_mix.step(eq_target, sub);
             self.mini_busy = self.mini.step(self.born.elapsed().as_secs_f32(), sub);
             moving |= self.intro.step(0.0, sub);
             moving |= self.intro_grow.step(1.0, sub);
@@ -1270,6 +1283,7 @@ impl App {
         self.effects()
             || self.sample.is_some()
             || self.mini_busy
+            || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
             || !self.hidden && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Task | ToastKind::Remind(_)))
