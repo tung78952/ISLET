@@ -306,6 +306,14 @@ impl Brain {
         self.save_stats();
     }
 
+    /// Changes the care settings and reschedules for them.
+    pub fn configure(&mut self, change: impl FnOnce(&mut Config), now: DateTime<Local>) {
+        let old = self.cfg.clone();
+        change(&mut self.cfg);
+        self.sched.reconfigure(&old, &self.cfg, now);
+        self.save_config();
+    }
+
     pub fn set_water_enabled(&mut self, on: bool, now: DateTime<Local>) {
         let old = self.cfg.clone();
         self.cfg.reminders.water.enabled = on;

@@ -637,6 +637,8 @@ pub struct Jam {
     pub side: f32,
     pub style: usize,
     seed: u32,
+    /// The shortest wait between two turns; the longest is twice that.
+    pub gap: f32,
     /// Notes in the air: when each left and whether it is the beamed one.
     pub notes: Vec<(f32, f32, bool)>,
 }
@@ -648,7 +650,7 @@ const JAM_LENGTH: f32 = 6.0;
 
 impl Jam {
     pub fn new() -> Self {
-        Jam { next: 0.0, until: 0.0, side: 1.0, style: 0, seed: 0x7A3C_11D3, notes: Vec::new() }
+        Jam { next: 0.0, until: 0.0, side: 1.0, style: 0, seed: 0x7A3C_11D3, gap: 60.0, notes: Vec::new() }
     }
 
     fn roll(&mut self) -> f32 {
@@ -661,7 +663,7 @@ impl Jam {
     /// Time passes; returns whether the bar is out. Not `allowed`: it goes back at once.
     pub fn tick(&mut self, t: f32, allowed: bool) -> bool {
         if self.next == 0.0 {
-            self.next = t + 60.0 + 60.0 * self.roll();
+            self.next = t + self.gap + self.gap * self.roll();
         }
         if !allowed {
             self.until = self.until.min(t);
@@ -677,7 +679,7 @@ impl Jam {
         self.side = if self.roll() < 0.5 { -1.0 } else { 1.0 };
         self.style = (self.style + 1 + (self.roll() * 2.0) as usize) % JAM_POSES.len();
         self.until = t + JAM_LENGTH;
-        self.next = self.until + 60.0 + 60.0 * self.roll();
+        self.next = self.until + self.gap + self.gap * self.roll();
         self.notes.clear();
     }
 

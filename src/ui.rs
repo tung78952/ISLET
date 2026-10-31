@@ -76,6 +76,8 @@ pub enum Act {
     WaterReset,
     /// A rolling picker: it is dragged, turned and tapped, not clicked.
     Wheel(WheelId),
+    Panel(Option<Panel>),
+    Set(SetKey),
     ReminderAdd,
     ReminderEdit(usize),
     ReminderSwitch(usize),
@@ -1584,7 +1586,7 @@ fn header(a: &mut App, lx: f32) {
     let dw = a.gfx.measure(&date, 13.0, 400);
     a.gfx.ui(&time, Rc::new(lx + 163.0 + dw + 7.0, 8.0, 60.0, 20.0), 13.0, 700, WHITE, 1.0, Align::L);
     // The bell appears once there is something to look back at.
-    if !a.history.is_empty() {
+    if !a.history.is_empty() && a.panel.is_none() {
         let bell = Rc::new(lx + 346.0, 7.0, 24.0, 22.0);
         let h = btn(a, bell, 0.1);
         icon::bell(&a.gfx, bell.cx(), bell.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
@@ -1598,7 +1600,23 @@ fn header(a: &mut App, lx: f32) {
         a.gfx.unzoom();
         hit(a, bell, Act::History(true));
     }
-    right_indicator(a, lx + 390.8, 18.0);
+    if a.panel.is_none() {
+        right_indicator(a, lx + 390.8, 18.0);
+    }
+    // Every page has its settings a click away.
+    if a.panel.is_none() && !a.water_settings {
+        let gear = Rc::new(lx + 110.0, 8.0, 20.0, 20.0);
+        let h = btn(a, gear, 0.15);
+        icon::sliders(&a.gfx, gear.cx(), gear.cy(), mix(0x8A8A8A, WHITE, h), 1.0);
+        a.gfx.unzoom();
+        hit(a, gear, match a.page {
+            Page::Music => Act::Panel(Some(Panel::Music)),
+            Page::Pomo => Act::Panel(Some(Panel::Focus)),
+            Page::Water => Act::WaterSettings(true),
+            Page::Shelf => Act::Panel(Some(Panel::General)),
+            Page::Todo => Act::Panel(Some(Panel::Care)),
+        });
+    }
 }
 
 fn chevrons(a: &mut App, lx: f32) {
@@ -1702,7 +1720,7 @@ fn expanded(a: &mut App, lx: f32) {
         history(a, lx);
         return;
     }
-    let settings = a.page == Page::Water && a.water_settings;
+    let settings = a.page == Page::Water && a.water_settings || a.panel.is_some();
     let lyr = if a.page == Page::Music { a.lyr_mix.x.clamp(0.0, 1.0) } else { 0.0 };
     let base = a.gfx.alpha;
     a.gfx.alpha = base * (1.0 - lyr);
@@ -1740,6 +1758,10 @@ fn expanded(a: &mut App, lx: f32) {
 }
 
 fn page(a: &mut App, p: Page, lx: f32) {
+    if let Some(open) = a.panel {
+        panel(a, lx, open);
+        return;
+    }
     match p {
         Page::Music => music(a, lx),
         Page::Pomo => pomo(a, lx),
@@ -2261,6 +2283,131 @@ pub enum WheelId {
     BedMinute,
     FormHour,
     FormMinute,
+    FocusWork,
+    FocusRest,
+    FocusRounds,
+    LyricSize,
+}
+
+/// The settings panels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    General,
+    Focus,
+    Care,
+    Music,
+}
+
+/// A setting flipped or stepped from a panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SetKey {
+    Banners,
+    Text,
+    Eyes,
+    Jam,
+    Autostart,
+    Minimal,
+    Stretch,
+    RestEyes,
+    Breathe,
+    Sleep,
+    Care,
+    Lyrics,
+}
+
+/// A label and a switch.
+fn switch_row(a: &mut App, x: f32, y: f32, w: f32, label: &str, on: bool, key: SetKey) {
+    a.gfx.ui(label, Rc::new(x, y, w - 36.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
+    toggle(a, Rc::new(x + w - 30.0, y + 3.0, 28.0, 16.0), on, Act::Set(key));
+}
+
+/// A label and a value that steps on when pressed.
+fn choice_row(a: &mut App, x: f32, y: f32, w: f32, label: &str, value: &str, key: SetKey) {
+    a.gfx.ui(label, Rc::new(x, y, w - 76.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
+    let r = Rc::new(x + w - 72.0, y + 1.0, 70.0, 20.0);
+    let h = btn(a, r, 0.06);
+    a.gfx.fill_rrect(r, 10.0, mix(0x2A2A2C, 0x48484C, h), 1.0);
+    a.gfx.ui(value, r, 10.5, 600, WHITE, 1.0, Align::C);
+    a.gfx.unzoom();
+    hit(a, r, Act::Set(key));
+}
+
+fn panel(a: &mut App, lx: f32, p: Panel) {
+    let back = Rc::new(lx + 19.0, 8.0, 22.0, 22.0);
+    let h = btn(a, back, 0.18);
+    a.gfx.fill_circle(lx + 30.0, 19.2, 8.8, 8.8, mix(CHEVRON, 0x8A8A8A, h), 1.0);
+    icon::chevron(&a.gfx, lx + 30.0, 19.2, true, 0x000000, 1.0);
+    a.gfx.unzoom();
+    hit(a, back, Act::Panel(None));
+    let title = match p {
+        Panel::General => "Cài đặt",
+        Panel::Focus => "Tập trung",
+        Panel::Care => "Chăm sóc",
+        Panel::Music => "Nhạc",
+    };
+    a.gfx.ui(title, Rc::new(lx + 46.0, 8.2, 120.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
+    if p != Panel::General {
+        let r = Rc::new(lx + 346.0, 9.0, 52.0, 20.0);
+        let h = btn(a, r, 0.06);
+        a.gfx.fill_rrect(r, 10.0, mix(0x1E1E20, 0x3A3A3C, h), 1.0);
+        a.gfx.ui("Chung", r, 10.5, 400, 0xC8C8C8, 1.0, Align::C);
+        a.gfx.unzoom();
+        hit(a, r, Act::Panel(Some(Panel::General)));
+    }
+    const LEFT: f32 = 30.0;
+    const RIGHT: f32 = 222.0;
+    const W: f32 = 170.0;
+    const ROWS: [f32; 3] = [46.0, 76.0, 106.0];
+    match p {
+        Panel::General => {
+            let s = &a.settings;
+            let (banners, text, eyes, jam, minimal) = (s.hide_banners, s.show_text, s.pet, s.jam_mode, s.minimal);
+            let autostart = crate::sys::autostart_enabled();
+            switch_row(a, lx + LEFT, ROWS[0], W, "Ẩn banner Windows", banners, SetKey::Banners);
+            switch_row(a, lx + LEFT, ROWS[1], W, "Hiện nội dung ngay", text, SetKey::Text);
+            switch_row(a, lx + LEFT, ROWS[2], W, "Khởi động cùng máy", autostart, SetKey::Autostart);
+            switch_row(a, lx + RIGHT, ROWS[0], W, "Đôi mắt", eyes, SetKey::Eyes);
+            choice_row(a, lx + RIGHT, ROWS[1], W, "Mắt nhún", ["Tắt", "1–2 phút", "3–5 phút"][jam as usize], SetKey::Jam);
+            switch_row(a, lx + RIGHT, ROWS[2], W, "Notch tối giản", minimal, SetKey::Minimal);
+        }
+        Panel::Focus => {
+            const CY: f32 = 92.0;
+            a.gfx.fill_rrect(Rc::new(lx + 56.0, CY - 11.0, 306.0, 22.0), 7.0, 0xFFFFFF, 0.09);
+            for (label, x) in [("Làm", 62.0), ("Nghỉ", 164.0), ("Số vòng", 266.0)] {
+                a.gfx.ui(label, Rc::new(lx + x, 44.0, 90.0, 13.0), 10.0, 400, 0x808080, 1.0, Align::C);
+            }
+            let work: Vec<String> = (1..=18).map(|m| format!("{} phút", m * 5)).collect();
+            let rest: Vec<String> = (1..=30).map(|m| format!("{m} phút")).collect();
+            let rounds: Vec<String> = (1..=8).map(|n| n.to_string()).collect();
+            wheel(a, WheelId::FocusWork, Rc::new(lx + 62.0, CY - 30.0, 90.0, 60.0), &work);
+            wheel(a, WheelId::FocusRest, Rc::new(lx + 164.0, CY - 30.0, 90.0, 60.0), &rest);
+            wheel(a, WheelId::FocusRounds, Rc::new(lx + 266.0, CY - 30.0, 90.0, 60.0), &rounds);
+        }
+        Panel::Care => {
+            let cfg = &a.brain.cfg;
+            let r = &cfg.reminders;
+            let (stretch, eyes, breathe, sleep) = (r.stretch.enabled, r.eyes.enabled, r.breathe.enabled, r.sleep.enabled);
+            let level = match cfg.care {
+                crate::luma::config::Care::Light => "Nhẹ",
+                crate::luma::config::Care::Normal => "Vừa",
+                crate::luma::config::Care::Strict => "Mạnh",
+            };
+            switch_row(a, lx + LEFT, ROWS[0], W, "Giãn cơ", stretch, SetKey::Stretch);
+            switch_row(a, lx + LEFT, ROWS[1], W, "Nghỉ mắt", eyes, SetKey::RestEyes);
+            switch_row(a, lx + LEFT, ROWS[2], W, "Hít thở", breathe, SetKey::Breathe);
+            switch_row(a, lx + RIGHT, ROWS[1], W, "Đi ngủ", sleep, SetKey::Sleep);
+            choice_row(a, lx + RIGHT, ROWS[2], W, "Mức nhắc", level, SetKey::Care);
+        }
+        Panel::Music => {
+            let on = a.lyrics_on;
+            switch_row(a, lx + LEFT, ROWS[0], W, "Hiện lời bài hát", on, SetKey::Lyrics);
+            const CY: f32 = 92.0;
+            a.gfx.ui("Cỡ chữ lời", Rc::new(lx + LEFT, CY - 11.0, 120.0, 22.0), 12.5, 400, 0xE4E4E4, 1.0, Align::L);
+            a.gfx.fill_rrect(Rc::new(lx + 170.0, CY - 11.0, 70.0, 22.0), 7.0, 0xFFFFFF, 0.09);
+            let sizes: Vec<String> = (15..=26).map(|s| s.to_string()).collect();
+            wheel(a, WheelId::LyricSize, Rc::new(lx + 170.0, CY - 30.0, 70.0, 60.0), &sizes);
+        }
+    }
 }
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.

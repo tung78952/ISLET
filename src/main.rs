@@ -468,7 +468,9 @@ pub struct App {
     pub water_sub: u8,
     pub water_settings: bool,
     /// The rolling pickers on show, by what they set.
-    pub wheels: [wheel::Wheel; 6],
+    pub wheels: [wheel::Wheel; 10],
+    /// The settings panel on show, instead of the page.
+    pub panel: Option<ui::Panel>,
     wheel_held: Option<ui::WheelId>,
     wheels_moving: bool,
     pub old_notes: bool,
@@ -698,7 +700,8 @@ impl App {
             page: Page::Music,
             water_sub: 0,
             water_settings: false,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8), wheel::Wheel::new(60, 0)],
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8), wheel::Wheel::new(60, 0), wheel::Wheel::new(18, 4), wheel::Wheel::new(30, 4), wheel::Wheel::new(8, 3), wheel::Wheel::new(12, 0)],
+            panel: None,
             wheel_held: None,
             wheels_moving: false,
             old_notes: false,
@@ -802,6 +805,7 @@ impl App {
         if self.demo.is_none() {
             self.lyrics_on = self.settings.lyrics;
         }
+        self.jam.gap = if self.settings.jam_mode == 2 { 180.0 } else { 60.0 };
         self.place();
         if self.demo.is_none() {
             self.tray(NIM_ADD);
@@ -1224,6 +1228,7 @@ impl App {
         if self.mode == Mode::Expanded && m != Mode::Expanded {
             self.history_open = false;
             self.water_settings = false;
+            self.panel = None;
             self.old_notes = false;
         }
         if m == Mode::Expanded {
@@ -1702,7 +1707,7 @@ impl App {
             self.meter_on = false;
         }
         // The bar grows for the eyes now and then, and they listen only while it is out.
-        let free = playing && self.pill_mix.x > 0.5 && self.toast.is_none() && self.mode == Mode::Compact && !self.yielded && !self.hidden && !self.minimal() && sys::key_idle_ms() >= 1000;
+        let free = self.settings.jam_mode != 0 && playing && self.pill_mix.x > 0.5 && self.toast.is_none() && self.mode == Mode::Compact && !self.yielded && !self.hidden && !self.minimal() && sys::key_idle_ms() >= 1000;
         self.jam_show = self.jam.tick(t, free);
         if self.jam_show {
             self.mini.pose = eyes::JAM_POSES[self.jam.style];
@@ -2155,7 +2160,8 @@ impl App {
                 (left, total.max(1.0), !f.paused(), label)
             }
             None => {
-                let secs = self.pomo_mode.secs();
+                let minutes = if self.pomo_mode == Phase::Focus { self.settings.pomo_work } else { self.settings.pomo_rest };
+                let secs = minutes as f64 * 60.0;
                 (secs, secs, false, self.pomo_mode.label().to_string())
             }
         }
@@ -2279,6 +2285,7 @@ impl App {
         self.slide.x = 1.0;
         self.slide.v = 0.0;
         self.water_settings = false;
+        self.panel = None;
         self.old_notes = false;
         self.reminder_top = 0;
         self.form = None;
@@ -2375,9 +2382,10 @@ impl App {
                 if self.brain.focus.is_some() {
                     self.brain.toggle_pause(now);
                 } else if self.pomo_mode == Phase::Focus {
-                    self.brain.start_pomodoro(25, 5, 4, "", now);
+                    let s = &self.settings;
+                    self.brain.start_pomodoro(s.pomo_work, s.pomo_rest, s.pomo_rounds, "", now);
                 } else {
-                    self.brain.start_rest((self.pomo_mode.secs() / 60.0) as u32, now);
+                    self.brain.start_rest(self.settings.pomo_rest, now);
                 }
             }
             Act::PomoReset => {
@@ -2482,6 +2490,11 @@ impl App {
                 self.sync_wheels();
             }
             Act::Wheel(_) => {}
+            Act::Panel(p) => {
+                self.panel = p;
+                self.sync_wheels();
+            }
+            Act::Set(key) => self.change_setting(key),
             Act::WaterReset => self.brain.reset_water(),
             Act::ReminderAdd => self.open_form(None),
             Act::ReminderEdit(i) => self.open_form(Some(i)),
@@ -2761,10 +2774,79 @@ impl App {
         self.wheels[ui::WheelId::Goal as usize].set(goal);
         self.wheels[ui::WheelId::BedHour as usize].set(hour);
         self.wheels[ui::WheelId::BedMinute as usize].set(minute);
+        self.wheels[ui::WheelId::FocusWork as usize].set(self.settings.pomo_work as usize / 5 - 1);
+        self.wheels[ui::WheelId::FocusRest as usize].set(self.settings.pomo_rest as usize - 1);
+        self.wheels[ui::WheelId::FocusRounds as usize].set(self.settings.pomo_rounds as usize - 1);
+        self.wheels[ui::WheelId::LyricSize as usize].set((self.settings.lyric_size - 15.0).max(0.0) as usize);
+    }
+
+    fn change_setting(&mut self, key: ui::SetKey) {
+        use luma::config::Care;
+        use ui::SetKey as K;
+        let now = chrono::Local::now();
+        match key {
+            K::Banners => {
+                self.settings.hide_banners = !self.settings.hide_banners;
+                notify::HIDE_BANNERS.store(self.settings.hide_banners, std::sync::atomic::Ordering::Relaxed);
+                if self.settings.hide_banners {
+                    sys::hide_phone_banners();
+                } else {
+                    sys::restore_banners();
+                }
+            }
+            K::Text => self.settings.show_text = !self.settings.show_text,
+            K::Eyes => self.settings.pet = !self.settings.pet,
+            K::Jam => {
+                self.settings.jam_mode = (self.settings.jam_mode + 1) % 3;
+                self.jam.gap = if self.settings.jam_mode == 2 { 180.0 } else { 60.0 };
+            }
+            K::Autostart => sys::set_autostart(!sys::autostart_enabled()),
+            K::Minimal => {
+                self.settings.minimal = !self.settings.minimal;
+                self.minimal_armed = true;
+            }
+            K::Stretch => self.brain.configure(|c| c.reminders.stretch.enabled ^= true, now),
+            K::RestEyes => self.brain.configure(|c| c.reminders.eyes.enabled ^= true, now),
+            K::Breathe => self.brain.configure(|c| c.reminders.breathe.enabled ^= true, now),
+            K::Sleep => self.brain.configure(|c| c.reminders.sleep.enabled ^= true, now),
+            K::Care => {
+                self.brain.configure(
+                    |c| {
+                        c.care = match c.care {
+                            Care::Light => Care::Normal,
+                            Care::Normal => Care::Strict,
+                            Care::Strict => Care::Light,
+                        }
+                    },
+                    now,
+                );
+            }
+            K::Lyrics => {
+                self.lyrics_on = !self.lyrics_on;
+                self.settings.lyrics = self.lyrics_on;
+            }
+        }
+        if self.demo.is_none() {
+            self.settings.save();
+        }
     }
 
     /// A wheel came to rest: what it shows is now the setting.
     fn apply_wheels(&mut self) {
+        use ui::WheelId as W;
+        if self.panel.is_some() {
+            let index = |a: &App, id: W| a.wheels[id as usize].index() as u32;
+            self.settings.pomo_work = 5 + 5 * index(self, W::FocusWork);
+            self.settings.pomo_rest = 1 + index(self, W::FocusRest);
+            self.settings.pomo_rounds = 1 + index(self, W::FocusRounds);
+            let size = 15.0 + index(self, W::LyricSize) as f32;
+            self.settings.lyric_size = size;
+            self.lyr_font_target = size;
+            if self.demo.is_none() {
+                self.settings.save();
+            }
+            return;
+        }
         if !self.water_settings {
             return;
         }
@@ -2872,12 +2954,7 @@ impl App {
 
     unsafe fn menu(&mut self) {
         let Ok(m) = CreatePopupMenu() else { return };
-        let check = |b: bool| if b { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(m, MF_STRING | check(sys::autostart_enabled()), 1, w!("Start with Windows"));
-        let _ = AppendMenuW(m, MF_STRING | check(self.settings.pet), 2, w!("Islet Mascot"));
-        let _ = AppendMenuW(m, MF_STRING | check(self.settings.minimal), 3, w!("Minimal notch"));
-        let _ = AppendMenuW(m, MF_STRING | check(self.settings.hide_banners), 6, w!("Hide Windows banners"));
-        let _ = AppendMenuW(m, MF_STRING | check(self.settings.show_text), 7, w!("Show notification text without hover"));
+        let _ = AppendMenuW(m, MF_STRING, 9, w!("Settings"));
         if self.sample.is_some() {
             let _ = AppendMenuW(m, MF_STRING, 8, w!("Stop effect test"));
         } else {
@@ -2892,29 +2969,12 @@ impl App {
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, self.hwnd, None);
         let _ = DestroyMenu(m);
         match cmd.0 {
-            1 => sys::set_autostart(!sys::autostart_enabled()),
-            2 => {
-                self.settings.pet = !self.settings.pet;
-                self.settings.save();
+            9 => {
+                self.set_mode(Mode::Expanded);
+                self.panel = Some(ui::Panel::General);
+                self.sync_wheels();
             }
             8 => self.toggle_effect_test(),
-            7 => {
-                self.settings.show_text = !self.settings.show_text;
-                self.settings.save();
-            }
-            3 => {
-                self.settings.minimal = !self.settings.minimal;
-                self.minimal_armed = true;
-                self.settings.save();
-            }
-            6 => {
-                self.settings.hide_banners = !self.settings.hide_banners;
-                self.settings.save();
-                notify::HIDE_BANNERS.store(self.settings.hide_banners, std::sync::atomic::Ordering::Relaxed);
-                if !self.settings.hide_banners {
-                    sys::restore_banners();
-                }
-            }
             4 => {
                 MessageBoxW(
                     Some(self.hwnd),
@@ -3294,6 +3354,15 @@ fn demo_setup(a: &mut App, spec: &str) {
         l.status = media::LyrStatus::Ready;
         l.key = "demo".into();
         a.media.lock().unwrap().stamp = Some(Instant::now());
+    }
+    if let Some(v) = kv.get("panel") {
+        a.panel = Some(match *v {
+            "focus" => ui::Panel::Focus,
+            "care" => ui::Panel::Care,
+            "music" => ui::Panel::Music,
+            _ => ui::Panel::General,
+        });
+        a.sync_wheels();
     }
     if kv.get("remform") == Some(&"1") {
         a.open_form(None);
