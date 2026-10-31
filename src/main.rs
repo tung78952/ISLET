@@ -905,7 +905,7 @@ impl App {
     fn base_target(&self) -> [f32; 2] {
         match self.mode {
             Mode::Expanded => {
-                if self.lyrics_on && self.page == Page::Music {
+                if self.lyrics_view() {
                     LYRICS
                 } else {
                     EXPANDED
@@ -1004,6 +1004,11 @@ impl App {
     /// The notch widens for the battery and for the notes around nodding eyes.
     pub fn eye_feel_wide(&self) -> bool {
         self.eye_feel.battery || self.eye_feel.music
+    }
+
+    /// Lyrics stay switched on with nothing playing, but there is nothing to show until music is back.
+    fn lyrics_view(&self) -> bool {
+        self.lyrics_on && self.page == Page::Music && self.has_media()
     }
 
     pub fn sample_running(&self) -> bool {
@@ -1196,7 +1201,7 @@ impl App {
                     moving = true;
                 }
             }
-            moving |= self.lyr_mix.step(if self.lyrics_on && self.page == Page::Music && self.has_media() { 1.0 } else { 0.0 }, sub);
+            moving |= self.lyr_mix.step(if self.lyrics_view() { 1.0 } else { 0.0 }, sub);
             moving |= self.toggle_x.step(if self.brain.cfg.reminders.water.enabled { 1.0 } else { 0.0 }, sub);
             moving |= self.water_pulse.step(0.0, sub);
             moving |= self.dot_pos.step(self.dot_target, sub);
