@@ -1253,7 +1253,7 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
     let scale = 0.13 * (1.0 + 0.14 * f.swell);
     let eyes_at = if prop { centre - 176.0 } else { centre - 150.0 };
     let reach = if prop { 22.0 } else { 0.0 };
-    act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 40.0 * f.stretch);
+    act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 33.0 * f.stretch);
     // The words come out from behind the prop, the second line a beat later.
     let tx = centre - 72.0 + if kind == K::Rest { -24.0 } else { 0.0 };
     let tw = 170.0;

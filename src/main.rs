@@ -1366,7 +1366,8 @@ impl App {
             || self.jam_show
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
-            || self.eyes.show.x > 0.01
+            // A card's eyes stay out while it waits, and need frames only when the act says so.
+            || self.eyes.show.x > 0.01 && self.act_now().is_none()
             || !self.hidden && self.act_now().is_some_and(|(_, e)| eyes::act_moving(e))
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
