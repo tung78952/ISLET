@@ -893,31 +893,8 @@ fn glyph(a: &mut App, g: Glyph, cx: f32, cy: f32, hex: u32) {
         Glyph::Device(k) => icon::device(&a.gfx, k, cx, cy, hex, 1.0),
         Glyph::Usb => icon::usb(&a.gfx, cx, cy, hex, 1.0),
         Glyph::Blank => {}
-        Glyph::Stretch => {
-            // A figure with both arms raised.
-            a.gfx.fill_circle(cx, cy - 5.6, 1.9, 1.9, hex, 1.0);
-            a.gfx.polyline(&[(cx - 5.2, cy - 6.6), (cx - 2.2, cy - 2.4), (cx + 2.2, cy - 2.4), (cx + 5.2, cy - 6.6)], 1.6, hex, 1.0);
-            a.gfx.line(cx, cy - 2.4, cx, cy + 2.6, 1.6, hex, 1.0);
-            a.gfx.polyline(&[(cx - 3.2, cy + 7.4), (cx, cy + 2.6), (cx + 3.2, cy + 7.4)], 1.6, hex, 1.0);
-        }
-        Glyph::Eye => {
-            let top: Vec<(f32, f32)> = (0..=12).map(|i| { let u = i as f32 / 12.0; (cx - 7.6 + 15.2 * u, cy - 4.6 * (std::f32::consts::PI * u).sin()) }).collect();
-            let bot: Vec<(f32, f32)> = (0..=12).map(|i| { let u = i as f32 / 12.0; (cx - 7.6 + 15.2 * u, cy + 4.6 * (std::f32::consts::PI * u).sin()) }).collect();
-            a.gfx.polyline(&top, 1.5, hex, 1.0);
-            a.gfx.polyline(&bot, 1.5, hex, 1.0);
-            a.gfx.fill_circle(cx, cy, 2.2, 2.2, hex, 1.0);
-        }
-        Glyph::Breath => {
-            // Three wind strokes curling at the end.
-            for (dy, len) in [(-4.0f32, 11.0f32), (0.0, 14.0), (4.0, 9.0)] {
-                a.gfx.line(cx - 7.0, cy + dy, cx - 7.0 + len - 2.0, cy + dy, 1.5, hex, 1.0);
-                a.gfx.arc_between(cx - 7.0 + len - 2.0, cy + dy - 1.6, 1.6, std::f32::consts::FRAC_PI_2, std::f32::consts::PI * 2.2, 1.5, hex, 1.0);
-            }
-        }
-        Glyph::Moon => {
-            a.gfx.fill_circle(cx, cy, 6.8, 6.8, hex, 1.0);
-            a.gfx.fill_circle(cx + 3.4, cy - 2.6, 5.8, 5.8, 0x000000, 1.0);
-        }
+        // Drawn by `live_badge`.
+        Glyph::Stretch | Glyph::Eye | Glyph::Breath | Glyph::Moon => {}
         Glyph::Bluetooth => icon::bluetooth(&a.gfx, cx, cy, hex, 1.0),
         // The arcs' bounding box is centred on (cx, cy): dot 4.6 below, outer arc 7.4 above.
         Glyph::Wifi(arcs, _) => icon::wifi_centered(&a.gfx, cx, cy, arcs, hex, 1.0),
@@ -984,10 +961,10 @@ fn card(a: &mut App, left: f32, w: f32, h: f32, t: &crate::Toast, title: &str, s
     let tx = left + 62.0;
     // Badge: a ripple leaves it once, the ring breathes gently.
     let q = (age / 0.8).clamp(0.0, 1.0);
-    if matches!(c.badge, Glyph::Bell) {
-        // The bell is its own badge and keeps ringing while the card waits.
-        crate::anim::bell(&a.gfx, bx, cy, 16.0, age, c.accent);
-        a.loop_rect = Some(Rc::new(bx - 24.0, 0.0, 48.0, h));
+    if matches!(c.badge, Glyph::Bell | Glyph::Stretch | Glyph::Eye | Glyph::Breath | Glyph::Moon) {
+        // These icons are their own badge and keep moving while the card waits.
+        live_badge(a, c.badge, bx, cy, age, c.accent);
+        a.loop_rect = Some(Rc::new(bx - 28.0, 0.0, 56.0, h));
     } else {
         if q < 1.0 {
             a.gfx.stroke_circle(bx, cy, 14.4 + 8.0 * q, 1.4, c.accent, 0.5 * (1.0 - q));
@@ -1162,6 +1139,17 @@ fn card_button(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, live: bool, ac
     }
 }
 
+fn live_badge(a: &mut App, badge: Glyph, x: f32, y: f32, t: f32, accent: u32) {
+    const SIZE: f32 = 16.0;
+    match badge {
+        Glyph::Stretch => crate::anim::stretch(&a.gfx, x, y, SIZE, t),
+        Glyph::Eye => crate::anim::look(&a.gfx, x, y, SIZE, t),
+        Glyph::Breath => crate::anim::breathe(&a.gfx, x, y, SIZE, t),
+        Glyph::Moon => crate::anim::night(&a.gfx, x, y, SIZE, t),
+        _ => crate::anim::bell(&a.gfx, x, y, SIZE, t, accent),
+    }
+}
+
 /// A notification's text on its small card: hidden until hovered unless the user wants it shown.
 fn notice_text<'a>(a: &App, text: &'a str) -> &'a str {
     if a.settings.show_text {
@@ -1211,7 +1199,15 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let ix = x0 + ICON / 2.0;
             match i {
                 0 => crate::anim::water(&a.gfx, ix, cy, 22.0, clock),
-                _ => crate::anim::bell(&a.gfx, ix, cy, 22.0, clock, 0xFDB825),
+                1 => crate::anim::bell(&a.gfx, ix, cy, 22.0, clock, 0xFDB825),
+                2 => crate::anim::hello(&a.gfx, ix, cy, 20.0, clock),
+                3 => crate::anim::night(&a.gfx, ix, cy, 22.0, clock),
+                4 => crate::anim::cheer(&a.gfx, ix, cy, 20.0, clock),
+                5 => crate::anim::walk(&a.gfx, ix, cy, 22.0, clock),
+                6 => crate::anim::study(&a.gfx, ix, cy, 22.0, clock),
+                7 => crate::anim::stretch(&a.gfx, ix, cy, 22.0, clock),
+                8 => crate::anim::look(&a.gfx, ix, cy, 22.0, clock),
+                _ => crate::anim::breathe(&a.gfx, ix, cy, 22.0, clock),
             }
             let tx = x0 + ICON + GAP;
             a.gfx.ui(title, Rc::new(tx, cy - 17.6, text_w + 8.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);

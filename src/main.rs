@@ -1086,7 +1086,7 @@ impl App {
         if shown != card {
             match card {
                 Some(i) => {
-                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa")][i as usize % 2];
+                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Chào bạn", "Một ngày tốt lành"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Cố lên", "Sắp xong rồi"), ("Đi bộ chút nào", "5 phút thôi"), ("Giờ học", "25 phút"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Hít thở", "Chậm và sâu")][i as usize % 10];
                     self.toast(ToastKind::Sample(i), title, sub, None);
                     if let Some(t) = self.toast.as_mut() {
                         t.until = Instant::now() + Duration::from_secs(3600);
@@ -1245,7 +1245,7 @@ impl App {
             || self.mini_busy
             || self.eye_feel.show
             || self.eyes.show.x > 0.01
-            || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
+            || !self.hidden && self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Task | ToastKind::Remind(_)))
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Water)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
