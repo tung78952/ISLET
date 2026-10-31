@@ -76,11 +76,13 @@ pub enum Act {
     WaterReset,
     /// A rolling picker: it is dragged, turned and tapped, not clicked.
     Wheel(WheelId),
-    TodoAdd,
-    TodoEditMode,
-    TodoToggle(usize),
-    TodoDelete(usize),
-    FormField(u8),
+    ReminderAdd,
+    ReminderEdit(usize),
+    ReminderSwitch(usize),
+    OldNotes(bool),
+    OldDelete(usize),
+    FormDay(u8),
+    FormDelete,
     FormClear,
     FormSave,
     FormCancel,
@@ -99,21 +101,6 @@ pub enum Act {
     /// Incoming call: bring up the app, or dismiss the card.
     CallAccept,
     CallDecline,
-}
-
-/// Formats up to 8 typed digits into the "HH:MM-HH:MM" mask.
-pub fn time_mask(digits: &str) -> String {
-    let mut d = digits.chars();
-    let mut out = String::new();
-    for (i, slot) in "__:__-__:__".chars().enumerate() {
-        let _ = i;
-        if slot == '_' {
-            out.push(d.next().unwrap_or('_'));
-        } else {
-            out.push(slot);
-        }
-    }
-    out
 }
 
 fn secs_label(s: f64) -> String {
@@ -256,29 +243,10 @@ mod icon {
         g.polygon(&[p(-10.4, 3.6), p(10.4, 3.6), p(13.2, 11.2), p(-13.2, 11.2)], back, a);
         g.polygon(&[p(-14.0, 12.4), p(-5.2, 12.4), p(-2.8, 15.6), p(2.8, 15.6), p(5.2, 12.4), p(14.0, 12.4), p(14.0, 20.4), p(-14.0, 20.4)], front, a);
     }
-    pub fn checklist(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
-        g.fill_rrect(crate::gfx::Rc::new(cx - 16.8, cy - 17.2, 33.6, 34.4), 7.0, 0x404245, a);
-        for (i, dy) in [-6.0f32, 5.0].iter().enumerate() {
-            let y = cy + dy;
-            let _ = i;
-            g.polyline(&[(cx - 9.6, y), (cx - 7.2, y + 2.4), (cx - 3.0, y - 2.6)], 1.8, hex, a);
-            g.line(cx + 0.6, y, cx + 9.6, y, 1.8, hex, a);
-        }
-    }
     pub fn plus_circle(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.fill_circle(cx, cy, 6.8, 6.8, hex, a);
         g.line(cx - 3.2, cy, cx + 3.2, cy, 1.5, 0x000000, a);
         g.line(cx, cy - 3.2, cx, cy + 3.2, 1.5, 0x000000, a);
-    }
-    pub fn pen(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
-        let k = 0.89;
-        let p = |x: f32, y: f32| (cx + x * k, cy + y * k);
-        g.polygon(&[p(-5.4, 5.4), p(-5.0, 2.6), p(3.2, -5.6), p(5.6, -3.2), p(-2.6, 5.0)], hex, a);
-        g.line(cx - 6.4 * k, cy + 6.6 * k, cx + 6.4 * k, cy + 6.6 * k, 1.2, hex, a);
-    }
-    pub fn clock(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
-        g.stroke_circle(cx, cy, 6.4, 1.6, hex, a);
-        g.polyline(&[(cx, cy - 3.6), (cx, cy), (cx + 2.6, cy + 1.6)], 1.5, hex, a);
     }
     pub fn trash(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.line(cx - 3.8, cy - 3.2, cx + 3.8, cy - 3.2, 1.2, hex, a);
@@ -1634,6 +1602,9 @@ fn header(a: &mut App, lx: f32) {
 }
 
 fn chevrons(a: &mut App, lx: f32) {
+    if a.form.is_some() {
+        return;
+    }
     for (x, left, act) in [(lx + 22.0, true, Act::PagePrev), (lx + 395.0, false, Act::PageNext)] {
         let r = Rc::new(x - 11.0, 59.0, 22.0, 22.0);
         let h = btn(a, r, 0.18);
@@ -2288,6 +2259,8 @@ pub enum WheelId {
     Goal,
     BedHour,
     BedMinute,
+    FormHour,
+    FormMinute,
 }
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.
@@ -2549,156 +2522,139 @@ fn drop_wave(a: &mut App) {
 
 // ---------------------------------------------------------------- to-do
 
+/// A reminder's days in words.
+pub fn days_label(days: &[u8]) -> String {
+    const NAMES: [&str; 7] = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"];
+    match days {
+        [] => "Một lần".to_string(),
+        [0, 1, 2, 3, 4, 5, 6] => "Mỗi ngày".to_string(),
+        [0, 1, 2, 3, 4] => "T2–T6".to_string(),
+        [5, 6] => "Cuối tuần".to_string(),
+        days => days.iter().map(|d| NAMES[*d as usize % 7]).collect::<Vec<_>>().join(" "),
+    }
+}
+
+fn toggle(a: &mut App, r: Rc, on: bool, act: Act) {
+    let h = btn(a, r, 0.05);
+    a.gfx.fill_rrect(r, r.h / 2.0, mix(if on { crate::CHARACTER } else { 0x3A3A3C }, 0xFFFFFF, 0.12 * h), 1.0);
+    let knob = if on { r.x + r.w - r.h / 2.0 } else { r.x + r.h / 2.0 };
+    a.gfx.fill_circle(knob, r.cy(), r.h / 2.0 - 2.0, r.h / 2.0 - 2.0, WHITE, 1.0);
+    a.gfx.unzoom();
+    hit(a, r, act);
+}
+
 fn todo(a: &mut App, lx: f32) {
-    title(a, lx, "Todo", Some(("List", TODO_GREEN)));
-    let items = a.todo_items();
-    let done = items.iter().filter(|t| t.done).count();
-    let total = items.len();
-    a.gfx.ui(&format!("{done}/{total}"), Rc::new(lx + 44.6, 26.4, 140.0, 40.0), 36.0, 700, WHITE, 1.0, Align::L);
-    a.gfx.ui("Task Done Today", Rc::new(lx + 43.8, 72.0, 140.0, 16.0), 12.0, 400, LABEL, 1.0, Align::L);
-
-    let form_open = a.form.is_some();
-    let add = Rc::new(lx + 40.4, 93.6, 76.8, 26.4);
-    let h = btn(a, add, 0.07);
-    a.gfx.fill_rrect(add, 13.2, mix(if form_open { 0x0F2B17 } else { 0x1E1E1E }, 0x383838, h * 0.7), 1.0);
-    icon::plus_circle(&a.gfx, add.x + 16.4, add.cy(), if form_open { TODO_GREEN } else { WHITE }, 1.0);
-    a.gfx.ui("Add Task", Rc::new(add.x + 27.2, add.y, 50.0, add.h), 10.0, 400, if form_open { TODO_GREEN } else { 0xD6D6D6 }, 1.0, Align::L);
-    a.gfx.unzoom();
-    hit(a, add, Act::TodoAdd);
-    let edit = Rc::new(lx + 121.2, 93.6, 70.4, 26.4);
-    let enabled = total > 0;
-    let editing = a.todo_edit;
-    let h = if enabled { btn(a, edit, 0.07) } else { 0.0 };
-    a.gfx.fill_rrect(edit, 13.2, mix(if editing { 0x0F2B17 } else { 0x1E1E1E }, 0x383838, h * 0.7), 1.0);
-    let ec = if editing {
-        TODO_GREEN
-    } else if enabled {
-        0xD6D6D6
-    } else {
-        0x565656
-    };
-    icon::pen(&a.gfx, edit.x + 13.8, edit.cy(), if enabled || editing { ec } else { 0x676767 }, 1.0);
-    a.gfx.ui("Edit Task", Rc::new(edit.x + 24.0, edit.y, 46.0, edit.h), 10.0, 400, ec, 1.0, Align::L);
-    a.gfx.unzoom();
-    hit(a, edit, Act::TodoEditMode);
-
-    let card = Rc::new(lx + 196.4, 32.0, 179.2, 91.2);
-    if form_open {
+    title(a, lx, "Reminders", None);
+    let tw = a.gfx.measure("Reminders", 15.0, 600);
+    if a.form.is_some() {
         form(a, lx);
         return;
     }
-    a.gfx.fill_rrect(card, 12.0, 0x1A1A1A, 1.0);
-    if total == 0 {
-        icon::checklist(&a.gfx, card.cx(), 66.0, 0x8A8C90, 1.0);
-        a.gfx.ui("No tasks.", Rc::new(card.x + 0.4, 91.0, card.w, 16.0), 13.0, 400, 0x6D6D6D, 1.0, Align::C);
+    let add = Rc::new(lx + 24.0 + tw, 9.0, 22.0, 22.0);
+    let h = btn(a, add, 0.15);
+    icon::plus_circle(&a.gfx, add.cx(), add.cy(), mix(0xD6D6D6, WHITE, h), 1.0);
+    a.gfx.unzoom();
+    hit(a, add, Act::ReminderAdd);
+    let old = a.todo.tasks.len();
+    let top = a.reminder_top;
+    if a.old_notes {
+        let notes: Vec<String> = a.todo.tasks.iter().map(|t| t.title.clone()).collect();
+        for (n, note) in notes.iter().enumerate().skip(top).take(3) {
+            let y = 38.0 + (n - top) as f32 * 29.0;
+            a.gfx.ui(note, Rc::new(lx + 28.0, y, 320.0, 26.0), 13.0, 400, 0xC8C8C8, 1.0, Align::L);
+            let x = Rc::new(lx + 366.0, y + 3.0, 20.0, 20.0);
+            icon::x_circle(&a.gfx, x.cx(), x.cy(), 6.4, 0x8A8A8A, 0x000000, 1.0);
+            hit(a, x, Act::OldDelete(n));
+        }
+        let back = Rc::new(lx + 170.0, 122.0, 80.0, 14.0);
+        a.gfx.ui("Quay lại", back, 10.0, 400, 0x8A8A8A, 1.0, Align::C);
+        hit(a, back, Act::OldNotes(false));
         return;
     }
-    a.gfx.push_clip(card);
-    for (i, item) in items.into_iter().enumerate().take(3) {
-        let y = card.y + 4.0 + i as f32 * 29.0;
-        let rr = Rc::new(card.x + 4.0, y, card.w - 8.0, 27.0);
-        let (t, time, is_done) = (item.title, item.time, item.done);
-        let h = btn(a, rr, 0.03);
-        if h > 0.0 {
-            a.gfx.fill_rrect(rr, 9.0, 0x2A2A2A, 0.7 * h.min(1.0));
-        }
-        if editing {
-            a.gfx.stroke_rrect(rr, 9.0, 1.0, 0x3A3A3A, 1.0);
-        }
-        let ccx = card.x + 17.0;
-        let cy = y + 13.0;
-        if is_done {
-            a.gfx.fill_circle(ccx, cy, 6.8, 6.8, TODO_GREEN, 1.0);
-            a.gfx.polyline(&[(ccx - 3.0, cy), (ccx - 0.8, cy + 2.4), (ccx + 3.2, cy - 2.4)], 1.5, 0x000000, 1.0);
-        } else {
-            a.gfx.stroke_circle(ccx, cy, 6.8, 1.4, 0xDDDDDD, 1.0);
-        }
-        let tcol = if is_done { 0x8C8C8C } else { WHITE };
-        if time.is_empty() {
-            a.gfx.ui(&t, Rc::new(card.x + 29.6, y, card.w - 60.0, 26.0), 13.0, 400, tcol, 1.0, Align::L);
-        } else {
-            // Two lines with clear space between them: title, then the time span.
-            let span = match time.split_once('-') {
-                Some((start, end)) if !end.is_empty() && end != "00:00" => format!("{start} – {end}"),
-                Some((start, _)) => start.to_string(),
-                None => time.clone(),
-            };
-            a.gfx.ui(&t, Rc::new(card.x + 29.6, y + 0.5, card.w - 60.0, 14.0), 12.5, 400, tcol, 1.0, Align::L);
-            a.gfx.ui(&span, Rc::new(card.x + 29.6, y + 17.0, card.w - 60.0, 10.0), 9.5, 400, GREY, 1.0, Align::L);
-        }
-        a.gfx.unzoom();
-        hit(a, rr, Act::TodoToggle(i));
-        if editing {
-            icon::x_circle(&a.gfx, card.x + card.w - 16.0, cy, 8.0, 0xE53833, WHITE, 1.0);
-            hit(a, Rc::new(card.x + card.w - 26.0, y + 2.0, 20.0, 22.0), Act::TodoDelete(i));
-        }
+    let rows = a.reminders();
+    if rows.is_empty() && old == 0 {
+        a.gfx.ui("Chưa có nhắc nào", Rc::new(lx, 66.0, 420.0, 20.0), 13.0, 400, 0x6D6D6D, 1.0, Align::C);
+        return;
     }
-    a.gfx.pop_clip();
+    // Old notes come after the last reminder.
+    if old > 0 && rows.len() >= top && rows.len() - top < 3 {
+        let row = Rc::new(lx + 38.0, 36.0 + (rows.len() - top) as f32 * 29.0, 310.0, 27.0);
+        a.gfx.ui(&format!("Ghi chú cũ ({old})"), Rc::new(row.x + 8.0, row.y, 200.0, row.h), 12.0, 400, 0x8A8A8A, 1.0, Align::L);
+        hit(a, row, Act::OldNotes(true));
+    }
+    for (n, r) in rows.iter().enumerate().skip(top).take(3) {
+        let y = 36.0 + (n - top) as f32 * 29.0;
+        let row = Rc::new(lx + 38.0, y, 310.0, 27.0);
+        let h = btn(a, row, 0.04);
+        a.gfx.fill_rrect(row, 9.0, 0xFFFFFF, 0.05 * h.min(1.0));
+        let tone = if r.enabled { WHITE } else { 0x6D6D6D };
+        a.gfx.ui(&r.title, Rc::new(row.x + 8.0, y, 170.0, 27.0), 13.0, 500, tone, 1.0, Align::L);
+        let when = format!("{} · {}", r.time, days_label(&r.days));
+        a.gfx.ui(&when, Rc::new(row.x + 130.0, y, 172.0, 27.0), 11.0, 400, 0x8E8E93, 1.0, Align::R);
+        a.gfx.unzoom();
+        hit(a, row, Act::ReminderEdit(n));
+        toggle(a, Rc::new(lx + 352.0, y + 5.5, 28.0, 16.0), r.enabled, Act::ReminderSwitch(n));
+    }
 }
 
 fn form(a: &mut App, lx: f32) {
-    let (text, digits, field) = {
+    let (text, days, editing) = {
         let f = a.form.as_ref().unwrap();
-        (f.title.clone(), f.digits.clone(), f.field)
+        (f.title.clone(), f.days, f.id.is_some())
     };
-    let tf = Rc::new(lx + 201.2, 39.2, 169.6, 27.2);
-    a.gfx.fill_rrect(tf, 11.0, 0x121212, 1.0);
-    a.gfx.stroke_rrect(tf, 11.0, 1.4, if field == 0 { 0xDADADA } else { 0x3A3A3A }, 1.0);
+    let tf = Rc::new(lx + 22.0, 36.0, 376.0, 26.0);
+    a.gfx.fill_rrect(tf, 10.0, 0x161618, 1.0);
     let inner = Rc::new(tf.x + 11.0, tf.y, tf.w - 34.0, tf.h);
     if text.is_empty() {
-        a.gfx.ui("Task title", inner, 13.0, 400, GREY, 1.0, Align::L);
+        a.gfx.ui("Tên nhắc", inner, 13.0, 400, GREY, 1.0, Align::L);
     } else {
         a.gfx.ui(&text, inner, 13.0, 400, WHITE, 1.0, Align::L);
         icon::x_circle(&a.gfx, tf.x + tf.w - 15.2, tf.cy(), 6.4, 0xDADADA, 0x121212, 1.0);
         hit(a, Rc::new(tf.x + tf.w - 24.0, tf.y, 22.0, tf.h), Act::FormClear);
     }
-    let blink = (a.born.elapsed().as_millis() / 530) % 2 == 0;
-    if field == 0 && blink {
+    if (a.born.elapsed().as_millis() / 530) % 2 == 0 {
         let cw = a.gfx.measure(&text, 13.0, 400).min(inner.w);
         a.gfx.line(inner.x + cw + 0.8, tf.y + 7.0, inner.x + cw + 0.8, tf.y + tf.h - 7.0, 1.2, WHITE, 1.0);
     }
-    hit(a, Rc::new(tf.x, tf.y, tf.w - 26.0, tf.h), Act::FormField(0));
-
-    let tm = Rc::new(lx + 201.2, 70.4, 169.6, 22.4);
-    a.gfx.fill_rrect(tm, 11.0, 0x1E1E1E, 1.0);
-    if field == 1 {
-        a.gfx.stroke_rrect(tm, 11.0, 1.4, 0xDADADA, 1.0);
+    const CY: f32 = 96.0;
+    a.gfx.fill_rrect(Rc::new(lx + 22.0, CY - 11.0, 110.0, 22.0), 7.0, 0xFFFFFF, 0.09);
+    let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+    let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
+    wheel(a, WheelId::FormHour, Rc::new(lx + 26.0, CY - 28.0, 46.0, 56.0), &hours);
+    a.gfx.ui(":", Rc::new(lx + 71.0, CY - 10.0, 10.0, 20.0), 14.0, 600, WHITE, 1.0, Align::C);
+    wheel(a, WheelId::FormMinute, Rc::new(lx + 80.0, CY - 28.0, 46.0, 56.0), &minutes);
+    for (i, name) in ["T2", "T3", "T4", "T5", "T6", "T7", "CN"].into_iter().enumerate() {
+        let r = Rc::new(lx + 144.0 + i as f32 * 36.0, 69.0, 34.0, 24.0);
+        let on = days[i];
+        let h = btn(a, r, 0.06);
+        a.gfx.fill_rrect(r, 8.0, mix(if on { WHITE } else { 0x1E1E20 }, 0x8A8A8A, 0.25 * h), 1.0);
+        a.gfx.ui(name, r, 11.0, 600, if on { 0x000000 } else { 0x9A9A9A }, 1.0, Align::C);
+        a.gfx.unzoom();
+        hit(a, r, Act::FormDay(i as u8));
     }
-    icon::clock(&a.gfx, tm.x + 13.6, tm.cy(), WHITE, 1.0);
-    let mask = time_mask(&digits);
-    let typed: String = mask.chars().take(typed_len(&digits)).collect();
-    let rest: String = mask.chars().skip(typed_len(&digits)).collect();
-    a.gfx.ui(&typed, Rc::new(tm.x + 26.4, tm.y, 120.0, tm.h), 13.0, 400, WHITE, 1.0, Align::L);
-    let tw = a.gfx.measure(&typed, 13.0, 400);
-    a.gfx.ui(&rest, Rc::new(tm.x + 26.4 + tw, tm.y, 120.0, tm.h), 13.0, 400, 0x5F5F61, 1.0, Align::L);
-    hit(a, tm, Act::FormField(1));
-
-    let cancel = Rc::new(lx + 201.2, 98.4, 82.4, 20.8);
-    let h = btn(a, cancel, 0.07);
-    a.gfx.fill_rrect(cancel, 10.4, mix(0x2A2A2A, 0x444444, h), 1.0);
-    a.gfx.ui("Cancel", cancel, 11.5, 400, WHITE, 1.0, Align::C);
-    a.gfx.unzoom();
-    hit(a, cancel, Act::FormCancel);
-    let save = Rc::new(lx + 288.4, 98.4, 81.6, 20.8);
-    let h = btn(a, save, 0.07);
-    a.gfx.fill_rrect(save, 10.4, mix(TODO_GREEN, 0x5FD873, h), 1.0);
-    a.gfx.ui("Save", save, 11.5, 400, WHITE, 1.0, Align::C);
-    a.gfx.unzoom();
-    hit(a, save, Act::FormSave);
+    let button = |a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, act: Act| {
+        let h = btn(a, r, 0.07);
+        a.gfx.fill_rrect(r, r.h / 2.0, mix(bg, 0x8A8A8A, 0.2 * h), 1.0);
+        a.gfx.ui(label, r, 11.5, 600, fg, 1.0, Align::C);
+        a.gfx.unzoom();
+        hit(a, r, act);
+    };
+    if editing {
+        button(a, Rc::new(lx + 144.0, 100.0, 60.0, 22.0), "Xóa", 0x2A1416, 0xFF6B6B, Act::FormDelete);
+    }
+    button(a, Rc::new(lx + 262.0, 100.0, 62.0, 22.0), "Hủy", 0x2A2A2C, WHITE, Act::FormCancel);
+    button(a, Rc::new(lx + 330.0, 100.0, 68.0, 22.0), "Lưu", WHITE, 0x000000, Act::FormSave);
 }
 
-/// Number of mask characters covered by the typed digits (separators included).
-fn typed_len(digits: &str) -> usize {
-    match digits.len() {
-        0 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 4,
-        4 => 5,
-        5 => 7,
-        6 => 8,
-        7 => 10,
-        _ => 11,
+#[cfg(test)]
+mod reminder_tests {
+    use super::days_label;
+
+    #[test]
+    fn days_read_naturally() {
+        assert_eq!(days_label(&[]), "Một lần");
+        assert_eq!(days_label(&[0, 1, 2, 3, 4, 5, 6]), "Mỗi ngày");
+        assert_eq!(days_label(&[0, 1, 2, 3, 4]), "T2–T6");
+        assert_eq!(days_label(&[0, 6]), "T2 CN");
     }
 }
-

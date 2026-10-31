@@ -205,29 +205,13 @@ pub struct Toast {
 }
 
 /// Where a to-do lives: a Luma reminder (has a time) or an untimed to-do of Islet's.
-#[derive(Clone, PartialEq, Debug)]
-pub enum TodoKey {
-    Timed(String),
-    Untimed(usize),
-}
-
 /// One row of the To-do page.
-pub struct TodoItem {
-    pub key: TodoKey,
-    pub title: String,
-    /// "HH:MM" or "HH:MM-HH:MM"; empty when untimed.
-    pub time: String,
-    pub done: bool,
-}
-
 pub struct Form {
-    /// The row being edited; None for a new one.
-    pub key: Option<TodoKey>,
+    /// The reminder being edited; None for a new one.
+    pub id: Option<String>,
     pub title: String,
-    /// Up to 8 digits filling the "HH:MM-HH:MM" mask.
-    pub digits: String,
-    /// 0 = title field, 1 = time field.
-    pub field: u8,
+    /// Weekdays it repeats on, Monday first. None chosen: once.
+    pub days: [bool; 7],
 }
 
 /// Left, top, right, bottom in layout units.
@@ -484,10 +468,11 @@ pub struct App {
     pub water_sub: u8,
     pub water_settings: bool,
     /// The rolling pickers on show, by what they set.
-    pub wheels: [wheel::Wheel; 4],
+    pub wheels: [wheel::Wheel; 6],
     wheel_held: Option<ui::WheelId>,
     wheels_moving: bool,
-    pub todo_edit: bool,
+    pub old_notes: bool,
+    pub reminder_top: usize,
     pub form: Option<Form>,
     pub toast: Option<Toast>,
     queue: VecDeque<Toast>,
@@ -713,10 +698,11 @@ impl App {
             page: Page::Music,
             water_sub: 0,
             water_settings: false,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0)],
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0), wheel::Wheel::new(24, 8), wheel::Wheel::new(60, 0)],
             wheel_held: None,
             wheels_moving: false,
-            todo_edit: false,
+            old_notes: false,
+            reminder_top: 0,
             form: None,
             toast: None,
             queue: VecDeque::new(),
@@ -1238,7 +1224,7 @@ impl App {
         if self.mode == Mode::Expanded && m != Mode::Expanded {
             self.history_open = false;
             self.water_settings = false;
-            self.todo_edit = false;
+            self.old_notes = false;
         }
         if m == Mode::Expanded {
             self.toast = None;
@@ -1532,6 +1518,12 @@ impl App {
         if self.expanded() && self.history_open {
             let last = self.history.len().saturating_sub(3);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
+            self.render();
+            return;
+        }
+        if self.expanded() && self.page == Page::Todo && self.form.is_none() {
+            let rows = if self.old_notes { self.todo.tasks.len() } else { self.brain.cfg.custom.len() + (!self.todo.tasks.is_empty()) as usize };
+            self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(3) as i32) as usize;
             self.render();
             return;
         }
@@ -2171,25 +2163,10 @@ impl App {
 
     /// The To-do page's list: today's timed tasks (Luma reminders) and untimed to-dos, open
     /// ones first.
-    pub fn todo_items(&self) -> Vec<TodoItem> {
-        let now = chrono::Local::now();
-        let today = model::now().ymd();
-        let mut v: Vec<TodoItem> = self
-            .brain
-            .tasks_today(now)
-            .into_iter()
-            .map(|(c, done)| {
-                let time = if c.start && c.minutes > 0 {
-                    let t = luma::scheduler::parse_hm(&c.time).map(|t| t + chrono::TimeDelta::minutes(c.minutes as i64));
-                    format!("{}-{}", c.time, t.map(|t| t.format("%H:%M").to_string()).unwrap_or_default())
-                } else {
-                    c.time.clone()
-                };
-                TodoItem { key: TodoKey::Timed(c.id.clone()), title: c.title.clone(), time, done }
-            })
-            .collect();
-        v.extend(self.todo.tasks.iter().enumerate().map(|(i, t)| TodoItem { key: TodoKey::Untimed(i), title: t.title.clone(), time: String::new(), done: t.done_day == today }));
-        v.sort_by_key(|t| t.done);
+    /// The user's own reminders, by time of day.
+    pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
+        let mut v = self.brain.cfg.custom.clone();
+        v.sort_by(|a, b| a.time.cmp(&b.time));
         v
     }
 
@@ -2302,7 +2279,8 @@ impl App {
         self.slide.x = 1.0;
         self.slide.v = 0.0;
         self.water_settings = false;
-        self.todo_edit = false;
+        self.old_notes = false;
+        self.reminder_top = 0;
         self.form = None;
         self.kick();
     }
@@ -2316,9 +2294,19 @@ impl App {
     }
 
     fn open_form(&mut self, index: Option<usize>) {
-        let item = index.and_then(|i| self.todo_items().into_iter().nth(i));
-        let (title, digits) = item.as_ref().map(|t| (t.title.clone(), t.time.chars().filter(char::is_ascii_digit).collect())).unwrap_or_default();
-        self.form = Some(Form { key: item.map(|t| t.key), title, digits, field: 0 });
+        use chrono::Timelike;
+        let item = index.and_then(|i| self.reminders().into_iter().nth(i));
+        let soon = chrono::Local::now() + chrono::TimeDelta::hours(1);
+        let time = item.as_ref().and_then(|r| luma::scheduler::parse_hm(&r.time)).unwrap_or(soon.time());
+        self.wheels[ui::WheelId::FormHour as usize].set(time.hour() as usize);
+        self.wheels[ui::WheelId::FormMinute as usize].set(time.minute() as usize);
+        let mut days = [item.is_none(); 7];
+        if let Some(r) = &item {
+            for d in &r.days {
+                days[*d as usize % 7] = true;
+            }
+        }
+        self.form = Some(Form { id: item.as_ref().map(|r| r.id.clone()), title: item.map(|r| r.title).unwrap_or_default(), days });
         self.set_noactivate(false);
         unsafe {
             let _ = SetForegroundWindow(self.hwnd);
@@ -2328,39 +2316,19 @@ impl App {
 
     fn close_form(&mut self, save: bool) {
         if let Some(f) = self.form.take() {
-            let title = f.title.trim().to_string();
+            let title = f.title.trim();
             if save && !title.is_empty() {
-                let time = ui::time_mask(&f.digits).trim_end_matches(['_', ':', '-']).to_string();
-                let time = if f.digits.len() >= 4 { time } else { String::new() };
-                // An edited row is replaced: it may move between timed and untimed.
-                match &f.key {
-                    Some(TodoKey::Timed(id)) => self.brain.delete_task(id),
-                    Some(TodoKey::Untimed(i)) if *i < self.todo.tasks.len() => {
-                        self.todo.tasks.remove(*i);
-                        self.todo.save();
-                    }
-                    _ => {}
-                }
-                self.add_todo(&title, &time);
+                let (h, m) = (self.wheels[ui::WheelId::FormHour as usize].index(), self.wheels[ui::WheelId::FormMinute as usize].index());
+                let days = (0..7u8).filter(|d| f.days[*d as usize]).collect();
+                self.brain.save_reminder(f.id.as_deref(), title, &format!("{h:02}:{m:02}"), days, chrono::Local::now());
             }
         }
         self.set_noactivate(true);
     }
 
-    /// "HH:MM" or "HH:MM-HH:MM" makes a Luma reminder (a range: "Start" focuses that long);
-    /// no time keeps it an untimed to-do.
     fn add_todo(&mut self, title: &str, time: &str) {
-        let (start, end) = time.split_once('-').unwrap_or((time, ""));
-        match luma::scheduler::parse_hm(start) {
-            Some(s) => {
-                let minutes = luma::scheduler::parse_hm(end).map(|e| (e - s).num_minutes().rem_euclid(24 * 60) as u32).unwrap_or(0);
-                self.brain.add_task(title, start, minutes, chrono::Local::now());
-            }
-            None => {
-                self.todo.tasks.push(model::Task { title: title.to_string(), done_day: 0, time: String::new() });
-                self.todo.save();
-            }
-        }
+        let (start, _) = time.split_once('-').unwrap_or((time, ""));
+        self.brain.add_task(title, start, 0, chrono::Local::now());
     }
 
     fn media_cmd(&self, c: Cmd) {
@@ -2515,45 +2483,41 @@ impl App {
             }
             Act::Wheel(_) => {}
             Act::WaterReset => self.brain.reset_water(),
-            Act::TodoAdd => self.open_form(None),
-            Act::TodoEditMode => {
-                if !self.todo_items().is_empty() {
-                    self.todo_edit = !self.todo_edit;
+            Act::ReminderAdd => self.open_form(None),
+            Act::ReminderEdit(i) => self.open_form(Some(i)),
+            Act::ReminderSwitch(i) => {
+                if let Some(r) = self.reminders().into_iter().nth(i) {
+                    self.brain.set_reminder_on(&r.id, !r.enabled, chrono::Local::now());
                 }
             }
-            Act::TodoToggle(i) => {
-                if self.todo_edit {
-                    self.open_form(Some(i));
-                } else if let Some(item) = self.todo_items().into_iter().nth(i) {
-                    match item.key {
-                        TodoKey::Timed(id) => self.brain.set_task_done(&id, !item.done),
-                        TodoKey::Untimed(i) => self.todo.toggle(i),
-                    }
+            Act::OldNotes(on) => {
+                self.old_notes = on;
+                self.reminder_top = 0;
+            }
+            Act::OldDelete(i) => {
+                if i < self.todo.tasks.len() {
+                    self.todo.tasks.remove(i);
+                    self.todo.save();
+                }
+                if self.todo.tasks.is_empty() {
+                    self.old_notes = false;
                 }
             }
-            Act::TodoDelete(i) => {
-                if let Some(item) = self.todo_items().into_iter().nth(i) {
-                    match item.key {
-                        TodoKey::Timed(id) => self.brain.delete_task(&id),
-                        TodoKey::Untimed(i) => {
-                            self.todo.tasks.remove(i);
-                            self.todo.save();
-                        }
-                    }
-                }
-                if self.todo_items().is_empty() {
-                    self.todo_edit = false;
-                }
-            }
-            Act::FormField(f) => {
+            Act::FormDay(d) => {
                 if let Some(form) = self.form.as_mut() {
-                    form.field = f;
+                    form.days[d as usize] ^= true;
                 }
             }
             Act::FormClear => {
                 if let Some(form) = self.form.as_mut() {
                     form.title.clear();
                 }
+            }
+            Act::FormDelete => {
+                if let Some(id) = self.form.as_ref().and_then(|f| f.id.clone()) {
+                    self.brain.delete_task(&id);
+                }
+                self.close_form(false);
             }
             Act::FormSave => self.close_form(true),
             Act::FormCancel => self.close_form(false),
@@ -2801,6 +2765,9 @@ impl App {
 
     /// A wheel came to rest: what it shows is now the setting.
     fn apply_wheels(&mut self) {
+        if !self.water_settings {
+            return;
+        }
         let index = |a: &App, id: ui::WheelId| a.wheels[id as usize].index();
         let (cup, goal) = (model::CUPS[index(self, ui::WheelId::Cup)], model::GOALS[index(self, ui::WheelId::Goal)]);
         let bed = format!("{:02}:{:02}", index(self, ui::WheelId::BedHour), index(self, ui::WheelId::BedMinute) * 15);
@@ -2889,24 +2856,13 @@ impl App {
         let Some(f) = self.form.as_mut() else { return };
         match c {
             8 => {
-                if f.field == 0 {
-                    f.title.pop();
-                } else {
-                    f.digits.pop();
-                }
+                f.title.pop();
             }
-            9 => f.field ^= 1,
             13 => return self.act(Act::FormSave),
             27 => return self.act(Act::FormCancel),
             c if c >= 32 => {
-                if let Some(ch) = char::from_u32(c) {
-                    if f.field == 0 {
-                        if f.title.chars().count() < 60 {
-                            f.title.push(ch);
-                        }
-                    } else if ch.is_ascii_digit() && f.digits.len() < 8 {
-                        f.digits.push(ch);
-                    }
+                if let Some(ch) = char::from_u32(c).filter(|_| f.title.chars().count() < 60) {
+                    f.title.push(ch);
                 }
             }
             _ => {}
@@ -3338,6 +3294,9 @@ fn demo_setup(a: &mut App, spec: &str) {
         l.status = media::LyrStatus::Ready;
         l.key = "demo".into();
         a.media.lock().unwrap().stamp = Some(Instant::now());
+    }
+    if kv.get("remform") == Some(&"1") {
+        a.open_form(None);
     }
     if kv.get("watersettings") == Some(&"1") {
         a.water_settings = true;

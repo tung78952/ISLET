@@ -421,6 +421,37 @@ impl Brain {
     }
 
     /// Ticked off (or back) on the To-do page.
+    /// Adds a reminder, or changes the one with this id.
+    pub fn save_reminder(&mut self, id: Option<&str>, title: &str, time: &str, days: Vec<u8>, now: DateTime<Local>) {
+        let old = self.cfg.clone();
+        let title: String = title.trim().chars().take(60).collect();
+        let at = id.and_then(|id| self.cfg.custom.iter().position(|c| c.id == id));
+        match at {
+            Some(i) => {
+                let c = &mut self.cfg.custom[i];
+                c.title = title;
+                c.time = time.to_string();
+                c.days = days;
+                c.enabled = true;
+            }
+            None if self.cfg.custom.len() < config::MAX_CUSTOM => {
+                self.cfg.custom.push(CustomReminder { id: format!("t{}", now.timestamp_millis()), title, time: time.to_string(), days, ..CustomReminder::default() });
+            }
+            None => return,
+        }
+        self.sched.rearm_custom(&old, &self.cfg, now);
+        self.save_config();
+    }
+
+    pub fn set_reminder_on(&mut self, id: &str, on: bool, now: DateTime<Local>) {
+        let old = self.cfg.clone();
+        if let Some(c) = self.cfg.custom.iter_mut().find(|c| c.id == id) {
+            c.enabled = on;
+        }
+        self.sched.rearm_custom(&old, &self.cfg, now);
+        self.save_config();
+    }
+
     pub fn set_task_done(&mut self, id: &str, done: bool) {
         let was = self.stats.fired.iter().any(|f| f == id);
         if done && !was {
