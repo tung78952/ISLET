@@ -122,7 +122,7 @@ impl Settings {
 
 /// Cup sizes and daily goals (ml) the Water settings offer.
 pub const CUPS: [u32; 5] = [150, 200, 250, 330, 500];
-pub const GOALS: [u32; 4] = [1500, 2000, 2500, 3000];
+pub const GOALS: [u32; 7] = [1000, 1500, 2000, 2500, 3000, 3500, 4000];
 
 // ---------------------------------------------------------------- to-do
 

@@ -16,6 +16,7 @@ mod pump;
 mod storm;
 mod sys;
 mod ui;
+mod wheel;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -482,6 +483,10 @@ pub struct App {
     pub page: Page,
     pub water_sub: u8,
     pub water_settings: bool,
+    /// The rolling pickers on show, by what they set.
+    pub wheels: [wheel::Wheel; 4],
+    wheel_held: Option<ui::WheelId>,
+    wheels_moving: bool,
     pub todo_edit: bool,
     pub form: Option<Form>,
     pub toast: Option<Toast>,
@@ -708,6 +713,9 @@ impl App {
             page: Page::Music,
             water_sub: 0,
             water_settings: false,
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2), wheel::Wheel::new(model::GOALS.len(), 2), wheel::Wheel::new(24, 22), wheel::Wheel::new(4, 0)],
+            wheel_held: None,
+            wheels_moving: false,
             todo_edit: false,
             form: None,
             toast: None,
@@ -1276,6 +1284,16 @@ impl App {
                 self.kick();
             }
         }
+        let mut turned = false;
+        let mut was_moving = false;
+        for w in self.wheels.iter_mut() {
+            was_moving |= w.held() || self.wheels_moving;
+            turned |= w.step(dt);
+        }
+        if was_moving && !turned {
+            self.apply_wheels();
+        }
+        self.wheels_moving = turned;
         // The small eyes are only stepped while they are on show: their outlines are not free.
         if self.jam_show || self.jam_x.x > 0.01 || self.sample.is_some() {
             let clock = self.born.elapsed().as_secs_f32();
@@ -1363,6 +1381,7 @@ impl App {
         self.effects()
             || self.sample.is_some()
             || self.mini_busy
+            || self.wheels_moving
             || self.jam_show
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
@@ -1505,6 +1524,11 @@ impl App {
 
     /// Mouse wheel over the lyrics view scrolls them; they glide back to the current line later.
     fn wheel(&mut self, notches: f32, ctrl: bool) {
+        if let Some(Act::Wheel(id)) = self.hit(self.mouse.0, self.mouse.1) {
+            self.wheels[id as usize].turn(notches);
+            self.kick();
+            return;
+        }
         if self.expanded() && self.history_open {
             let last = self.history.len().saturating_sub(3);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
@@ -2485,30 +2509,12 @@ impl App {
                 self.brain.set_water_enabled(on, chrono::Local::now());
             }
             Act::WaterSub(s) => self.water_sub = s,
-            Act::WaterSettings(on) => self.water_settings = on,
+            Act::WaterSettings(on) => {
+                self.water_settings = on;
+                self.sync_wheels();
+            }
+            Act::Wheel(_) => {}
             Act::WaterReset => self.brain.reset_water(),
-            Act::Bottle(d) => {
-                // A cup's size; the goal in litres stays, so the cups a day follow.
-                let cfg = &mut self.brain.cfg;
-                let litres = cfg.water_goal * cfg.cup_ml;
-                let i = model::CUPS.iter().position(|&b| b == cfg.cup_ml).unwrap_or(2) as i32;
-                cfg.cup_ml = model::CUPS[(i + d).clamp(0, model::CUPS.len() as i32 - 1) as usize];
-                cfg.water_goal = ((litres as f32 / cfg.cup_ml as f32).round() as u32).clamp(1, 20);
-                self.brain.save_config();
-            }
-            Act::Goal(g) => {
-                let cfg = &mut self.brain.cfg;
-                cfg.water_goal = ((g as f32 / cfg.cup_ml as f32).round() as u32).clamp(1, 20);
-                self.brain.save_config();
-            }
-            Act::End(d) => {
-                // Bedtime, which water is spread out to (and the bedtime reminder uses).
-                let cfg = &mut self.brain.cfg;
-                if let Some(t) = luma::scheduler::parse_hm(&cfg.reminders.sleep.time) {
-                    cfg.reminders.sleep.time = (t + chrono::TimeDelta::minutes(d as i64 * 30)).format("%H:%M").to_string();
-                    self.brain.save_config();
-                }
-            }
             Act::TodoAdd => self.open_form(None),
             Act::TodoEditMode => {
                 if !self.todo_items().is_empty() {
@@ -2707,6 +2713,11 @@ impl App {
 
     fn on_mouse_move(&mut self, x: f32, y: f32) {
         self.mouse = (x, y);
+        if let Some(id) = self.wheel_held {
+            let t = self.eye_time();
+            self.wheels[id as usize].drag_to(y, t);
+            self.kick();
+        }
         if !self.mouse_in {
             self.mouse_in = true;
             self.minimal_armed = true;
@@ -2774,8 +2785,43 @@ impl App {
         self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, a)| *a)
     }
 
+    /// The wheels show what is set.
+    fn sync_wheels(&mut self) {
+        use chrono::Timelike;
+        let cfg = &self.brain.cfg;
+        let nearest = |list: &[u32], v: u32| list.iter().enumerate().min_by_key(|(_, x)| x.abs_diff(v)).map_or(0, |(i, _)| i);
+        let (cup, goal) = (nearest(&model::CUPS, cfg.cup_ml), nearest(&model::GOALS, cfg.water_goal * cfg.cup_ml));
+        let bed = luma::scheduler::parse_hm(&cfg.reminders.sleep.time).unwrap_or_default();
+        let (hour, minute) = (bed.hour() as usize, bed.minute() as usize / 15);
+        self.wheels[ui::WheelId::Cup as usize].set(cup);
+        self.wheels[ui::WheelId::Goal as usize].set(goal);
+        self.wheels[ui::WheelId::BedHour as usize].set(hour);
+        self.wheels[ui::WheelId::BedMinute as usize].set(minute);
+    }
+
+    /// A wheel came to rest: what it shows is now the setting.
+    fn apply_wheels(&mut self) {
+        let index = |a: &App, id: ui::WheelId| a.wheels[id as usize].index();
+        let (cup, goal) = (model::CUPS[index(self, ui::WheelId::Cup)], model::GOALS[index(self, ui::WheelId::Goal)]);
+        let bed = format!("{:02}:{:02}", index(self, ui::WheelId::BedHour), index(self, ui::WheelId::BedMinute) * 15);
+        let cfg = &mut self.brain.cfg;
+        let cups = ((goal as f32 / cup as f32).round() as u32).clamp(1, 20);
+        if cfg.cup_ml != cup || cfg.water_goal != cups || cfg.reminders.sleep.time != bed {
+            cfg.cup_ml = cup;
+            cfg.water_goal = cups;
+            cfg.reminders.sleep.time = bed;
+            self.brain.save_config();
+        }
+    }
+
     fn on_down(&mut self, x: f32, y: f32) {
         let act = self.hit(x, y);
+        if let Some(Act::Wheel(id)) = act {
+            let t = self.eye_time();
+            self.wheels[id as usize].press(y, t);
+            self.wheel_held = Some(id);
+            self.kick();
+        }
         if let Some(Act::Scrub(bx, bw)) = act {
             let (bx, bw) = (bx as f32 / 10.0, bw as f32 / 10.0);
             self.scrub = Some((bx, bw, ((x - bx) / bw).clamp(0.0, 1.0)));
@@ -2785,6 +2831,14 @@ impl App {
     }
 
     fn on_up(&mut self, x: f32, y: f32) {
+        let pressed_at = self.down.as_ref().map_or(y, |d| d.1);
+        if let Some(id) = self.wheel_held.take() {
+            let tap = self.hits.iter().find(|(_, a)| *a == Act::Wheel(id)).map_or(0, |(r, _)| ((pressed_at - r.cy()) / wheel::ROW).round() as i32);
+            self.wheels[id as usize].release(tap.clamp(-1, 1));
+            self.down = None;
+            self.kick();
+            return;
+        }
         let Some((_, _, pressed)) = self.down.take() else { return };
         if let Some((_, _, f)) = self.scrub.take() {
             let dur = self.media.lock().unwrap().dur;
@@ -3287,6 +3341,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if kv.get("watersettings") == Some(&"1") {
         a.water_settings = true;
+        a.sync_wheels();
     }
     if let Some(s) = kv.get("watersub") {
         a.water_sub = s.parse().unwrap_or(0);

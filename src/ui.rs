@@ -74,10 +74,8 @@ pub enum Act {
     WaterSub(u8),
     WaterSettings(bool),
     WaterReset,
-    Bottle(i32),
-    Goal(u32),
-    /// Bedtime, half an hour per step (water is spread out to it).
-    End(i32),
+    /// A rolling picker: it is dragged, turned and tapped, not clicked.
+    Wheel(WheelId),
     TodoAdd,
     TodoEditMode,
     TodoToggle(usize),
@@ -292,13 +290,6 @@ mod icon {
         let s = r * 0.42;
         g.line(cx - s, cy - s, cx + s, cy + s, 1.5, fg, a);
         g.line(cx - s, cy + s, cx + s, cy - s, 1.5, fg, a);
-    }
-    pub fn minus_plus(g: &Gfx, cx: f32, cy: f32, plus: bool, a: f32) {
-        g.fill_circle(cx, cy, 10.4, 10.4, 0x1F1F1F, a);
-        g.line(cx - 4.6, cy, cx + 4.6, cy, 2.0, 0xFFFFFF, a);
-        if plus {
-            g.line(cx, cy - 4.6, cx, cy + 4.6, 2.0, 0xFFFFFF, a);
-        }
     }
     pub fn note(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.fill_circle(cx - 3.6, cy + 5.0, 2.8, 2.2, hex, a);
@@ -2252,35 +2243,22 @@ fn water_settings(a: &mut App, lx: f32) {
     hit(a, back, Act::WaterSettings(false));
     a.gfx.ui("Settings", Rc::new(lx + 46.0, 8.2, 100.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
 
-    for (label, y) in [("Cup", 50.4f32), ("Goal", 80.8), ("Day", 110.8)] {
-        a.gfx.ui(label, Rc::new(lx + 22.0, y - 9.8, 60.0, 18.0), 13.0, 600, 0xD9D9D9, 1.0, Align::L);
+    let (cups, every) = (a.brain.cfg.water_goal, a.brain.cfg.reminders.water.minutes);
+    // Four wheels share one band across the middle, as on a phone.
+    const CY: f32 = 88.0;
+    a.gfx.fill_rrect(Rc::new(lx + 20.0, CY - 11.0, 278.0, 22.0), 7.0, 0xFFFFFF, 0.09);
+    for (label, x, w) in [("Cup", 24.0, 76.0), ("Goal", 104.0, 76.0), ("Bedtime", 188.0, 104.0)] {
+        a.gfx.ui(label, Rc::new(lx + x, 38.0, w, 13.0), 10.0, 400, 0x808080, 1.0, Align::C);
     }
-    let (cup, cups, every, goal, start, end) = {
-        let cfg = &a.brain.cfg;
-        let (day, bed) = a.brain.water_day();
-        let hm = |t: chrono::NaiveTime| chrono::Timelike::hour(&t) * 60 + chrono::Timelike::minute(&t);
-        (cfg.cup_ml, cfg.water_goal, cfg.reminders.water.minutes, cfg.water_goal * cfg.cup_ml, hm(day), hm(bed))
-    };
-    stepper(a, lx, 50.4, &format!("{cup} ml"), Act::Bottle(-1), Act::Bottle(1), 86.0, 162.0);
-    a.gfx.ui(&format!("{cups} cups a day"), Rc::new(lx + 179.6, 43.2, 130.0, 13.0), 9.5, 400, 0x808080, 1.0, Align::L);
-
-    for (i, g) in model::GOALS.iter().enumerate() {
-        let r = Rc::new(lx + 74.8 + i as f32 * 56.0, 68.0, 50.4, 24.0);
-        let on = goal == *g;
-        let h = btn(a, r, 0.07);
-        if on {
-            a.gfx.fill_rrect_hgrad(r, 12.0, (0x66E1FF, 1.0), (0x0E74FF, 1.0));
-        } else {
-            a.gfx.fill_rrect(r, 12.0, mix(0x191919, 0x333333, h), 1.0);
-        }
-        a.gfx.ui(&format!("{:.1} L", *g as f32 / 1000.0), r, 11.5, 400, if on { 0x0B2236 } else { 0xE8E8E8 }, 1.0, Align::C);
-        a.gfx.unzoom();
-        hit(a, r, Act::Goal(*g));
-    }
-    // The day starts when the user usually starts (learned); it ends at bedtime, which can be set.
-    a.gfx.ui(&hm_pad(start), Rc::new(lx + 75.0, 100.6, 98.0, 20.0), 14.0, 600, 0x9A9A9A, 1.0, Align::C);
-    a.gfx.ui("to", Rc::new(lx + 174.0, 102.2, 20.0, 15.0), 11.5, 400, GREY, 1.0, Align::C);
-    stepper(a, lx, 110.8, &hm_pad(end), Act::End(-1), Act::End(1), 206.0, 282.0);
+    let cup_text: Vec<String> = model::CUPS.iter().map(|c| format!("{c} ml")).collect();
+    let goal_text: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
+    let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+    let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
+    wheel(a, WheelId::Cup, Rc::new(lx + 24.0, CY - 30.0, 76.0, 60.0), &cup_text);
+    wheel(a, WheelId::Goal, Rc::new(lx + 104.0, CY - 30.0, 76.0, 60.0), &goal_text);
+    wheel(a, WheelId::BedHour, Rc::new(lx + 192.0, CY - 30.0, 46.0, 60.0), &hours);
+    a.gfx.ui(":", Rc::new(lx + 234.0, CY - 10.0, 12.0, 20.0), 14.0, 600, WHITE, 1.0, Align::C);
+    wheel(a, WheelId::BedMinute, Rc::new(lx + 242.0, CY - 30.0, 46.0, 60.0), &quarters);
 
     let card = Rc::new(lx + 306.0, 36.0, 92.0, 62.4);
     a.gfx.fill_rrect(card, 12.0, 0x0F1926, 1.0);
@@ -2303,15 +2281,35 @@ fn water_settings(a: &mut App, lx: f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stepper(a: &mut App, lx: f32, cy: f32, value: &str, dec: Act, inc: Act, mx: f32, px: f32) {
-    for (x, plus, act) in [(mx, false, dec), (px, true, inc)] {
-        let r = Rc::new(lx + x - 10.4, cy - 10.4, 20.8, 20.8);
-        btn(a, r, 0.15);
-        icon::minus_plus(&a.gfx, lx + x, cy, plus, 1.0);
-        a.gfx.unzoom();
-        hit(a, r, act);
+/// What a rolling picker sets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WheelId {
+    Cup,
+    Goal,
+    BedHour,
+    BedMinute,
+}
+
+/// A rolling picker: the value in the middle is the choice, the others lean back and fade.
+fn wheel(a: &mut App, id: WheelId, r: Rc, labels: &[String]) {
+    let pos = a.wheels[id as usize].pos;
+    a.gfx.push_clip(r);
+    let first = (pos.floor() as i32 - 2).max(0);
+    for i in first..(pos.ceil() as i32 + 3).min(labels.len() as i32) {
+        let d = i as f32 - pos;
+        if d.abs() > 1.9 {
+            continue;
+        }
+        // Rows bend back around a drum: closer together away from the middle.
+        let y = r.cy() + crate::wheel::ROW * 1.15 * (d * 0.85).sin() / 0.85 * 0.9;
+        let near = (1.0 - d.abs()).clamp(0.0, 1.0);
+        let size = 11.5 + 2.5 * near;
+        let tone = mix(0x8A8A8A, WHITE, near);
+        let alpha = (1.05 - 0.42 * d.abs()).clamp(0.0, 1.0);
+        a.gfx.ui(&labels[i as usize], Rc::new(r.x, y - 10.0, r.w, 20.0), size, if near > 0.5 { 600 } else { 400 }, tone, alpha, Align::C);
     }
-    a.gfx.ui(value, Rc::new(lx + mx + 11.0, cy - 10.2, px - mx - 22.0, 20.0), 14.0, 600, WHITE, 1.0, Align::C);
+    a.gfx.pop_clip();
+    hit(a, r, Act::Wheel(id));
 }
 
 // ---------------------------------------------------------------- shelf
