@@ -2732,6 +2732,7 @@ impl App {
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.pet), 2, w!("Islet Mascot"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.minimal), 3, w!("Minimal notch"));
         let _ = AppendMenuW(m, MF_STRING | check(self.settings.hide_banners), 6, w!("Hide Windows banners"));
+        let _ = AppendMenuW(m, MF_STRING | check(self.settings.show_text), 7, w!("Show notification text without hover"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(m, MF_STRING, 4, w!("About Islet"));
         let _ = AppendMenuW(m, MF_STRING, 5, w!("Exit"));
@@ -2744,6 +2745,10 @@ impl App {
             1 => sys::set_autostart(!sys::autostart_enabled()),
             2 => {
                 self.settings.pet = !self.settings.pet;
+                self.settings.save();
+            }
+            7 => {
+                self.settings.show_text = !self.settings.show_text;
                 self.settings.save();
             }
             3 => {

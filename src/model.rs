@@ -85,6 +85,8 @@ pub struct Settings {
     pub luma_app_off: bool,
     /// Lyrics stay on across restarts.
     pub lyrics: bool,
+    /// Notifications show their text at once (off: only when hovered).
+    pub show_text: bool,
 }
 
 impl Settings {
@@ -97,6 +99,7 @@ impl Settings {
             hide_banners: num(&m, "hide_banners", 1u8) == 1,
             luma_app_off: num(&m, "luma_app_off", 0u8) == 1,
             lyrics: num(&m, "lyrics", 1u8) == 1,
+            show_text: num(&m, "show_text", 0u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -109,6 +112,7 @@ impl Settings {
                 ("hide_banners", (self.hide_banners as u8).to_string()),
                 ("luma_app_off", (self.luma_app_off as u8).to_string()),
                 ("lyrics", (self.lyrics as u8).to_string()),
+                ("show_text", (self.show_text as u8).to_string()),
             ],
         );
     }

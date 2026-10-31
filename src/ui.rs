@@ -1162,6 +1162,15 @@ fn card_button(a: &mut App, r: Rc, label: &str, bg: u32, fg: u32, live: bool, ac
     }
 }
 
+/// A notification's text on its small card: hidden until hovered unless the user wants it shown.
+fn notice_text<'a>(a: &App, text: &'a str) -> &'a str {
+    if a.settings.show_text {
+        text
+    } else {
+        "Thông báo mới"
+    }
+}
+
 /// Two-line toasts, all on the shared `card` layout.
 fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
     let (kind, title, value) = (t.kind, t.title.as_str(), t.value.as_str());
@@ -1230,6 +1239,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let tw = w - 64.0 - 22.0;
             // Sender and message are centred together on the card, one line or two; a phone
             // notification names its app above them.
+            let title = notice_text(a, title);
             let body_h = a.gfx.measure_wrapped(title, 13.0, 400, tw).clamp(17.0, 34.0);
             let app_h = if phone.is_some() { 14.0 } else { 0.0 };
             // Optical centre: glyphs sit low in their line boxes.
@@ -1455,7 +1465,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             let accent = info.as_ref().map(|n| a.notice_accent(n)).unwrap_or(0xF5B833);
             let has_icon = info.as_ref().and_then(|n| n.icon.as_ref()).is_some_and(|p| a.shelf_icon(p).0.is_some());
             let c = Card { accent, dark: mix(0x000000, accent, 0.18), badge: if has_icon { Glyph::Blank } else { Glyph::Bell }, shake: if has_icon { 0.0 } else { 0.32 }, ring: None, reserve: 14.0 };
-            card(a, left, w, h, t, value, title, &c);
+            card(a, left, w, h, t, value, notice_text(a, title), &c);
             if let Some(n) = info.filter(|_| has_icon) {
                 notice_badge(a, &n, left + 32.0, h / 2.0, 10.0);
             }
