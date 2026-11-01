@@ -262,7 +262,6 @@ impl App {
                     site,
                     id: 0,
                     phone_app: None,
-                    call: false,
                 }));
                 post(crate::WM_NOTICE, 0, n as isize);
                 "notice"
@@ -277,7 +276,6 @@ impl App {
                     site: None,
                     id: 0,
                     phone_app: Some("Zalo".into()),
-                    call: false,
                 }));
                 post(crate::WM_NOTICE, 0, n as isize);
                 "message (phone)"
@@ -292,7 +290,6 @@ impl App {
                     site: Some("www.facebook.com".into()),
                     id: 0,
                     phone_app: None,
-                    call: false,
                 }));
                 post(crate::WM_NOTICE, 0, n as isize);
                 "message (notification)"

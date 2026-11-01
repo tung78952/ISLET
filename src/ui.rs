@@ -274,9 +274,6 @@ pub enum Act {
     History(bool),
     HistoryOpen(usize),
     HistoryClear,
-    /// Incoming call: bring up the app, or dismiss the card.
-    CallAccept,
-    CallDecline,
 }
 
 fn secs_label(s: f64) -> String {
@@ -547,16 +544,6 @@ mod icon {
         }
     }
     /// A phone handset, tilted down when hanging up.
-    pub fn phone(g: &Gfx, cx: f32, cy: f32, down: bool, hex: u32, a: f32) {
-        use std::f32::consts::PI;
-        let r = 7.4;
-        // The handle is an arc with a thick round earpiece at each end; hanging up it lies flat.
-        let (hx, hy, from, to) = if down { (cx, cy + 5.0, PI + 0.5, 2.0 * PI - 0.5) } else { (cx + 4.2, cy - 4.2, PI * 0.5 + 0.2, PI - 0.2) };
-        g.arc_between(hx, hy, r, from, to, 2.2, hex, a);
-        for t in [from, to] {
-            g.fill_circle(hx + r * t.cos(), hy + r * t.sin(), 2.3, 2.3, hex, a);
-        }
-    }
     /// The USB trident.
     pub fn usb(g: &Gfx, cx: f32, cy: f32, hex: u32, a: f32) {
         g.line(cx, cy + 6.6, cx, cy - 5.0, 1.6, hex, a);
@@ -661,7 +648,7 @@ pub fn draw(a: &mut App) {
     if notice {
         small_alpha = (1.0 - 2.0 * grown).clamp(0.0, 1.0);
     }
-    if a.hidden && !a.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) {
+    if a.hidden {
         small_alpha = 0.0;
     }
 
@@ -1625,36 +1612,6 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             a.gfx.text(title, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
             a.gfx.pop_clip();
             a.gfx.offset(off.0, off.1);
-        }
-        ToastKind::Call => {
-            // Apple's call banner: who, from which app, red and green round buttons.
-            let info = a.notice.clone();
-            let accent = info.as_ref().map(|n| a.notice_accent(n)).unwrap_or(GREEN);
-            let ix = left + 34.0;
-            let cy = h / 2.0;
-            // Rings spread from the icon in the app's colour, in time with the ringing.
-            for d in [0.0f32, 0.5] {
-                let q = ((age + d) % 1.4) / 1.4;
-                a.gfx.stroke_circle(ix, cy, 16.0 + 12.0 * q, 1.4, accent, 0.45 * (1.0 - q));
-            }
-            match &info {
-                Some(n) => notice_badge(a, n, ix, cy, 16.0),
-                None => a.gfx.fill_circle(ix, cy, 16.0, 16.0, accent, 1.0),
-            }
-            let tx = left + 60.0;
-            let tw = w - 60.0 - 96.0;
-            a.gfx.ui(value, Rc::new(tx, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-            a.gfx.ui(&format!("{title} · Incoming call"), Rc::new(tx, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, 1.0, Align::L);
-            for (i, (fill, act)) in [(0xFF3B30u32, Act::CallDecline), (0x34C759, Act::CallAccept)].into_iter().enumerate() {
-                let r = Rc::new(left + w - 88.0 + i as f32 * 40.0, cy - 16.0, 32.0, 32.0);
-                let hov = if live { btn(a, r, 0.08) } else { 0.0 };
-                a.gfx.fill_circle(r.cx(), r.cy(), 16.0, 16.0, mix(fill, WHITE, 0.12 * hov), 1.0);
-                icon::phone(&a.gfx, r.cx(), r.cy(), i == 0, WHITE, 1.0);
-                a.gfx.unzoom();
-                if live {
-                    hit(a, r, act);
-                }
-            }
         }
         ToastKind::Bluetooth(on) => {
             let lv = t.level.unwrap_or(0.0) * up;

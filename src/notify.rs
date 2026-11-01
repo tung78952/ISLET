@@ -29,8 +29,6 @@ pub struct Notice {
     pub id: u32,
     /// For a phone notification (Phone Link): the app on the phone.
     pub phone_app: Option<String>,
-    /// An incoming call rather than a message.
-    pub call: bool,
 }
 
 fn describe(n: &UserNotification) -> Option<Notice> {
@@ -71,8 +69,7 @@ fn describe(n: &UserNotification) -> Option<Notice> {
     };
     let id = n.Id().unwrap_or(0);
     let (phone_app, title, body) = split_phone(&aumid, &lines, title, body);
-    let call = is_call(&title, &body);
-    Some(Notice { app, title, body, aumid, source, site: site_line, id, phone_app, call })
+    Some(Notice { app, title, body, aumid, source, site: site_line, id, phone_app })
 }
 
 /// With the phone connected its notifications carry everything, so the PC's own copies stay out:
@@ -82,13 +79,6 @@ pub fn phone_covers(aumid: &str, app: &str, site: Option<&str>, phone_apps: &[St
     let browser = site.is_some() || ["chrome", "msedge", "brave", "opera", "firefox", "coccoc", "vivaldi"].iter().any(|b| id.contains(b));
     let name = app.split(" - ").next().unwrap_or(app).trim().to_lowercase();
     browser || phone_apps.iter().any(|p| !p.is_empty() && (*p == name || name.contains(p.as_str())))
-}
-
-/// Call notifications have no marker the listener can read; their wording tells them apart
-/// (first guess, to be checked against a real Zalo and Messenger call).
-fn is_call(title: &str, body: &str) -> bool {
-    let t = format!("{title} {body}").to_lowercase();
-    ["cuộc gọi đến", "đang gọi", "incoming call", "is calling", "incoming video", "incoming audio", "cuộc gọi video đến", "cuộc gọi thoại đến"].iter().any(|k| t.contains(k))
 }
 
 /// Phone Link's toast lines are: app on the phone, sender, content.
@@ -232,12 +222,6 @@ pub fn spawn(hwnd: HWND) {
                         }
                     }
                 }
-                // Gone since the last look (a call that was answered, for one).
-                if let Some(old) = &seen {
-                    for id in old.difference(&ids) {
-                        let _ = PostMessageW(Some(HWND(target as *mut _)), crate::WM_NOTICEGONE, WPARAM(*id as usize), LPARAM(0));
-                    }
-                }
                 seen = Some(ids);
             }
             if recheck {
@@ -271,13 +255,6 @@ mod tests {
         assert!(phone_covers("Zalo.App", "Zalo", None, &phone));
         assert!(!phone_covers("Microsoft.ScreenSketch_8wekyb3d8bbwe!App", "Snipping Tool", None, &phone));
         assert!(!phone_covers("MSTeams_8wekyb3d8bbwe!MSTeams", "Microsoft Teams", None, &phone));
-    }
-
-    #[test]
-    fn calls_are_told_from_messages() {
-        assert!(is_call("Minh Anh", "Cuộc gọi đến"));
-        assert!(is_call("Denis is calling you", ""));
-        assert!(!is_call("Minh Anh", "Mai gọi lại nhé"));
     }
 
     #[test]

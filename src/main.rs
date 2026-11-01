@@ -60,7 +60,6 @@ pub const WM_VOLKEY: u32 = WM_APP + 12;
 pub const WM_ICON: u32 = WM_APP + 14;
 pub const WM_SHOT: u32 = WM_APP + 15;
 pub const WM_AUDIODEV: u32 = WM_APP + 16;
-pub const WM_NOTICEGONE: u32 = WM_APP + 18;
 /// Whether the separate Luma app is still active (WPARAM 1), checked once at start.
 pub const WM_LUMAAPP: u32 = WM_APP + 17;
 
@@ -179,8 +178,6 @@ pub enum ToastKind {
     HeadsUp,
     /// The separate Luma app is still running: offer to turn it off.
     LumaApp,
-    /// Someone is calling (Accept / Decline): caller in `value`, app in `title`.
-    Call,
     /// The song that has just started: title in `title`, artist in `value`.
     Song,
     /// Preview of an animated icon.
@@ -192,12 +189,12 @@ pub enum ToastKind {
 impl ToastKind {
     /// Stays until it is answered.
     pub fn waits(self) -> bool {
-        matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::Call | ToastKind::LumaApp | ToastKind::Shutdown)
+        matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::LumaApp | ToastKind::Shutdown)
     }
 
-    /// Has buttons, so the pointer works on it and the eyes watch it; a call has its own card.
+    /// Has buttons, so the pointer works on it and the eyes watch it.
     pub fn answered(self) -> bool {
-        self != ToastKind::Call && (self.waits() || self == ToastKind::Break)
+        self.waits() || self == ToastKind::Break
     }
 
     /// Comes back if something passing covers it.
@@ -226,7 +223,6 @@ impl ToastKind {
                 | ToastKind::Remind(_)
                 | ToastKind::HeadsUp
                 | ToastKind::LumaApp
-                | ToastKind::Call
         )
     }
 }
@@ -1078,9 +1074,9 @@ impl App {
     /// Target notch size for the current state.
     pub fn target(&self) -> [f32; 2] {
         // Stepping aside: only reminders that need an answer keep their size.
-        let urgent = self.toast.as_ref().is_some_and(|t| t.kind.answered() || t.kind == ToastKind::Call);
-        // A film or a game fills the screen: only a thin sliver stays, and only a call gets past it.
-        if self.hidden && self.mode == Mode::Compact && !self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) {
+        let urgent = self.toast.as_ref().is_some_and(|t| t.kind.answered());
+        // A film or a game fills the screen: only a thin sliver stays.
+        if self.hidden && self.mode == Mode::Compact {
             return MINIMAL;
         }
         if self.yielded && self.mode == Mode::Compact && !urgent {
@@ -1118,7 +1114,7 @@ impl App {
                         WATER_TOAST
                     } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal) {
                         TALL_TOAST
-                    } else if matches!(t.kind, ToastKind::Water | ToastKind::Call | ToastKind::Remind(_)) {
+                    } else if matches!(t.kind, ToastKind::Water | ToastKind::Remind(_)) {
                         WATER_TOAST
                     } else if t.kind.tall() {
                         TALL_TOAST
@@ -1827,7 +1823,7 @@ impl App {
             // Pomodoro phase notices (Luma moves on by itself); cards waiting for an answer are
             // kept up by Luma instead (present_luma).
             ToastKind::Focus | ToastKind::Break => 6_000,
-            ToastKind::Task | ToastKind::Call => 60_000,
+            ToastKind::Task => 60_000,
             ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal => 2_600,
             ToastKind::Bluetooth(_) | ToastKind::Device(_) => 4_000,
             ToastKind::Song => 2_400,
@@ -1850,22 +1846,8 @@ impl App {
             }
             return;
         }
-        // A call ends whatever the eyes are leading.
-        if kind == ToastKind::Call && self.guide.is_some() {
-            self.end_guide(false);
-            self.guide = None;
-            self.go_view(ui::View::Page);
-            self.set_mode(Mode::Compact);
-        }
         // Sadness is about an unanswered card; whatever comes next, that moment has passed.
         self.eyes.mind.forget(eyes::Look::Sad);
-        // A call keeps the notch: what matters waits for it, the rest passes unseen.
-        if kind != ToastKind::Call && self.toast.as_ref().is_some_and(|c| c.kind == ToastKind::Call) {
-            if kind.returns() {
-                self.covered = Some((t, Instant::now()));
-            }
-            return;
-        }
         // Only the newest notification can come back.
         if matches!(kind, ToastKind::Notice | ToastKind::Message) && self.covered.as_ref().is_some_and(|(c, _)| !c.kind.waits()) {
             self.covered = None;
@@ -1920,7 +1902,7 @@ impl App {
         }
         let Some((mut t, since)) = self.covered.take() else { return };
         // A reminder may have been dealt with in the meantime.
-        if t.kind.waits() && !matches!(t.kind, ToastKind::Call | ToastKind::LumaApp | ToastKind::Shutdown) && self.brain.showing.is_none() {
+        if t.kind.waits() && !matches!(t.kind, ToastKind::LumaApp | ToastKind::Shutdown) && self.brain.showing.is_none() {
             return;
         }
         let away = since.elapsed();
@@ -2589,7 +2571,7 @@ impl App {
             self.sad_at = Some(Instant::now());
         }
         let bedtime = outcome == Outcome::Done && matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Builtin(CareKind::Sleep)));
-        self.covered = self.covered.take().filter(|(t, _)| !t.kind.waits() || matches!(t.kind, ToastKind::Call | ToastKind::LumaApp));
+        self.covered = self.covered.take().filter(|(t, _)| !t.kind.waits() || t.kind == ToastKind::LumaApp);
         self.card_rings = 0;
         if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
             self.brain.start_focus(minutes, &label, now);
@@ -2767,7 +2749,7 @@ impl App {
 
     /// A toast with its own buttons stays put under the cursor instead of opening the notch.
     fn interactive_toast(&self) -> bool {
-        self.toast.as_ref().is_some_and(|t| t.kind.answered() || t.kind == ToastKind::Call)
+        self.toast.as_ref().is_some_and(|t| t.kind.answered())
     }
 
     /// Tracks the cursor during a drag (screen pixels).
@@ -3126,14 +3108,6 @@ impl App {
                 self.brain.enabled = true;
             }
             Act::NoticeOpen => self.open_notice(),
-            // Islet can't take the call itself: the app comes up to answer it there.
-            Act::CallAccept => {
-                if let Some(n) = &self.notice {
-                    Self::open_target(n);
-                }
-                self.dismiss_toast();
-            }
-            Act::CallDecline => self.dismiss_toast(),
             Act::History(on) => {
                 self.go_view(if on { ui::View::History } else { ui::View::Page });
                 self.history_unread = 0;
@@ -4036,12 +4010,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.render();
             }
         }
-        // A call's notification left: answered, declined or missed.
-        WM_NOTICEGONE => {
-            if a.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) && a.notice.as_ref().is_some_and(|n| n.id == wp.0 as u32) {
-                a.dismiss_toast();
-            }
-        }
         WM_ICON => {
             let b = Box::from_raw(lp.0 as *mut (PathBuf, Option<(u32, u32, Vec<u8>)>, String));
             let (path, img, size) = *b;
@@ -4118,10 +4086,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if info.kind == NoticeKind::Screenshot {
                 sys::find_screenshot(a.hwnd, n.id, (240.0 * a.gfx.scale) as i32);
             }
-            if n.call {
-                sound::play(sound::Chime::Alert);
-                a.toast(ToastKind::Call, &n.phone_app.clone().unwrap_or_else(|| n.app.clone()), &n.title, None);
-            } else if info.kind == NoticeKind::Phone || n.source == Some("facebook") {
+            if info.kind == NoticeKind::Phone || n.source == Some("facebook") {
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Message, &body, &n.title, None);
             } else {
@@ -4385,7 +4350,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     // "phone=Zalo|Minh Anh|Text": a phone notification; "history=1": some past notifications.
     let demo_notice = |a: &mut App, app: &str, title: &str, body: &str| {
-        let n = notify::Notice { app: "Phone Link".into(), title: title.into(), body: body.into(), aumid: "Microsoft.YourPhone_8wekyb3d8bbwe!App".into(), source: None, site: None, id: 0, phone_app: Some(app.into()), call: false };
+        let n = notify::Notice { app: "Phone Link".into(), title: title.into(), body: body.into(), aumid: "Microsoft.YourPhone_8wekyb3d8bbwe!App".into(), source: None, site: None, id: 0, phone_app: Some(app.into()) };
         a.keep_notice(NoticeInfo::of(&n));
     };
     if kv.get("history") == Some(&"1") {
@@ -4399,18 +4364,6 @@ fn demo_setup(a: &mut App, spec: &str) {
             born: Instant::now(),
             kind: ToastKind::Message,
             title: p.get(2).unwrap_or(&"").to_string(),
-            value: p[1].to_string(),
-            level: None,
-            until: Instant::now() + Duration::from_secs(3600),
-        });
-    }
-    // "call=Zalo|Minh Anh": an incoming call.
-    if let Some(p) = kv.get("call").map(|v| v.split('|').collect::<Vec<_>>()) {
-        demo_notice(a, p[0], p[1], "");
-        a.toast = Some(Toast {
-            born: Instant::now(),
-            kind: ToastKind::Call,
-            title: p[0].to_string(),
             value: p[1].to_string(),
             level: None,
             until: Instant::now() + Duration::from_secs(3600),
@@ -4532,7 +4485,6 @@ fn demo_setup(a: &mut App, spec: &str) {
             site: p.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
             id: 0,
             phone_app: None,
-            call: false,
         };
         a.toast = Some(Toast {
             born: Instant::now() - Duration::from_secs(5),
