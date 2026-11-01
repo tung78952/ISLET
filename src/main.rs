@@ -495,8 +495,6 @@ pub struct App {
     /// The eyes go for the bell rather than the battery; when they last did.
     pub nudging_bell: bool,
     bell_nudged: Instant,
-    /// When pressing on at full volume hit the end of the bar.
-    pub bar_bump: Option<Instant>,
     /// Crossfade from `last_toast` to a different toast that replaced it (0 → 1).
     pub toast_swap: Spring,
     /// Previous value of the current toast rolling out (text, direction: 1 = new from below).
@@ -809,7 +807,6 @@ impl App {
             eye_draws: (0, 0),
             nudging_bell: false,
             bell_nudged: Instant::now(),
-            bar_bump: None,
             toast_swap: Spring::new(1.0, 1100.0, 66.0),
             roll: None,
             roll_t: Spring::new(1.0, 1100.0, 66.0),
@@ -1377,7 +1374,6 @@ impl App {
             "volume" => {
                 if !matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Volume(_))) && t < 0.2 {
                     self.toast(ToastKind::Volume(false), "Volume", "100%", Some(1.0));
-                    self.bar_bump = Some(Instant::now());
                     self.vol_stretch.v += 7.0;
                 }
                 return;
@@ -4056,6 +4052,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             a.tick();
         }
         WM_VOLUME => {
+            sys::timelog(&format!("volume event {}", wp.0));
             let v = (wp.0 & 0xFFFF) as f32 / 1000.0;
             let muted = wp.0 >> 16 != 0;
             let pct = (v * 100.0).round() as u32;
@@ -4119,6 +4116,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let ps = &*(lp.0 as *const windows::Win32::System::Power::POWERBROADCAST_SETTING);
                 if ps.PowerSetting == windows::Win32::System::SystemServices::GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS && ps.DataLength >= 4 {
                     let v = std::ptr::read_unaligned(ps.Data.as_ptr() as *const u32).min(100);
+                    sys::timelog(&format!("brightness {v}"));
                     a.brightness_changed(v);
                 }
             }
@@ -4128,15 +4126,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_FOREGROUND => a.watch(),
         WM_VOLKEY => {
             let up = wp.0 != 0;
+            sys::timelog(&format!("volume key up={up}"));
             if let Some((v, muted)) = sys::volume_state() {
                 let at_end = if up { v >= 0.999 && !muted } else { v <= 0.001 || muted };
                 if at_end {
                     let lv = if muted { 0.0 } else { v };
                     a.toast(ToastKind::Volume(muted), "Volume", &format!("{}%", (lv * 100.0).round()), Some(lv));
                     a.vol_stretch.v += if up { 7.0 } else { -7.0 };
-                    if up {
-                        a.bar_bump = Some(Instant::now());
-                    }
                     a.kick();
                 }
             }

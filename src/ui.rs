@@ -1029,22 +1029,6 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             if lv > 0.0 {
                 a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * lv).max(bar.h), bar.h), 3.2, WHITE, 1.0);
             }
-            // Still pressing at 100 %: the eyes run into the end of the bar.
-            if let Some(age) = a.bar_bump.map(|t| t.elapsed().as_secs_f32()).filter(|t| *t < 0.8) {
-                let dash = (age / 0.18).min(1.0);
-                let x = bar.x + bar.w - 44.0 + 22.0 * dash * dash - 8.0 * ((age - 0.18).max(0.0) / 0.3).min(1.0);
-                let fade = 1.0 - ((age - 0.55) / 0.25).clamp(0.0, 1.0);
-                a.gfx.fill_rrect(Rc::new(x - 16.0, cy - 8.0, 32.0, 16.0), 8.0, 0x000000, fade);
-                for dx in [-6.5, 6.5] {
-                    let oval: Vec<(f32, f32)> = (0..24)
-                        .map(|i| {
-                            let t = i as f32 / 24.0 * std::f32::consts::TAU;
-                            (x + dx + 3.8 * t.cos(), cy + 5.4 * t.sin())
-                        })
-                        .collect();
-                    lens(&a.gfx, &oval, 2.4, fade);
-                }
-            }
             return;
         }
         ToastKind::Brightness => {
