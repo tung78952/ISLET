@@ -601,6 +601,8 @@ pub struct App {
     pub live_alpha: f32,
     /// The answer a card just got (true for done) and when: the eyes react before it leaves.
     pub reaction: Option<(Instant, bool)>,
+    /// Where the eyes stand on an act's card, as last drawn.
+    pub card_eyes_x: f32,
     reaction_hops: u8,
     sample_mood: Option<eyes::Look>,
     pub swipe_last: String,
@@ -871,6 +873,7 @@ impl App {
             guide_pose: [Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(1.0, 120.0, 16.0)],
             live_alpha: 0.0,
             reaction: None,
+            card_eyes_x: WIN_W / 2.0,
             reaction_hops: 0,
             sample_mood: None,
             swipe_last: String::new(),
@@ -1662,7 +1665,9 @@ impl App {
         if !self.mouse_in || buttons < 0.6 {
             return (rest, rest_gaze);
         }
-        let gaze = ((self.mouse.0 - WIN_W / 2.0) / 190.0).clamp(-1.0, 1.0);
+        // Towards the pointer from where the eyes stand, which on an act's card is far left.
+        let from = if self.act_now().is_some() { self.card_eyes_x } else { WIN_W / 2.0 };
+        let gaze = ((self.mouse.0 - from) / CARD_GAZE).clamp(-1.0, 1.0);
         match self.hit(self.mouse.0, self.mouse.1) {
             Some(Act::LumaLater | Act::ShutdownCancel) => (Look::Sad, gaze),
             Some(Act::LumaDone | Act::GuideStart | Act::LumaNow) => (Look::Happy, gaze),
@@ -1681,6 +1686,7 @@ impl App {
     }
 
     fn step(&mut self) {
+        self.eyes.lean.tune(EYE_LEAN.0, EYE_LEAN.1);
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
@@ -1693,6 +1699,7 @@ impl App {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
             let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lift: self.card_lift(), lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
+            self.eyes.lean.tune(CARD_LEAN.0, CARD_LEAN.1);
             self.eyes.step(feel, dt);
         } else if self.toast.as_ref().is_some_and(|t| t.kind.answered()) {
             // Cards without an act of their own still watch the pointer.
@@ -4627,6 +4634,12 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.vol_stretch.x = stretch.clamp(-1.0, 1.0);
     }
 }
+
+/// How far from the eyes the pointer is when they look fully that way.
+const CARD_GAZE: f32 = 120.0;
+/// The eyes turn quicker to a pointer on a card than they wander on their own.
+const CARD_LEAN: (f32, f32) = (420.0, 34.0);
+const EYE_LEAN: (f32, f32) = (130.0, 13.0);
 
 /// What the bedtime card says: the time when it is on time, how late it is when it is not.
 fn bedtime_line(time: &str, past: Option<u32>) -> String {

@@ -1493,6 +1493,7 @@ fn bell(a: &mut App, x: f32, y: f32, s: f32, t: f32) {
 /// The large eyes on an act's card, drawn apart by `spread`.
 fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
     a.eye_draws.1 += 1;
+    a.card_eyes_x = cx;
     let hop = a.eyes.hop.x;
     let lean = a.eyes.lean.x;
     let (lower, squash) = look_down(a.eyes.drop.x);
