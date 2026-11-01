@@ -2346,8 +2346,8 @@ mod layout_tests {
         assert_eq!(strip_rest(2.7, -4.0), 2.0);
         assert_eq!(strip_rest(5.7, 0.0).rem_euclid(6.0), 0.0);
         assert_eq!(strip_rest(-0.7, 0.0).rem_euclid(6.0), 5.0);
-        assert_eq!(Page::ALL[5].next(), Page::ALL[0]);
-        assert_eq!(Page::ALL[0].prev(), Page::ALL[5]);
+        assert!(Page::ALL[5].next() == Page::ALL[0]);
+        assert!(Page::ALL[0].prev() == Page::ALL[5]);
     }
 
     #[test]
