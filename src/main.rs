@@ -1494,6 +1494,9 @@ impl App {
             self.view = ui::View::Page;
             self.view_mix.x = 0.0;
             self.brief = None;
+            self.mode = m;
+            // Closed over a full-screen app: back to the sliver.
+            self.watch();
         }
         if m == Mode::Expanded {
             self.sync_wheels();
@@ -3797,6 +3800,13 @@ impl App {
             return;
         }
         if !self.expanded() {
+            // The sliver over a full-screen app only opens on a real click, never on a pass.
+            if self.hidden {
+                self.hidden = false;
+                self.open_by_hand();
+                self.render();
+                return;
+            }
             if self.yielded && !self.interactive_toast() {
                 self.leave_yield();
                 return;
@@ -3821,9 +3831,7 @@ impl App {
                 }
                 return;
             }
-            if !self.hidden {
-                self.open_by_hand();
-            }
+            self.open_by_hand();
             self.render();
             return;
         }
