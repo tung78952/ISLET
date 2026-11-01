@@ -1852,6 +1852,7 @@ impl App {
             // A card's eyes stay out while it waits, and need frames only when the act says so.
             || self.eyes.show.x > 0.01 && self.act_now().is_none()
             || !self.hidden && self.act_now().is_some_and(|(_, e)| eyes::act_moving(e))
+            || !self.hidden && self.interactive_toast() && (self.eyes.lean.v.abs() > 0.02 || self.eyes.drop.v.abs() > 0.02)
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
             || !self.hidden && self.playing() && !(self.minimal() && self.mode == Mode::Compact)
@@ -3525,6 +3526,10 @@ impl App {
         if let Some(id) = self.wheel_held {
             let t = self.eye_time();
             self.wheels[id as usize].drag_to(y, t);
+            self.kick();
+        }
+        // A waiting card holds still, but its eyes watch the pointer.
+        if self.interactive_toast() {
             self.kick();
         }
         if !self.mouse_in {
