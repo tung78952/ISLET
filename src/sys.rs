@@ -526,9 +526,17 @@ pub fn watch_audio_devices(hwnd: HWND) {
 
 static HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
 static CAPS_HELD: AtomicBool = AtomicBool::new(false);
-/// Caps Lock state tracked from the key stream itself; GetKeyState in the hook lags behind
-/// fast presses because it reflects this thread's message queue, not the hardware.
+/// Caps Lock state tracked from the key stream itself, so the card shows at once: GetKeyState in
+/// the hook lags behind fast presses. It is only a prediction (a press can go unseen, and Windows
+/// can be set to turn Caps off with Shift), so `caps_settle` puts it right afterwards.
 static CAPS_ON: AtomicBool = AtomicBool::new(false);
+
+/// Once the key has been quiet: Windows' word against the prediction. Returns the real state if
+/// the prediction was wrong.
+pub fn caps_settle() -> Option<bool> {
+    let real = unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0;
+    (CAPS_ON.swap(real, Ordering::Relaxed) != real).then_some(real)
+}
 
 fn held(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) < 0 }

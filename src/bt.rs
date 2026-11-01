@@ -26,7 +26,31 @@ const SELECTOR: &str = "(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb
 static PHONE_ON: AtomicBool = AtomicBool::new(false);
 static PHONE_LEFT: AtomicU64 = AtomicU64::new(0);
 /// A phone that left a moment ago still counts: Bluetooth drops briefly.
-const PHONE_GRACE_MS: u64 = 60_000;
+const PHONE_GRACE_MS: u64 = 180_000;
+
+/// Phones drop their Bluetooth link every half minute or so while idle and pick it up again, so
+/// a phone has only left once it has stayed away.
+#[derive(Default)]
+pub struct PhoneWatch {
+    leaving: Option<String>,
+}
+
+impl PhoneWatch {
+    pub fn left(&mut self, name: &str) -> u32 {
+        self.leaving = Some(name.to_string());
+        PHONE_GRACE_MS as u32
+    }
+
+    /// It is back; whether that is news, or it had never really gone.
+    pub fn back(&mut self) -> bool {
+        self.leaving.take().is_none()
+    }
+
+    /// The wait ran out: it is really gone.
+    pub fn gone(&mut self) -> Option<String> {
+        self.leaving.take()
+    }
+}
 
 /// Whether notifications can be expected from the phone (through Phone Link).
 pub fn phone_connected() -> bool {
@@ -211,6 +235,29 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
 
 #[cfg(test)]
 mod tests {
+    use super::PhoneWatch;
+
+    #[test]
+    fn a_phone_flapping_every_half_minute_says_nothing() {
+        let mut w = PhoneWatch::default();
+        assert!(w.back(), "the first connection is news");
+        for _ in 0..20 {
+            w.left("ip");
+            assert!(!w.back());
+        }
+        assert_eq!(w.gone(), None);
+    }
+
+    #[test]
+    fn a_phone_that_stays_away_is_reported_once_and_so_is_its_return() {
+        let mut w = PhoneWatch::default();
+        w.back();
+        w.left("ip");
+        assert_eq!(w.gone().as_deref(), Some("ip"));
+        assert_eq!(w.gone(), None);
+        assert!(w.back());
+    }
+
     /// Reads a real device's kind: `ISLET_TEST_CONTAINER={guid} cargo test -- --ignored`.
     #[test]
     #[ignore]

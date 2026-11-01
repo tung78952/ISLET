@@ -73,6 +73,10 @@ const T_DRAGZONE: usize = 8;
 const T_DEVICE: usize = 9;
 /// Demo-only event storm driver (see storm.rs).
 const T_STORM: usize = 10;
+const T_CAPS: usize = 11;
+const T_PHONE: usize = 12;
+/// How long after the last press Windows is asked what Caps Lock really is.
+const CAPS_SETTLE_MS: u32 = 250;
 
 /// Logical window size (layout units); pixels = units × DPI scale.
 pub const WIN_W: f32 = 640.0;
@@ -589,7 +593,8 @@ pub struct App {
     /// connected their PC versions stay quiet.
     phone_apps: Vec<String>,
     /// The phone's last connection card: Bluetooth flapping doesn't get one each time.
-    phone_card: Option<Instant>,
+    phone: bt::PhoneWatch,
+    caps_settling: bool,
     /// Tasks whose start-time reminder already fired today: (title, day).
     /// Water goal reached toast shown for this day.
     /// Whether the current button press began outside the window (a drag coming in).
@@ -797,7 +802,8 @@ impl App {
             loop_rect: None,
             brightness: None,
             phone_apps: std::fs::read_to_string(model::data_dir().join("phone_apps.txt")).unwrap_or_default().lines().map(str::to_string).collect(),
-            phone_card: None,
+            phone: bt::PhoneWatch::default(),
+            caps_settling: false,
             press_known: false,
             press_outside: false,
             yielded: false,
@@ -2117,6 +2123,10 @@ impl App {
                 }
             }
         }
+        // Pressed while Islet could not see the key (locked, not running yet).
+        if !self.caps_settling {
+            sys::caps_settle();
+        }
         // A card nobody can see is not being ignored: its time stands still.
         let since = std::mem::replace(&mut self.last_brain_tick, Instant::now()).elapsed();
         if !self.toast.as_ref().is_some_and(|t| t.kind.waits()) {
@@ -3240,6 +3250,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                 }
             }
+            T_CAPS => {
+                let _ = KillTimer(Some(hwnd), T_CAPS);
+                a.caps_settling = false;
+                if let Some(on) = sys::caps_settle() {
+                    sys::timelog(&format!("caps corrected to {on}"));
+                    if a.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Caps(_))) {
+                        a.toast(ToastKind::Caps(on), "Caps Lock", if on { "On" } else { "Off" }, None);
+                    }
+                }
+            }
+            T_PHONE => {
+                let _ = KillTimer(Some(hwnd), T_PHONE);
+                if let Some(name) = a.phone.gone() {
+                    a.present_device(DeviceCard { kind: ToastKind::Bluetooth(false), name, sub: "Disconnected".into(), level: None, device: devices::DeviceKind::Phone, root: None });
+                }
+            }
             T_LANG => {
                 let _ = KillTimer(Some(hwnd), T_LANG);
                 let (id, code, native) = sys::current_layout();
@@ -3281,6 +3307,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_CAPS => {
             let on = wp.0 != 0;
             a.toast(ToastKind::Caps(on), "Caps Lock", if on { "On" } else { "Off" }, None);
+            a.caps_settling = true;
+            SetTimer(Some(hwnd), T_CAPS, CAPS_SETTLE_MS, None);
         }
         WM_LANG => {
             SetTimer(Some(hwnd), T_LANG, 180, None);
@@ -3404,11 +3432,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let level = c.battery.filter(|_| c.connected).map(|b| b as f32 / 100.0);
             a.last_bt = Some(Instant::now());
             sys::timelog(&format!("bluetooth name={:?} connected={} kind={:?} battery={:?}", c.name, c.connected, c.kind, c.battery));
-            let flapping = c.kind == devices::DeviceKind::Phone && a.phone_card.is_some_and(|t| t.elapsed() < Duration::from_secs(60));
-            if !flapping {
-                if c.kind == devices::DeviceKind::Phone {
-                    a.phone_card = Some(Instant::now());
-                }
+            let phone = c.kind == devices::DeviceKind::Phone;
+            if phone && !c.connected {
+                SetTimer(Some(hwnd), T_PHONE, a.phone.left(&c.name), None);
+            }
+            if phone && c.connected {
+                let _ = KillTimer(Some(hwnd), T_PHONE);
+            }
+            if !phone || (c.connected && a.phone.back()) {
                 a.present_device(DeviceCard { kind: ToastKind::Bluetooth(c.connected), name: c.name.clone(), sub: state.into(), level, device: c.kind, root: None });
             }
         }
