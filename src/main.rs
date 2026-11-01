@@ -1221,7 +1221,7 @@ impl App {
 
     /// Where the big eyes may be right now.
     pub fn eye_seat(&self) -> stage::Seat {
-        let acted = |k: ToastKind| matches!(k, ToastKind::Water | ToastKind::Sample(_) | ToastKind::Remind(_));
+        let acted = |k: ToastKind| k.answered() || matches!(k, ToastKind::Sample(_));
         let fading = self.toast_mix.x > 0.01 && self.last_toast.as_ref().is_some_and(|t| acted(t.kind));
         stage::seat(stage::Scene { toast: self.toast.is_some() || fading, yielded: self.yielded, lyrics: self.pill_mix.x > 0.01 && self.lyric_line().is_some() })
     }
