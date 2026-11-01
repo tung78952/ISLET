@@ -2100,6 +2100,7 @@ impl App {
         if reason {
             self.yield_seen = now;
             if !self.yielded {
+                sys::timelog(&format!("yield on clicked={} near={} pointer_in_zone={}", self.click_in_zone, self.near_since.is_some(), in_zone(cur)));
                 self.yielded = true;
                 if self.mode != Mode::Compact {
                     self.set_mode(Mode::Compact);
@@ -2113,6 +2114,7 @@ impl App {
 
     /// The notch comes back; a small overshoot right after must not open it.
     fn leave_yield(&mut self) {
+        sys::timelog("yield off");
         self.yielded = false;
         self.no_hover_until = Some(Instant::now() + Duration::from_secs(2));
         self.kick();
@@ -3469,6 +3471,16 @@ impl App {
             // Brushing the sliver does nothing: the pointer is usually on its way to something
             // just below it. It comes back when the pointer leaves, or on a click.
             let held = self.yielded || self.hidden || self.no_hover_until.is_some_and(|t| Instant::now() < t);
+            sys::timelog(&format!(
+                "hover enter mode={:?} yielded={} hidden={} no_hover={} notice={} card={} toast={:?}",
+                self.mode,
+                self.yielded,
+                self.hidden,
+                self.no_hover_until.is_some_and(|t| Instant::now() < t),
+                self.notice_toast(),
+                self.interactive_toast(),
+                self.toast.as_ref().map(|t| t.kind)
+            ));
             if held {
             } else if self.mode == Mode::Compact && self.notice_toast() {
                 // A resting cursor grows the notification instead of opening the widgets.

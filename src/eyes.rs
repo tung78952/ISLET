@@ -127,6 +127,8 @@ pub const RANGE: f32 = 170.0;
 pub const RANGE_OUT: f32 = 230.0;
 /// A pointer must stay this long before they open: one just passing through is ignored.
 const NOTICE: f32 = 0.25;
+/// How long after stopping a pointer still counts as having just arrived.
+const ARRIVED: f32 = 1.0;
 /// How long they watch a pointer leave before their lids drop, and then shut.
 const WATCH_LEAVE: f32 = 0.95;
 const DROP_LIDS: f32 = 0.3;
@@ -137,7 +139,7 @@ const LONGEST: f32 = 12.0;
 /// Seconds they stay away after leaving: bored, worked around, or told to move.
 const REST_BORED: f32 = 3.0;
 const DIZZY: f32 = 2.0;
-const REST_WORKING: f32 = 30.0;
+const REST_WORKING: f32 = 8.0;
 const REST_ACTED: f32 = 1.0;
 
 /// Seconds an event waits for a free moment before it is dropped.
@@ -242,6 +244,7 @@ pub struct Mind {
     fixed: f32,
     hold_until: f32,
     glance_at: f32,
+    last_motion: f32,
     twitch: f32,
     twitch_at: f32,
     /// Quick changes of direction, for spotting a shaken pointer.
@@ -273,6 +276,7 @@ impl Mind {
             fixed: 0.0,
             hold_until: 0.0,
             glance_at: 0.0,
+            last_motion: f32::MIN,
             twitch: 0.0,
             twitch_at: 0.0,
             heading: 0.0,
@@ -352,6 +356,9 @@ impl Mind {
         let heading = self.last.map_or(0.0, |(px, ..)| (s.x - px).signum());
         self.last = Some((s.x, s.y, t));
         let moving = speed > 60.0 * s.scale;
+        if moving {
+            self.last_motion = t;
+        }
         if self.next_random == 0.0 {
             self.next_random = t + 900.0 + 1500.0 * self.roll();
         } else if t >= self.next_random {
@@ -399,7 +406,9 @@ impl Mind {
         if !self.awake {
             self.near_since = if s.near { self.near_since.or(Some(t)) } else { None };
             let noticed = self.near_since.is_some_and(|at| t - at >= NOTICE);
-            if !(noticed && moving && t >= self.rest_until) {
+            // A pointer that has just come to a stop counts; one lying there from before does not.
+            let arrived = t - self.last_motion < ARRIVED;
+            if !(noticed && arrived && t >= self.rest_until) {
                 return self.asleep(t);
             }
             self.awake = true;
@@ -945,6 +954,18 @@ mod tests {
         assert!(!m.tick(&sense(0.05, 100.0)).show, "a still pointer wakes nothing");
         assert!(!m.tick(&sense(0.1, 130.0)).show, "a pointer passing through is ignored");
         assert!(m.tick(&sense(0.3, 200.0)).show);
+    }
+
+    #[test]
+    fn a_pointer_that_just_stopped_still_wakes_them_but_one_long_there_does_not() {
+        let mut m = Mind::new();
+        m.tick(&sense(0.0, 100.0));
+        m.tick(&sense(0.05, 130.0));
+        assert!(m.tick(&sense(0.35, 130.0)).show);
+        let mut m = Mind::new();
+        for i in 0..40 {
+            assert!(!m.tick(&sense(i as f32 * 0.05, 100.0)).show);
+        }
     }
 
     #[test]
