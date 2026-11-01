@@ -713,7 +713,7 @@ pub fn draw(a: &mut App) {
             }
         }
     }
-    focus_dots(a, left, w, h);
+    focus_sun(a, left, w, h);
     if notice {
         let d = (2.0 * grown - 1.0).clamp(0.0, 1.0);
         if d > 0.01 {
@@ -772,54 +772,55 @@ fn clock_text(left_s: f64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
-/// Where the focus dots are. `open` is 0 in the small notch, where they form a ring with the first
-/// around 12 o'clock, and 1 in the open one, where the ring has unbent into a straight row.
-pub fn dot_at(i: usize, open: f32, ring: (f32, f32), row: (f32, f32)) -> (f32, f32) {
-    let u = i as f32 - (FOCUS_DOTS as f32 - 1.0) / 2.0;
-    let turn = -std::f32::consts::FRAC_PI_2 + u / FOCUS_DOTS as f32 * std::f32::consts::TAU;
-    let (cx, cy) = (ring.0 + 7.5 * turn.cos(), ring.1 + 7.5 * turn.sin());
-    let (rx, ry) = (row.0 + u * 2.3, row.1);
-    (cx + (rx - cx) * open, cy + (ry - cy) * open)
+/// The focus timer: a red sun going down behind the horizon, with its light on the water below.
+/// `left` is how much of the time remains; the used part stays as the reflection and the line.
+fn sunset(a: &mut App, cx: f32, cy: f32, r: f32, left: f32) {
+    let t = a.born.elapsed().as_secs_f32();
+    let horizon = cy + r * 0.42;
+    let sun = horizon - r * 0.52 + (1.0 - left) * r * 1.5;
+    let height = (horizon - sun).clamp(-r, r);
+    let chord = (r * r - height * height).max(0.0).sqrt();
+    a.gfx.glow_ellipse(cx, horizon - r * 0.1, r * 1.5, r * 1.1, RED, 0.16 + 0.1 * left);
+    a.gfx.push_clip(Rc::new(cx - r - 2.0, cy - r * 2.0, 2.0 * r + 4.0, horizon - (cy - r * 2.0)));
+    a.gfx.fill_circle(cx, sun, r, r, RED, 1.0);
+    a.gfx.fill_circle(cx - r * 0.12, sun - r * 0.16, r * 0.76, r * 0.76, 0xFF7468, 0.5);
+    a.gfx.pop_clip();
+    // The light on the water, each band narrower and drifting a little.
+    let band = (r * 0.09).max(1.0);
+    let gap = (r * 0.2).max(2.4);
+    let width = chord.max(r * 0.34);
+    for i in 0..3 {
+        let k = i as f32;
+        let drift = r * 0.05 * (t * 0.9 + k * 1.7).sin();
+        let half = width * (1.0 - 0.24 * k) + r * 0.04 * (t * 1.3 + k).sin();
+        let y = horizon + band * 0.5 + k * gap;
+        a.gfx.fill_rrect(Rc::new(cx + drift - half, y, 2.0 * half, band), band / 2.0, RED, (0.95 - 0.28 * k) * (0.55 + 0.45 * left));
+    }
 }
 
-const FOCUS_DOTS: usize = 12;
-/// A dot that has gone out: dark, but still there.
-const DOT_OUT: u32 = 0x6E2A2E;
-
-/// The focus dots: a ring of light in the notch that unbends into a row as it opens. They go out
-/// one by one, clockwise round the ring.
-fn focus_dots(a: &mut App, left: f32, w: f32, h: f32) {
+/// The small sun that stays in the notch while focus runs, moving with it as it opens.
+fn focus_sun(a: &mut App, left: f32, w: f32, h: f32) {
     if a.brain.focus.is_none() || a.live_alpha <= 0.01 {
         return;
     }
     let (time, total, _, _) = a.pomo_view();
-    let gone = (1.0 - (time / total) as f32) * FOCUS_DOTS as f32;
     let open = ((h - 30.0) / 110.0).clamp(0.0, 1.0);
     let open = open * open * (3.0 - 2.0 * open);
     let ring = (left + w - 19.0, 14.8);
     let row = (left + (SLOT_LIVE.0 + SLOT_LIVE.1) / 2.0, 19.0);
+    let at = (ring.0 + (row.0 - ring.0) * open, ring.1 + (row.1 - ring.1) * open);
     let base = a.gfx.alpha;
-    a.gfx.alpha = a.live_alpha;
-    let left = FOCUS_DOTS as f32 - gone;
-    for i in 0..FOCUS_DOTS {
-        // Clockwise from the top of the ring; from the right along the row.
-        let round = (((i + FOCUS_DOTS / 2) % FOCUS_DOTS) as f32 + 1.0 - gone).clamp(0.0, 1.0);
-        let along = (left - i as f32).clamp(0.0, 1.0);
-        let k = round + (along - round) * open;
-        let (x, y) = dot_at(i, open, ring, row);
-        if k > 0.02 {
-            a.gfx.fill_circle(x, y, 2.4, 2.4, RED, 0.18 * k);
-        }
-        a.gfx.fill_circle(x, y, 1.15, 1.15, mix(DOT_OUT, RED, k), 1.0);
-    }
+    // The Focus page has the big one; two suns would be one too many.
+    a.gfx.alpha = a.live_alpha * if a.page == Page::Pomo && a.view == View::Page { 1.0 - open } else { 1.0 };
+    sunset(a, at.0, at.1, 8.0, (time / total) as f32);
     a.gfx.alpha = base;
 }
 
-/// Equalizer bars while music plays, or the focus dots while it runs.
+/// Equalizer bars while music plays; while focus runs, how visible its sun may be.
 fn right_indicator(a: &mut App, x: f32, cy: f32) {
     // The only part that moves when nothing else does: frames can redraw just this box.
     a.loop_rect = Some(Rc::new(x - 3.0, cy - 12.0, 27.0, 24.0));
-    // Focus has its dots, drawn by `focus_dots`; this only says how visible they may be.
+    // Focus has its sun, drawn by `focus_sun`; this only says how visible it may be.
     if a.brain.focus.is_some() {
         a.live_alpha = a.gfx.alpha;
         return;
@@ -2518,24 +2519,9 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
 }
 
 fn focus_running(a: &mut App, lx: f32, live: bool) {
-    use std::f32::consts::TAU;
     let (left_s, total_s, running, phase) = a.pomo_view();
     let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
-    // A wave of dots flowing slowly, going out from its far end as the time runs down.
-    const DOTS: usize = 34;
-    let (x0, x1, cy) = (lx + 28.0, lx + 194.0, 78.0);
-    let flow = a.born.elapsed().as_secs_f32() * if running { 1.6 } else { 0.0 };
-    let lit = left * DOTS as f32;
-    for i in 0..DOTS {
-        let u = i as f32 / (DOTS - 1) as f32;
-        let k = (lit - i as f32).clamp(0.0, 1.0);
-        let tail = (1.0 - (i as f32 - (lit - 8.0)).max(0.0) / 8.0).clamp(0.3, 1.0);
-        let (x, y) = (x0 + (x1 - x0) * u, cy + 13.0 * (u * 1.5 * TAU - flow).sin());
-        if k > 0.02 {
-            a.gfx.fill_circle(x, y, 4.0, 4.0, RED, 0.14 * k * tail);
-        }
-        a.gfx.fill_circle(x, y, 1.9, 1.9, mix(DOT_OUT, RED, k * tail), 1.0);
-    }
+    sunset(a, lx + 104.0, 70.0, 36.0, left);
     pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
     a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
     a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
