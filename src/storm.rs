@@ -30,11 +30,25 @@ pub struct Storm {
     gaps_ms: Vec<f32>,
     last_frame: Option<Instant>,
     settle_from: Option<Instant>,
+    /// Pair mode: every feature on top of every other, in both orders.
+    pairs: Vec<(u64, u64)>,
+    step: usize,
+    forced: Option<u64>,
+    pair: String,
 }
 
+/// One event of each feature for the pair table (see `storm_event`): volume, brightness, Caps
+/// Lock, charger, Bluetooth, notice, message, pointer, widgets, stepping aside, reminder, focus.
+const PAIRED: [u64; 12] = [0, 1, 2, 4, 5, 7, 10, 12, 16, 17, 19, 21];
+const PAIR_GAP_MS: u64 = 250;
+const PAIR_WATCH_MS: u64 = 1600;
+const PAIR_REST_MS: u64 = 700;
+
 impl Storm {
-    pub fn new(secs: u64, seed: u64, log: PathBuf) -> Self {
+    pub fn new(secs: u64, seed: u64, log: PathBuf, paired: bool) -> Self {
         let now = Instant::now();
+        let pairs: Vec<(u64, u64)> = if paired { PAIRED.iter().flat_map(|a| PAIRED.iter().map(move |b| (*a, *b))).collect() } else { Vec::new() };
+        let secs = if paired { pairs.len() as u64 * (PAIR_GAP_MS + PAIR_WATCH_MS + PAIR_REST_MS) / 1000 + 2 } else { secs };
         // A panic inside a window procedure aborts the process; leave its message in the report.
         let path = log.clone();
         std::panic::set_hook(Box::new(move |info| {
@@ -54,6 +68,10 @@ impl Storm {
             gaps_ms: Vec::new(),
             last_frame: None,
             settle_from: None,
+            pairs,
+            step: 0,
+            forced: None,
+            pair: String::new(),
         }
     }
 
@@ -88,7 +106,9 @@ impl App {
         let Some(mut s) = self.storm.take() else { return };
         let now = Instant::now();
         if now < s.end {
-            if now >= s.next {
+            if now >= s.next && !s.pairs.is_empty() {
+                self.pair_step(&mut s, now);
+            } else if now >= s.next {
                 let ev = self.storm_event(&mut s);
                 *s.counts.entry(ev).or_default() += 1;
                 let gap = 80 + s.pick(320);
@@ -119,6 +139,38 @@ impl App {
         self.storm = Some(s);
     }
 
+    /// First feature, a moment later the second, watch, then clean up for the next pair.
+    fn pair_step(&mut self, s: &mut Storm, now: Instant) {
+        let Some(&(a, b)) = s.pairs.get(s.step / 3) else {
+            s.end = now;
+            return;
+        };
+        let phase = s.step % 3;
+        s.step += 1;
+        let wait = match phase {
+            0 | 1 => {
+                s.forced = Some(if phase == 0 { a } else { b });
+                let ev = self.storm_event(s);
+                *s.counts.entry(ev).or_default() += 1;
+                s.pair = format!("{a}+{b}");
+                if phase == 0 { PAIR_GAP_MS } else { PAIR_WATCH_MS }
+            }
+            _ => {
+                if self.mouse_in {
+                    self.on_mouse_leave();
+                }
+                if self.mode == Mode::Expanded {
+                    self.set_mode(Mode::Compact);
+                }
+                self.yielded = false;
+                self.act(crate::ui::Act::LumaLater);
+                self.brain.stop_focus(chrono::Local::now());
+                PAIR_REST_MS
+            }
+        };
+        s.next = now + Duration::from_millis(wait);
+    }
+
     fn storm_event(&mut self, s: &mut Storm) -> &'static str {
         let hwnd = self.hwnd;
         let post = |msg: u32, wp: usize, lp: isize| unsafe {
@@ -134,7 +186,11 @@ impl App {
             DeviceKind::Phone,
         ];
         let (cx, w) = self.notch_geometry();
-        match s.pick(24) {
+        let ev = match s.forced.take() {
+            Some(e) => e,
+            None => s.pick(24),
+        };
+        match ev {
             0 => {
                 let v = s.pick(1001) as usize;
                 let muted = s.pick(10) == 0;
@@ -377,13 +433,21 @@ impl App {
         fail("capture exclusion out of step", self.private != (message || grace), state.clone());
         let luma_card = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::HeadsUp | ToastKind::Task | ToastKind::Focus));
         fail("Luma reminder waiting unseen", self.brain.showing.is_some() && self.toast.is_none() && self.mode != Mode::Expanded && !luma_card, state.clone());
+        fail("two pairs of eyes", self.eye_draws.0 > 1 || (self.eye_draws.0 > 0 && self.eye_draws.1 > 0), state.clone());
+        fail("a card rang twice", self.card_rings > 1, state.clone());
+        let sad = self.eye_feel.show && self.eye_feel.look == crate::eyes::Look::Sad && self.sad_at.is_none_or(|t| now - t > Duration::from_secs(12));
+        fail("sad for no reason", sad, state.clone());
         let visible = unsafe { IsWindowVisible(self.hwnd).as_bool() };
         fail("window hidden", !visible && !self.hidden, state);
         // Luma's ticker runs every 2 s, so its card may take that long to come back.
-        let grace = |name: &str| Duration::from_millis(if name.starts_with("Luma") { 3000 } else { 1000 });
+        let grace = |name: &str| match name {
+            n if n.starts_with("Luma") => Duration::from_millis(3000),
+            "two pairs of eyes" | "a card rang twice" | "sad for no reason" => Duration::ZERO,
+            _ => Duration::from_millis(1000),
+        };
         let expired: Vec<_> = s.open_failures.iter().filter(|(k, (t, _))| now - *t > grace(k)).map(|(k, v)| (*k, v.1.clone())).collect();
         for (name, st) in expired {
-            s.failures.push(format!("{:>6.1}s  {name}  [{st}]", (now - s.started).as_secs_f32()));
+            s.failures.push(format!("{:>6.1}s  {} {name}  [{st}]", (now - s.started).as_secs_f32(), s.pair));
             s.open_failures.remove(name);
         }
     }
@@ -411,7 +475,7 @@ impl App {
         if !self.device_queue.is_empty() {
             s.failures.push(format!("{at:>6.1}s  device cards never shown: {}  [{state}]", self.device_queue.len()));
         }
-        if self.toast.is_some() || self.toast_open || self.held_notice.is_some() {
+        if self.toast.is_some() || self.toast_open || self.held_notice.is_some() || self.covered_toast() {
             s.failures.push(format!("{at:>6.1}s  leftover toast state  [{state}]"));
         }
     }

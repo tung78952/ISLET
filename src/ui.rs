@@ -7,6 +7,8 @@ use crate::media::LyrStatus;
 use crate::model::{self, Phase};
 use crate::{App, ToastKind};
 
+use crate::stage::Seat;
+
 const WHITE: u32 = 0xFFFFFF;
 const GREEN: u32 = 0x21FF54;
 const RED: u32 = 0xFF4F4F;
@@ -467,6 +469,7 @@ mod icon {
 pub fn draw(a: &mut App) {
     a.hits.clear();
     a.loop_rect = None;
+    a.eye_draws = (0, 0);
     let (visual_cx, visual_w) = a.notch_geometry();
     let (w, h) = (visual_w.max(1.0), a.sh.x.max(1.0));
     let cx = visual_cx;
@@ -500,6 +503,7 @@ pub fn draw(a: &mut App) {
             a.gfx.pop_layer();
         }
     }
+    let seat = a.eye_seat();
     let lm = a.lyr_mix.x.clamp(0.0, 1.0);
     if a.page == Page::Music && lm > 0.01 && a.fade.x > 0.01 {
         lyrics_backdrop(a, left, w, h, radius, lm);
@@ -535,7 +539,7 @@ pub fn draw(a: &mut App) {
         if base > 0.01 && h > 18.0 && !a.minimal() && !a.yielded {
             a.gfx.alpha = na * small_alpha * base;
             compact(a, left, w);
-        } else if a.yielded && a.eyes.show.x > 0.3 {
+        } else if seat == Seat::Aside && a.eyes.show.x > 0.3 {
             // The eyes shut as the notch leaves, inside its shrinking outline.
             let clipped = a.gfx.push_notch_clip(cx, w, h, radius, ear);
             a.gfx.alpha = 1.0;
@@ -553,7 +557,7 @@ pub fn draw(a: &mut App) {
             a.gfx.alpha = na * small_alpha * pm * (1.0 - (show / 0.3).min(1.0));
             lyric_pill(a, left, w);
             a.gfx.alpha = na * small_alpha * pm;
-            if show > 0.3 {
+            if show > 0.3 && seat == Seat::Lyrics {
                 eyes(a, left + w / 2.0, h / 2.0, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
             }
             a.gfx.alpha = 1.0;
@@ -597,7 +601,8 @@ pub fn draw(a: &mut App) {
 fn compact(a: &mut App, left: f32, w: f32) {
     let cy = 14.8;
     let charging = a.power.is_some_and(|p| p.battery && p.ac);
-    let show = a.eyes.show.x.clamp(0.0, 1.0);
+    let bar = a.eye_seat() == Seat::Bar;
+    let show = if bar { a.eyes.show.x.clamp(0.0, 1.0) } else { 0.0 };
     // The eyes have the notch to themselves: everything else steps back while they are open.
     let rest = 1.0 - (show / 0.3).min(1.0);
     if charging {
@@ -645,6 +650,7 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
 
 /// White mask lenses with a thin red rim, as on the design sheet.
 fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
+    a.eye_draws.0 += 1;
     const RED: u32 = 0xFF1F1F;
     /// Notch units per pixel of the design sheet.
     const SCALE: f32 = 0.175;
@@ -1167,6 +1173,7 @@ fn bell(a: &mut App, x: f32, y: f32, s: f32, t: f32) {
 
 /// The large eyes on an act's card, drawn apart by `spread`.
 fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
+    a.eye_draws.1 += 1;
     const RED: u32 = crate::CHARACTER;
     let hop = a.eyes.hop.x;
     let lean = a.eyes.lean.x * 7.0;

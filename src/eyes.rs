@@ -268,6 +268,11 @@ impl Mind {
         self.pending = Some((peek, t));
     }
 
+    /// A mood waiting to be shown no longer applies.
+    pub fn forget(&mut self, look: Look) {
+        self.pending = self.pending.filter(|(p, _)| *p != Peek::Mood(look));
+    }
+
     /// What they do during a peek, `e` seconds in.
     fn peeking(&mut self, t: f32, peek: Peek, e: f32, face: Look) -> Feel {
         let blink = self.blink(t);

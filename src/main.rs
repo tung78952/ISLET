@@ -13,6 +13,7 @@ mod model;
 mod notify;
 mod sound;
 mod pump;
+mod stage;
 mod storm;
 mod sys;
 mod ui;
@@ -169,6 +170,16 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
+    /// Stays until it is answered.
+    pub fn waits(self) -> bool {
+        matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::Call | ToastKind::LumaApp)
+    }
+
+    /// Comes back if something passing covers it.
+    pub fn returns(self) -> bool {
+        self.waits() || matches!(self, ToastKind::Notice | ToastKind::Message)
+    }
+
     pub fn tall(self) -> bool {
         matches!(
             self,
@@ -406,6 +417,14 @@ pub struct App {
     pub pill_mix: Spring,
     /// The toast being faded out after it ended.
     pub last_toast: Option<Toast>,
+    /// What a passing toast covered, and since when: it comes back where it was.
+    covered: Option<(Toast, Instant)>,
+    last_brain_tick: Instant,
+    /// Times the notch rang for the card showing, and when a card last went unanswered.
+    pub card_rings: u32,
+    pub sad_at: Option<Instant>,
+    /// Big eyes and card eyes drawn in the last frame.
+    pub eye_draws: (u8, u8),
     /// Crossfade from `last_toast` to a different toast that replaced it (0 → 1).
     pub toast_swap: Spring,
     /// Previous value of the current toast rolling out (text, direction: 1 = new from below).
@@ -488,7 +507,6 @@ pub struct App {
     pub reminder_top: usize,
     pub form: Option<Form>,
     pub toast: Option<Toast>,
-    queue: VecDeque<Toast>,
     /// A notification that arrived while the widgets were open; shown when they close.
     held_notice: Option<Toast>,
     /// Clock minute last drawn by the idle tick.
@@ -672,6 +690,11 @@ impl App {
             toast_mix: Spring::new(0.0, 1600.0, 80.0),
             pill_mix: Spring::new(0.0, 1600.0, 80.0),
             last_toast: None,
+            covered: None,
+            last_brain_tick: Instant::now(),
+            card_rings: 0,
+            sad_at: None,
+            eye_draws: (0, 0),
             toast_swap: Spring::new(1.0, 1100.0, 66.0),
             roll: None,
             roll_t: Spring::new(1.0, 1100.0, 66.0),
@@ -724,7 +747,6 @@ impl App {
             reminder_top: 0,
             form: None,
             toast: None,
-            queue: VecDeque::new(),
             held_notice: None,
             drawn_minute: u32::MAX,
             zone_every: 50,
@@ -1074,6 +1096,13 @@ impl App {
         self.power.map_or(1.0, |p| p.pct as f32 / 100.0)
     }
 
+    /// Where the big eyes may be right now.
+    pub fn eye_seat(&self) -> stage::Seat {
+        let acted = |k: ToastKind| matches!(k, ToastKind::Water | ToastKind::Sample(_) | ToastKind::Remind(_));
+        let fading = self.toast_mix.x > 0.01 && self.last_toast.as_ref().is_some_and(|t| acted(t.kind));
+        stage::seat(stage::Scene { toast: self.toast.is_some() || fading, yielded: self.yielded, lyrics: self.pill_mix.x > 0.01 && self.lyric_line().is_some() })
+    }
+
     /// The reminder being acted out on the card, and how long it has been going.
     pub fn act_now(&self) -> Option<(eyes::ActKind, f32)> {
         use eyes::ActKind as A;
@@ -1247,7 +1276,10 @@ impl App {
         }
         if m == Mode::Expanded {
             self.toast = None;
-            self.queue.clear();
+            // A reminder comes back by itself; a notification waits with the others.
+            if let Some((t, _)) = self.covered.take().filter(|(t, _)| !t.kind.waits()) {
+                self.held_notice = self.held_notice.take().or(Some(t));
+            }
         }
         if self.mode == Mode::Expanded && m != Mode::Expanded {
             // Notifications are never lost to an open notch: the latest one plays now.
@@ -1484,6 +1516,19 @@ impl App {
             }
             return;
         }
+        // Sadness is about an unanswered card; whatever comes next, that moment has passed.
+        self.eyes.mind.forget(eyes::Look::Sad);
+        // A call keeps the notch: what matters waits for it, the rest passes unseen.
+        if kind != ToastKind::Call && self.toast.as_ref().is_some_and(|c| c.kind == ToastKind::Call) {
+            if kind.returns() {
+                self.covered = Some((t, Instant::now()));
+            }
+            return;
+        }
+        // Only the newest notification can come back.
+        if matches!(kind, ToastKind::Notice | ToastKind::Message) && self.covered.as_ref().is_some_and(|(c, _)| !c.kind.waits()) {
+            self.covered = None;
+        }
         let same = |a: ToastKind, b: ToastKind| std::mem::discriminant(&a) == std::mem::discriminant(&b);
         match self.toast.take() {
             Some(cur) if same(cur.kind, kind) && self.toast_mix.x > 0.5 && !(matches!(kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) && cur.title != title) => {
@@ -1500,7 +1545,12 @@ impl App {
                 }
             }
             Some(cur) => {
-                // A different toast replaces the current one at once, crossfading.
+                // A different toast replaces the current one at once, crossfading. What still
+                // matters comes back afterwards, unless a card took over from a card.
+                let keep = cur.kind.returns() && !kind.waits() || cur.kind.returns() && !cur.kind.waits();
+                if keep && self.covered.as_ref().is_none_or(|(c, _)| !c.kind.waits() || cur.kind.waits()) {
+                    self.covered = Some((cur.clone(), Instant::now()));
+                }
                 self.last_toast = Some(cur);
                 self.toast_swap.x = 0.0;
                 self.toast_swap.v = 0.0;
@@ -1514,9 +1564,32 @@ impl App {
             }
         }
         self.toast = Some(t);
-        self.queue.clear();
         self.kick();
         self.render();
+    }
+
+    pub fn covered_toast(&self) -> bool {
+        self.covered.is_some()
+    }
+
+    /// The toast is gone: what it covered carries on from where it was.
+    fn uncover(&mut self) {
+        if self.toast.is_some() || self.mode == Mode::Expanded {
+            return;
+        }
+        let Some((mut t, since)) = self.covered.take() else { return };
+        // A reminder may have been dealt with in the meantime.
+        if t.kind.waits() && !matches!(t.kind, ToastKind::Call | ToastKind::LumaApp) && self.brain.showing.is_none() {
+            return;
+        }
+        let away = since.elapsed();
+        t.born += away;
+        t.until += away;
+        self.toast = Some(t);
+        self.toast_swap.x = 0.0;
+        self.toast_swap.v = 0.0;
+        self.roll = None;
+        self.kick();
     }
 
     pub fn drag_hover(&mut self, on: bool) {
@@ -2044,10 +2117,16 @@ impl App {
                 }
             }
         }
+        // A card nobody can see is not being ignored: its time stands still.
+        let since = std::mem::replace(&mut self.last_brain_tick, Instant::now()).elapsed();
+        if !self.toast.as_ref().is_some_and(|t| t.kind.waits()) {
+            self.brain.delay_card(chrono::TimeDelta::from_std(since).unwrap_or_default());
+        }
         if self.brain.timed_out(now) {
             self.answer_luma(Outcome::Snooze, true);
         }
-        // A reminder card covered by another toast (or the open widgets) comes back afterwards.
+        self.uncover();
+        // A reminder card covered by the open widgets comes back afterwards.
         if self.toast.is_none() && self.mode != Mode::Expanded && self.card_after.is_none() {
             match self.brain.showing.as_ref().map(|s| (s.due.clone(), s.heads_up_until)) {
                 Some((due, Some(until))) => self.present_heads_up(&due, (until - now).num_seconds().max(1) as u32),
@@ -2108,10 +2187,18 @@ impl App {
         if self.mode == Mode::Expanded {
             return;
         }
-        sound::play(sound::Chime::Soft);
+        // Back from being covered: no second ring, and the act is over.
+        let back = self.brain.showing.as_ref().is_some_and(|s| s.card_at.is_some());
+        if !back {
+            sound::play(sound::Chime::Soft);
+            self.card_rings += 1;
+        }
         self.toast(kind, &title, &value, None);
         if let Some(t) = self.toast.as_mut().filter(|t| t.kind == kind) {
             t.until = Instant::now() + Duration::from_secs(3600);
+            if back {
+                t.born -= Duration::from_secs_f32(eyes::ACT_END);
+            }
             self.brain.card_shown(chrono::Local::now());
         }
     }
@@ -2148,7 +2235,10 @@ impl App {
         if timed_out || self.later_row >= 3 {
             self.later_row = 0;
             self.feel(eyes::Look::Sad);
+            self.sad_at = Some(Instant::now());
         }
+        self.covered = self.covered.take().filter(|(t, _)| !t.kind.waits() || matches!(t.kind, ToastKind::Call | ToastKind::LumaApp));
+        self.card_rings = 0;
         if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
             self.brain.start_focus(minutes, &label, now);
         }
@@ -2265,6 +2355,7 @@ impl App {
 
     fn dismiss_toast(&mut self) {
         self.last_toast = self.toast.take();
+        self.uncover();
         self.kick();
         self.render();
     }
@@ -2673,10 +2764,7 @@ impl App {
         if let Some(t) = self.toast.as_ref().filter(|_| !self.toast_open) {
             if Instant::now() >= t.until {
                 self.last_toast = self.toast.take();
-                self.toast = self.queue.pop_front().map(|mut t| {
-                    t.until = Instant::now() + Duration::from_millis(1800);
-                    t
-                });
+                self.uncover();
                 self.kick();
             }
         }
@@ -3473,6 +3561,7 @@ fn demo_setup(a: &mut App, spec: &str) {
             a.add_todo(title, time);
         }
     }
+    a.yielded = kv.get("yielded") == Some(&"1");
     if let Some(cups) = kv.get("cups").and_then(|v| v.parse().ok()) {
         a.brain.stats.water = cups;
     }
@@ -3698,11 +3787,11 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.toast_open = kv.get("notice_open") == Some(&"1");
     }
     // "storm=120;seed=7;stormlog=<file>": event-storm test (storm.rs); writes the report and exits.
-    if let Some(secs) = kv.get("storm").and_then(|v| v.parse::<u64>().ok()) {
+    if let Some(secs) = kv.get("storm").and_then(|v| v.parse::<u64>().ok()).or(kv.get("pairs").map(|_| 0)) {
         let seed = kv.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
         let log = kv.get("stormlog").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("islet_storm.txt"));
         sound::MUTED.store(true, std::sync::atomic::Ordering::Relaxed);
-        a.storm = Some(Box::new(storm::Storm::new(secs, seed, log)));
+        a.storm = Some(Box::new(storm::Storm::new(secs, seed, log, kv.contains_key("pairs"))));
         storm::timer(a.hwnd);
     }
     if let Some(v) = kv.get("sample") {

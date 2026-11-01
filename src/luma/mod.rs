@@ -216,6 +216,13 @@ impl Brain {
         }
     }
 
+    /// The card has been out of sight for `by`: its timeout waits.
+    pub fn delay_card(&mut self, by: TimeDelta) {
+        if let Some(t) = self.showing.as_mut().and_then(|s| s.card_at.as_mut()) {
+            *t += by;
+        }
+    }
+
     /// "Start now" on the heads-up.
     pub fn heads_up_now(&mut self) -> Option<Due> {
         let s = self.showing.as_mut().filter(|s| s.heads_up_until.is_some())?;
