@@ -130,7 +130,9 @@ impl App {
             }
             self.brain.stop_focus(chrono::Local::now());
             let from = *s.settle_from.get_or_insert(now);
-            if now - from > Duration::from_secs(16) {
+            // A card that was covered carries on after the others, so give it time to finish.
+            let busy = self.toast.is_some() || self.covered_toast() || self.springs_moving;
+            if now - from > Duration::from_secs(if busy { 30 } else { 16 }) {
                 self.storm_settled(&mut s);
                 self.storm_report(&s);
                 std::process::exit(0);

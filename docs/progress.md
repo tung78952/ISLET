@@ -295,6 +295,7 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
 - Design: Today, Care, Focus, month calendar and answer cards follow `effectvid/design/screens.png`;
   eyes follow `robot_eyes.png` (scan lines are black lines over a lit shape). Settings live in the
   tray menu. Colours: character for the eyes only, water and red by meaning, washes only on expand.
+- Pages are one strip (`strip`, in pages): touchpad swipes (`WM_MOUSEHWHEEL`) move it directly, it settles with `strip_rest`, and it stops at both ends. Deleting slides the row to a red Delete (`swiped`). The goal and bedtime wheels only count when ticked.
 
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).
