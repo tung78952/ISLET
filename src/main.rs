@@ -77,6 +77,7 @@ const T_CAPS: usize = 11;
 const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
+const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
 pub const WIN_W: f32 = 640.0;
@@ -93,7 +94,7 @@ pub const ACT_TOAST: [f32; 2] = [470.0, 84.0];
 /// How far the lyric bar grows for the eyes.
 pub const JAM_ROOM: f32 = 90.0;
 /// The accent of the character in use.
-pub const CHARACTER: u32 = 0xFF2D2D;
+pub const CHARACTER: u32 = 0x4CC2FF;
 /// A pause shorter than this leaves the equalizer running.
 const EQ_HOLD_MS: u64 = 500;
 pub const TOAST: [f32; 2] = [320.0, 36.0];
@@ -432,6 +433,11 @@ pub struct App {
     pub sad_at: Option<Instant>,
     /// Big eyes and card eyes drawn in the last frame.
     pub eye_draws: (u8, u8),
+    /// The eyes go for the bell rather than the battery; when they last did.
+    pub nudging_bell: bool,
+    bell_nudged: Instant,
+    /// When pressing on at full volume hit the end of the bar.
+    pub bar_bump: Option<Instant>,
     /// Crossfade from `last_toast` to a different toast that replaced it (0 → 1).
     pub toast_swap: Spring,
     /// Previous value of the current toast rolling out (text, direction: 1 = new from below).
@@ -717,6 +723,9 @@ impl App {
             card_rings: 0,
             sad_at: None,
             eye_draws: (0, 0),
+            nudging_bell: false,
+            bell_nudged: Instant::now(),
+            bar_bump: None,
             toast_swap: Spring::new(1.0, 1100.0, 66.0),
             roll: None,
             roll_t: Spring::new(1.0, 1100.0, 66.0),
@@ -1213,6 +1222,7 @@ impl App {
             "battery" => {
                 let now = self.eye_time();
                 if self.eye_feel.battery == false && t % 6.0 < 0.1 {
+                    self.nudging_bell = false;
                     self.eyes.mind.ask(eyes::Peek::Battery, now);
                 }
                 let sense = eyes::Sense { t: now, x: 0.0, y: 0.0, scale: 1.0, follow: 0.0, lift: 0.0, near: false, around: false, blocked: false, acted: false };
@@ -1250,7 +1260,7 @@ impl App {
             Some(e) if e < 8.8 => (Look::Sleepy, 0.0),
             Some(e) if e < 9.7 => (Look::Angry, 0.0),
             Some(e) if e < 10.6 => (Look::Sad, 0.0),
-            Some(e) if e < 11.8 => (Look::Cry, 0.0),
+            Some(e) if e < 11.8 => (Look::Sad, 0.0),
             Some(e) if e < 12.7 => (Look::Love, 0.0),
             Some(e) if e < 14.0 => (Look::Dizzy, 0.0),
             Some(e) if e < 14.8 => (Look::Up, 0.0),
@@ -2156,6 +2166,13 @@ impl App {
                 }
             }
         }
+        // Unread notifications get a poke now and then.
+        if self.history_unread > 0 && self.bell_nudged.elapsed() > BELL_NUDGE && !self.eyes_blocked() && sys::key_idle_ms() > 5000 && !self.eye_feel.battery {
+            self.bell_nudged = Instant::now();
+            self.nudging_bell = true;
+            let t = self.eye_time();
+            self.eyes.mind.ask(eyes::Peek::Battery, t);
+        }
         // Pressed while Islet could not see the key (locked, not running yet).
         if !self.caps_settling {
             sys::caps_settle();
@@ -2916,6 +2933,7 @@ impl App {
                         self.toast(ToastKind::Battery, "Battery critical", "Plug in now", lv);
                     } else {
                         let t = self.eye_time();
+                        self.nudging_bell = false;
                         self.eyes.mind.ask(eyes::Peek::Battery, t);
                     }
                 } else if p.ac && old.pct < 100 && p.pct == 100 {
@@ -3550,6 +3568,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let lv = if muted { 0.0 } else { v };
                     a.toast(ToastKind::Volume(muted), "Volume", &format!("{}%", (lv * 100.0).round()), Some(lv));
                     a.vol_stretch.v += if up { 7.0 } else { -7.0 };
+                    if up {
+                        a.bar_bump = Some(Instant::now());
+                    }
                     a.kick();
                 }
             }

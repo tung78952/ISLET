@@ -287,6 +287,14 @@ Plan: C:\Users\iamtp\.claude\plans\nh-c-v-l-i-v-reactive-possum.md
   screen. Settings are four tiles leading to two-row lists; the reminder form is three steps
   between a back and a next button. Page arrows appear near the edges. The care reminders run by
   themselves: only on/off, level, the water goal and bedtime are set.
+- Stage and views: `src/stage.rs` decides where the big eyes sit. Passing toasts cover a waiting card
+  (`covered`) and it returns where it was, with its timeout stopped; a returning card does not ring.
+  `ui::View` is the one thing the open notch shows, and `go_view` fades between views. Caps Lock keeps
+  the instant prediction (old lag fix) and checks Windows 250 ms later. Phones count as gone after 3
+  minutes away. `ISLET_DEMO=pairs=1` runs every feature over every other against per-frame rules.
+- Design: Today, Care, Focus, month calendar and answer cards follow `effectvid/design/screens.png`;
+  eyes follow `robot_eyes.png` (scan lines are black lines over a lit shape). Settings live in the
+  tray menu. Colours: character for the eyes only, water and red by meaning, washes only on expand.
 
 ## Next
 1. Remaining diff cases: water sub2 (chart), todo add form/edit, lyrics view (needs same lyric text).

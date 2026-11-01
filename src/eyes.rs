@@ -19,7 +19,6 @@ pub enum Look {
     Wink,
     Angry,
     Sad,
-    Cry,
     Love,
     /// The lenses give way to two spinning spirals.
     Dizzy,
@@ -33,22 +32,51 @@ type P = (f32, f32);
 /// Outer tip, inner tip, and the two control points of the upper and the lower edge between them.
 type Lens = (P, P, [P; 2], [P; 2]);
 
-const NEUTRAL: Lens = ((-291.0, -71.0), (-47.0, 41.0), [(-227.0, -45.0), (-117.0, -27.0)], [(-268.0, 76.0), (-137.0, 96.0)]);
-/// The lens on the side being looked at opens; the other one narrows.
-const GLANCE_NEAR: Lens = ((-306.0, -71.0), (-41.0, 41.0), [(-227.0, -69.0), (-131.0, -34.0)], [(-285.0, 65.0), (-158.0, 89.0)]);
-const GLANCE_FAR: Lens = ((-291.0, -43.0), (-57.0, 41.0), [(-213.0, -14.0), (-131.0, 17.0)], [(-264.0, 48.0), (-172.0, 79.0)]);
-const HAPPY: Lens = ((-314.0, 35.0), (-49.0, 65.0), [(-280.0, -75.0), (-110.0, -115.0)], [(-240.0, -15.0), (-130.0, 0.0)]);
-const SURPRISED: Lens = ((-309.0, -72.0), (-74.0, 45.0), [(-270.0, -55.0), (-140.0, -30.0)], [(-325.0, 80.0), (-170.0, 105.0)]);
-const SLEEPY: Lens = ((-316.0, -53.0), (-51.0, -11.0), [(-230.0, -38.0), (-140.0, -25.0)], [(-280.0, 60.0), (-140.0, 110.0)]);
-const SQUINT: Lens = ((-304.0, -65.0), (-64.0, 18.0), [(-225.0, -38.0), (-140.0, -10.0)], [(-285.0, 60.0), (-150.0, 100.0)]);
-const SLIT: Lens = ((-304.0, -42.0), (-47.0, 46.0), [(-230.0, -45.0), (-130.0, -15.0)], [(-225.0, -20.0), (-125.0, 12.0)]);
+/// An oval around the eye's centre, `a` wide and `b` tall from its middle (4/3 turns the control
+/// points of a cubic into an ellipse).
+const fn oval(a: f32, b: f32) -> Lens {
+    const C: f32 = -120.0;
+    ((C - a, 0.0), (C + a, 0.0), [(C - a, -4.0 * b / 3.0), (C + a, -4.0 * b / 3.0)], [(C - a, 4.0 * b / 3.0), (C + a, 4.0 * b / 3.0)])
+}
 
-const ANGRY: Lens = ((-301.7, -68.9), (-45.2, 47.5), [(-214.7, -29.4), (-129.9, 9.0)], [(-271.2, 67.8), (-169.5, 101.7)]);
-const SAD: Lens = ((-320.9, 32.8), (-115.3, -68.9), [(-248.6, 5.6), (-169.5, -33.9)], [(-254.2, 96.0), (-79.1, 73.4)]);
-const UP: Lens = ((-337.9, 70.1), (-61.0, 58.8), [(-288.1, -96.0), (-141.2, -107.3)], [(-265.5, 33.9), (-146.9, 22.6)]);
-const DOWN: Lens = ((-332.2, -59.9), (-70.1, -7.9), [(-248.6, -28.2), (-152.5, -9.0)], [(-299.4, 79.1), (-146.9, 113.0)]);
-const SMUG_FLAT: Lens = ((-304.0, -35.0), (-53.1, 13.6), [(-220.3, -16.9), (-129.9, 0.0)], [(-271.2, 56.5), (-135.6, 73.4)]);
-const SMUG_ARCH: Lens = ((-325.4, 64.4), (-20.3, 53.1), [(-288.1, -96.0), (-96.0, -107.3)], [(-237.3, 0.0), (-124.3, -5.6)]);
+const NEUTRAL: Lens = oval(46.0, 68.0);
+/// The lens on the side being looked at opens; the other one narrows.
+const GLANCE_NEAR: Lens = oval(50.0, 74.0);
+const GLANCE_FAR: Lens = oval(42.0, 60.0);
+const SURPRISED: Lens = oval(52.0, 82.0);
+const SLIT: Lens = ((-186.0, 0.0), (-54.0, 0.0), [(-186.0, -9.0), (-54.0, -9.0)], [(-186.0, 9.0), (-54.0, 9.0)]);
+const HAPPY: Lens = ((-188.0, 26.0), (-52.0, 26.0), [(-176.0, -88.0), (-64.0, -88.0)], [(-150.0, -20.0), (-90.0, -20.0)]);
+const SLEEPY: Lens = ((-182.0, -2.0), (-58.0, -2.0), [(-150.0, -2.0), (-90.0, -2.0)], [(-172.0, 76.0), (-68.0, 76.0)]);
+const DOWN: Lens = ((-186.0, 6.0), (-54.0, 6.0), [(-150.0, 6.0), (-90.0, 6.0)], [(-176.0, 92.0), (-64.0, 92.0)]);
+const UP: Lens = ((-178.0, 26.0), (-62.0, 26.0), [(-170.0, -84.0), (-70.0, -84.0)], [(-140.0, 26.0), (-100.0, 26.0)]);
+const ANGRY: Lens = ((-186.0, -40.0), (-54.0, 30.0), [(-142.0, -17.0), (-98.0, 7.0)], [(-182.0, 66.0), (-96.0, 84.0)]);
+const SAD: Lens = ((-186.0, 30.0), (-60.0, -44.0), [(-144.0, 5.0), (-102.0, -19.0)], [(-160.0, 84.0), (-58.0, 66.0)]);
+const SMUG_FLAT: Lens = ((-184.0, 8.0), (-56.0, -12.0), [(-142.0, 1.0), (-98.0, -5.0)], [(-176.0, 80.0), (-64.0, 80.0)]);
+const SMUG_ARCH: Lens = ((-184.0, -12.0), (-56.0, 8.0), [(-142.0, -5.0), (-98.0, 1.0)], [(-176.0, 80.0), (-64.0, 80.0)]);
+/// The squint is a chevron, pointing inwards.
+const SQUINT: [P; 7] = [(-176.0, 0.0), (-176.0, -42.0), (-60.0, 0.0), (-176.0, 42.0), (-176.0, 22.0), (-104.0, 0.0), (-176.0, -22.0)];
+
+/// Walks around `shape` in steps of equal length, so it morphs like the lenses do.
+fn walk(shape: &[P], right: bool) -> Vec<P> {
+    let n = 2 * EDGE;
+    let hop = |i: usize| (shape[i], shape[(i + 1) % shape.len()]);
+    let length = |(a, b): (P, P)| (b.0 - a.0).hypot(b.1 - a.1);
+    let total: f32 = (0..shape.len()).map(|i| length(hop(i))).sum();
+    let side = if right { -1.0 } else { 1.0 };
+    (0..n)
+        .map(|k| {
+            let mut left = total * k as f32 / n as f32;
+            let mut i = 0;
+            while left > length(hop(i)) && i + 1 < shape.len() {
+                left -= length(hop(i));
+                i += 1;
+            }
+            let (a, b) = hop(i);
+            let t = left / length((a, b)).max(0.001);
+            (side * (a.0 + (b.0 - a.0) * t), a.1 + (b.1 - a.1) * t)
+        })
+        .collect()
+}
 
 fn cubic(a: P, b: P, c: P, d: P, t: f32) -> P {
     let u = 1.0 - t;
@@ -75,7 +103,7 @@ fn outline(look: Look, right: bool, gaze: f32, lift: f32) -> Vec<P> {
                     let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / EDGE as f32;
                     let x = 16.0 * a.sin().powi(3);
                     let y = 13.0 * a.cos() - 5.0 * (2.0 * a).cos() - 2.0 * (3.0 * a).cos() - (4.0 * a).cos();
-                    (side * (-165.0 + 5.6 * x), 5.0 - 5.6 * y)
+                    (side * (-120.0 + 4.0 * x), 6.0 - 4.0 * y)
                 })
                 .collect();
         }
@@ -88,11 +116,11 @@ fn outline(look: Look, right: bool, gaze: f32, lift: f32) -> Vec<P> {
         Look::Happy => HAPPY,
         Look::Surprised => SURPRISED,
         Look::Sleepy => SLEEPY,
-        Look::Squint => SQUINT,
-        Look::Wink if right => SLIT,
+        Look::Squint => return walk(&SQUINT, right),
+        Look::Wink if right => HAPPY,
         Look::Wink => NEUTRAL,
         Look::Angry => ANGRY,
-        Look::Sad | Look::Cry => SAD,
+        Look::Sad => SAD,
         Look::Up => UP,
         Look::Down => DOWN,
         Look::Smug if right => SMUG_ARCH,
@@ -796,8 +824,7 @@ pub struct Eyes {
     pub shove: Spring,
     pub rock: Spring,
     pub dent: Spring,
-    /// How far the tear and the spirals have come in (0..1).
-    pub tear: Spring,
+    /// How far the spirals have come in (0..1).
     pub dizzy: Spring,
     pub pair: [Eye; 2],
     pub mind: Mind,
@@ -823,7 +850,6 @@ impl Eyes {
             shove: Spring::new(0.0, 160.0, 10.0),
             rock: Spring::new(0.0, 220.0, 7.0),
             dent: Spring::new(0.0, 420.0, 20.0),
-            tear: Spring::new(0.0, 170.0, 24.0),
             dizzy: Spring::new(0.0, 170.0, 24.0),
             pair: [eye(false), eye(true)],
             mind: Mind::new(),
@@ -870,7 +896,6 @@ impl Eyes {
             eye.ease(&target, k, c, dt);
         }
         self.show.step(if show { 1.0 } else { 0.0 }, dt);
-        self.tear.step(if look == Look::Cry { 1.0 } else { 0.0 }, dt);
         self.dizzy.step(if look == Look::Dizzy { 1.0 } else { 0.0 }, dt);
     }
 }
@@ -881,7 +906,7 @@ mod tests {
 
     #[test]
     fn every_expression_has_the_same_points_so_any_can_morph_into_any() {
-        for look in [Look::Closed, Look::Neutral, Look::Happy, Look::Surprised, Look::Sleepy, Look::Squint, Look::Wink, Look::Angry, Look::Sad, Look::Cry, Look::Love, Look::Dizzy, Look::Up, Look::Down, Look::Smug] {
+        for look in [Look::Closed, Look::Neutral, Look::Happy, Look::Surprised, Look::Sleepy, Look::Squint, Look::Wink, Look::Angry, Look::Sad, Look::Love, Look::Dizzy, Look::Up, Look::Down, Look::Smug] {
             for right in [false, true] {
                 let o = outline(look, right, 0.5, 0.2);
                 assert_eq!(o.len(), 2 * EDGE);

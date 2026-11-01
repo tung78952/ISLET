@@ -808,12 +808,33 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
     }
 }
 
-/// White mask lenses with a thin red rim, as on the design sheet.
+/// One eye: scan lines of light, with dark gaps that stay put as its outline moves. The gaps are
+/// lines of the notch's own black, so what shows through is the lit part.
+fn lens(g: &Gfx, outline: &[(f32, f32)], gap: f32, a: f32) {
+    let c = crate::CHARACTER;
+    g.fill_poly(outline, c, a);
+    let mut rim = outline.to_vec();
+    rim.push(rim[0]);
+    g.polyline(&rim, 1.6, c, 0.35 * a);
+    stripes(g, outline, gap, a);
+}
+
+fn stripes(g: &Gfx, shape: &[(f32, f32)], gap: f32, a: f32) {
+    let span = |f: fn(&(f32, f32)) -> f32| shape.iter().map(f).fold((f32::MAX, f32::MIN), |r, v| (r.0.min(v), r.1.max(v)));
+    let ((x0, x1), (y0, y1)) = (span(|p| p.0), span(|p| p.1));
+    let mut y = (y0 / gap).floor() * gap;
+    while y <= y1 + 1.0 {
+        g.line(x0 - 3.0, y, x1 + 3.0, y, gap * 0.34, 0x000000, a);
+        y += gap;
+    }
+}
+
+/// The eyes in the notch, lit lines on black.
 fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     a.eye_draws.0 += 1;
-    const RED: u32 = 0xFF1F1F;
     /// Notch units per pixel of the design sheet.
     const SCALE: f32 = 0.175;
+    const GAP: f32 = 3.4;
     let e = &a.eyes;
     // In the battery scene the eyes stay on their side and lunge at it.
     let scene = e.scene.x.clamp(0.0, 1.0);
@@ -826,13 +847,9 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     let g = &a.gfx;
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
         let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + p.1 * SCALE)).collect();
-        g.glow_ellipse(cx + lean * reach + side * 32.0, cy, 28.0, 16.0, RED, 0.3 * show);
-        let lens = show * (1.0 - e.dizzy.x.clamp(0.0, 1.0));
-        g.fill_poly(&outline, WHITE, lens);
-        let mut rim = outline;
-        rim.push(rim[0]);
-        g.polyline(&rim, 1.6, RED, lens);
-        let (ex, ey) = (cx + lean * reach + side * 29.0, cy + breath + e.hop.x);
+        g.glow_ellipse(cx + lean * reach + side * 21.0, cy, 18.0, 15.0, crate::CHARACTER, 0.16 * show);
+        lens(g, &outline, GAP, show * (1.0 - e.dizzy.x.clamp(0.0, 1.0)));
+        let (ex, ey) = (cx + lean * reach + side * 21.0, cy + breath + e.hop.x);
         let dizzy = e.dizzy.x.clamp(0.0, 1.0);
         if dizzy > 0.01 {
             let turn = t * 7.0 * side;
@@ -840,25 +857,28 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
                 .map(|n| {
                     let k = n as f32 / 44.0;
                     let a = turn + k * 15.0;
-                    (ex + 15.0 * k * a.cos(), ey + 10.5 * k * a.sin())
+                    (ex + 13.0 * k * a.cos(), ey + 11.0 * k * a.sin())
                 })
                 .collect();
-            g.polyline(&spiral, 3.6, RED, show * dizzy);
-            g.polyline(&spiral, 1.7, WHITE, show * dizzy);
-        }
-        let tear = e.tear.x.clamp(0.0, 1.0);
-        if tear > 0.01 {
-            let k = (t % 1.5) / 1.5;
-            let dy = 9.0 + 5.0 * k * k;
-            g.droplet(cx + side * 52.0, cy + dy, 4.2, WHITE, show * tear * (1.0 - k * k));
+            g.polyline(&spiral, 3.4, crate::CHARACTER, show * dizzy);
+            stripes(g, &spiral, GAP, show * dizzy);
         }
     }
     // The battery never leaves the notch as it narrows again.
     let half = a.sw.x / 2.0;
     g.push_clip(Rc::new(centre - half, 0.0, half * 2.0, a.sh.x));
     if scene > 0.01 {
-        // The battery slides in from the right, takes the blows and shows what is left.
+        // What they are after slides in from the right and takes the blows.
         let (bx, by) = (centre + 66.0 + 60.0 * (1.0 - scene) + e.shove.x, cy);
+        if a.nudging_bell {
+            g.rotate(bx, by - 6.0, 0.5 * e.rock.x);
+            g.zoom(bx, by, 1.5);
+            icon::bell(g, bx, by, WHITE, scene * show);
+            g.unzoom();
+            g.unzoom();
+            g.pop_clip();
+            return;
+        }
         let pct = a.power.map_or(10, |p| p.pct);
         g.rotate(bx, by, 0.09 * e.rock.x);
         crate::anim::battery(g, bx, by, 40.0, 20.0, e.dent.x.clamp(0.0, 1.0));
@@ -876,10 +896,7 @@ fn mini_eyes(a: &mut App, cx: f32, cy: f32, scale: f32) {
     let hop = a.mini.hop.x;
     for eye in &a.mini.pair {
         let outline: Vec<(f32, f32)> = eye.points.iter().map(|p| (cx + p.0 * scale, cy + hop + p.1 * scale)).collect();
-        a.gfx.fill_poly(&outline, WHITE, 1.0);
-        let mut rim = outline;
-        rim.push(rim[0]);
-        a.gfx.polyline(&rim, 1.25, crate::CHARACTER, 1.0);
+        lens(&a.gfx, &outline, 2.4, 1.0);
     }
 }
 
@@ -960,6 +977,20 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             a.gfx.fill_rrect(bar, 3.2, 0x474747, 1.0);
             if lv > 0.0 {
                 a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * lv).max(bar.h), bar.h), 3.2, WHITE, 1.0);
+            }
+            // Still pressing at 100 %: the eyes run into the end of the bar.
+            if let Some(age) = a.bar_bump.map(|t| t.elapsed().as_secs_f32()).filter(|t| *t < 0.8) {
+                let dash = (age / 0.18).min(1.0);
+                let x = bar.x + bar.w - 44.0 + 22.0 * dash * dash - 8.0 * ((age - 0.18).max(0.0) / 0.3).min(1.0);
+                let fade = 1.0 - ((age - 0.55) / 0.25).clamp(0.0, 1.0);
+                a.gfx.fill_rrect(Rc::new(x - 16.0, cy - 8.0, 32.0, 16.0), 8.0, 0x000000, fade);
+                for dx in [-6.5, 6.5] {
+                    let oval: Vec<(f32, f32)> = (0..24).map(|i| {
+                        let t = i as f32 / 24.0 * std::f32::consts::TAU;
+                        (x + dx + 3.8 * t.cos(), cy + 5.4 * t.sin())
+                    }).collect();
+                    lens(&a.gfx, &oval, 2.4, fade);
+                }
             }
             return;
         }
@@ -1332,21 +1363,16 @@ fn bell(a: &mut App, x: f32, y: f32, s: f32, t: f32) {
 /// The large eyes on an act's card, drawn apart by `spread`.
 fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
     a.eye_draws.1 += 1;
-    const RED: u32 = crate::CHARACTER;
     let hop = a.eyes.hop.x;
     let lean = a.eyes.lean.x * 7.0;
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
         let x = cx + side * spread + lean;
-        a.gfx.glow_ellipse(x + side * 22.0 * scale / 0.13, cy, 24.0, 15.0, RED, 0.22);
-        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (cx + side * spread + lean + p.0 * scale, cy + hop + p.1 * scale)).collect();
-        a.gfx.fill_poly(&outline, WHITE, 1.0);
-        let mut rim = outline;
-        rim.push(rim[0]);
-        a.gfx.polyline(&rim, 1.4, RED, 1.0);
+        a.gfx.glow_ellipse(x + side * 120.0 * scale, cy, 16.0, 14.0, crate::CHARACTER, 0.14);
+        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, cy + hop + p.1 * scale)).collect();
+        lens(&a.gfx, &outline, 3.0, 1.0);
     }
 }
 
-/// A main reminder played out: the eyes hit the prop, which pushes the words out from behind it.
 fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, kind: crate::eyes::ActKind, e: f32) {
     use crate::eyes::ActKind as K;
     const S: f32 = 40.0;
