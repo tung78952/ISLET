@@ -3,6 +3,7 @@
 
 mod anim;
 mod bt;
+mod captions;
 mod devices;
 mod drop;
 mod eyes;
@@ -748,6 +749,7 @@ pub struct App {
     /// First row shown in the history list.
     pub history_top: usize,
     pub lyrics: Arc<Mutex<Lyrics>>,
+    captions: captions::Captions,
     pub power: Option<sys::Power>,
     layout: isize,
     /// Something fills the screen: the notch is down to a sliver.
@@ -963,6 +965,7 @@ impl App {
             history_unread: 0,
             history_top: 0,
             lyrics,
+            captions: captions::Captions::default(),
             power: sys::power(),
             layout: sys::current_layout().0,
             hidden: false,
@@ -991,6 +994,7 @@ impl App {
             sys::watch_volume(self.hwnd);
             sys::hook_foreground(self.hwnd);
             bt::spawn(self.hwnd);
+            self.captions.spawn();
             self.devices = Some(devices::Tracker::start(self.hwnd));
             sys::watch_audio_devices(self.hwnd);
             notify::spawn(self.hwnd);
@@ -1093,6 +1097,9 @@ impl App {
         let l = self.lyrics.lock().unwrap();
         if l.status == media::LyrStatus::Loading {
             return Some("Loading lyrics...".into());
+        }
+        if self.settings.captions && (l.status == media::LyrStatus::Missing || l.held) {
+            return self.captions.line().or_else(|| Some("Listening...".into()));
         }
         l.line_at(pos).map(str::to_string)
     }
@@ -3414,6 +3421,11 @@ impl App {
             self.reaction = None;
         }
         self.watch_shutdown();
+        let silent = {
+            let l = self.lyrics.lock().unwrap();
+            l.status == media::LyrStatus::Missing || l.held
+        };
+        self.captions.want(self.settings.captions && self.demo.is_none() && self.playing() && silent);
         self.watch_brief();
         if self.swiped.is_some() && Instant::now() >= self.swipe_until {
             self.swiped = None;
@@ -3880,6 +3892,7 @@ impl App {
         let _ = AppendMenuW(m, check(s.minimal), 24, w!("Minimal notch"));
         let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
         let _ = AppendMenuW(m, check(self.brain.cfg.reminders.sleep.shutdown), 26, w!("Shut down at bedtime"));
+        let _ = AppendMenuW(m, check(self.settings.captions), 27, w!("Live captions"));
         let submenu = |title: &HSTRING, items: &[(HSTRING, usize, bool)]| {
             let Ok(sub) = CreatePopupMenu() else { return };
             for (text, id, on) in items {
@@ -3915,6 +3928,10 @@ impl App {
             23 => self.change_setting(ui::SetKey::Eyes),
             24 => self.change_setting(ui::SetKey::Minimal),
             25 => self.change_setting(ui::SetKey::Autostart),
+            27 => {
+                self.settings.captions ^= true;
+                self.settings.save();
+            }
             26 => self.brain.configure(|c| c.reminders.sleep.shutdown ^= true, chrono::Local::now()),
             n @ 30..=32 => {
                 self.settings.jam_mode = (n - 30) as u8;
@@ -3934,7 +3951,8 @@ impl App {
             4 => {
                 MessageBoxW(
                     Some(self.hwnd),
-                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics from LRCLIB (lrclib.net), NetEase and AMLL TTML DB."),
+                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics from LRCLIB (lrclib.net), NetEase and AMLL TTML DB.
+Live captions by Windows."),
                     w!("About Islet"),
                     MB_OK | MB_ICONINFORMATION,
                 );
@@ -4250,6 +4268,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ENDSESSION if wp.0 != 0 => a.brain.save_schedule(chrono::Local::now()),
         WM_DESTROY => {
             a.brain.save_schedule(chrono::Local::now());
+            a.captions.stop();
             a.tray(NIM_DELETE);
             let _ = RevokeDragDrop(hwnd);
             PostQuitMessage(0);

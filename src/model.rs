@@ -95,6 +95,8 @@ pub struct Settings {
     pub jam_mode: u8,
     /// Focus page: work and break in rounds, rather than one plain stretch.
     pub pomodoro: bool,
+    /// Words from Live Captions for what has no lyrics.
+    pub captions: bool,
 }
 
 impl Settings {
@@ -113,6 +115,7 @@ impl Settings {
             pomo_rounds: num(&m, "pomo_rounds", 4u32).clamp(1, 8),
             jam_mode: num(&m, "jam_mode", 1u8).min(2),
             pomodoro: num(&m, "pomodoro", 0u8) == 1,
+            captions: num(&m, "captions", 0u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -131,6 +134,7 @@ impl Settings {
                 ("pomo_rounds", self.pomo_rounds.to_string()),
                 ("jam_mode", self.jam_mode.to_string()),
                 ("pomodoro", (self.pomodoro as u8).to_string()),
+                ("captions", (self.captions as u8).to_string()),
             ],
         );
     }
