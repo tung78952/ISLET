@@ -41,7 +41,7 @@ use gfx::Gfx;
 use media::{Cmd, Lyrics, MediaInfo};
 use luma::config::Kind as CareKind;
 use luma::scheduler::{Due, Outcome};
-use model::{Clock, Phase, Settings, Shelf, Todo};
+use model::{Clock, Settings, Shelf, Todo};
 use ui::{Act, Page};
 
 pub const WM_MEDIA: u32 = WM_APP + 1;
@@ -80,15 +80,16 @@ const CAPS_SETTLE_MS: u32 = 250;
 
 /// Logical window size (layout units); pixels = units × DPI scale.
 pub const WIN_W: f32 = 640.0;
-pub const WIN_H: f32 = 190.0;
+pub const WIN_H: f32 = 300.0;
 
 /// Notch sizes measured from the reference app (layout units).
 pub const COMPACT: [f32; 2] = [150.0, 30.0];
 pub const PEEK: [f32; 2] = [208.0, 52.0];
 pub const EXPANDED: [f32; 2] = [420.0, 140.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
+pub const CALENDAR: [f32; 2] = [420.0, 280.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
-pub const ACT_TOAST: [f32; 2] = [470.0, 58.0];
+pub const ACT_TOAST: [f32; 2] = [470.0, 84.0];
 /// How far the lyric bar grows for the eyes.
 pub const JAM_ROOM: f32 = 90.0;
 /// The accent of the character in use.
@@ -229,6 +230,8 @@ pub struct Form {
     pub days: [bool; 7],
     /// 0 the name, 1 the time, 2 the days.
     pub step: u8,
+    /// Naming an important day instead: it has no clock or days.
+    pub date: Option<String>,
 }
 
 /// Left, top, right, bottom in layout units.
@@ -491,10 +494,27 @@ pub struct App {
     pub lyrics_on: bool,
     pub page: Page,
     /// The rolling pickers on show, by what they set.
-    pub wheels: [wheel::Wheel; 6],
-    /// The settings panel on show, instead of the page.
-    pub panel: Option<ui::Panel>,
-    pub panel_top: usize,
+    pub wheels: [wheel::Wheel; 7],
+    /// What the open notch shows, what it is leaving, and how far along that is (1 → 0).
+    pub view: ui::View,
+    pub view_from: ui::View,
+    pub view_dir: f32,
+    pub view_mix: Spring,
+    /// The colour that comes up when something opens, how much of it, and one brief wash.
+    pub glow: u32,
+    pub glow_mix: Spring,
+    pub wash: Spring,
+    /// Lists glide to their row; the ring and the litres count up; the date comes on hover.
+    pub list_pos: Spring,
+    pub ring: Spring,
+    pub date_mix: Spring,
+    date_near: bool,
+    /// The month on the calendar, and its slide.
+    pub month: (i32, u32),
+    pub month_mix: Spring,
+    pub month_dir: f32,
+    /// Between choosing a length and the running timer.
+    pub focus_mix: Spring,
     pub chev_mix: Spring,
     chev_near: bool,
     /// Which side of the goal screen is being set: 0 the cup, 1 the goal.
@@ -507,7 +527,6 @@ pub struct App {
     pub form_anim: Spring,
     wheel_held: Option<ui::WheelId>,
     wheels_moving: bool,
-    pub old_notes: bool,
     pub reminder_top: usize,
     pub form: Option<Form>,
     pub toast: Option<Toast>,
@@ -572,7 +591,6 @@ pub struct App {
     /// Untimed to-dos (timed ones are Luma reminders).
     pub todo: Todo,
     /// The Pomodoro page's chosen mode while nothing runs.
-    pub pomo_mode: Phase,
     /// Ticks (500 ms) since start; the brain runs every fourth.
     brain_ticks: u32,
     pub shelf: Shelf,
@@ -636,7 +654,6 @@ pub struct App {
     /// Recent notifications, newest first; in memory only, gone when Islet closes.
     pub history: VecDeque<NoticeInfo>,
     pub history_unread: u32,
-    pub history_open: bool,
     /// First row shown in the history list.
     pub history_top: usize,
     pub lyrics: Arc<Mutex<Lyrics>>,
@@ -736,9 +753,22 @@ impl App {
             springs_moving: false,
             lyrics_on: false,
             page: Page::Today,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(model::GOALS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 22).tall(ui::CLOCK_ROW), wheel::Wheel::new(4, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW)],
-            panel: None,
-            panel_top: 0,
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(model::GOALS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 22).tall(ui::CLOCK_ROW), wheel::Wheel::new(4, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(ui::FOCUS_STEPS, 4).tall(ui::CLOCK_ROW)],
+            view: ui::View::Page,
+            view_from: ui::View::Page,
+            view_dir: 1.0,
+            view_mix: Spring::new(0.0, 260.0, 26.0),
+            glow: 0,
+            glow_mix: Spring::new(0.0, 120.0, 20.0),
+            wash: Spring::new(0.0, 60.0, 14.0),
+            list_pos: Spring::new(0.0, 300.0, 30.0),
+            ring: Spring::new(0.0, 120.0, 20.0),
+            date_mix: Spring::new(0.0, 200.0, 26.0),
+            date_near: false,
+            month: (2026, 1),
+            month_mix: Spring::new(0.0, 260.0, 26.0),
+            month_dir: 1.0,
+            focus_mix: Spring::new(0.0, 170.0, 24.0),
             chev_mix: Spring::new(0.0, 170.0, 24.0),
             chev_near: false,
             pick_mix: Spring::new(0.0, 170.0, 24.0),
@@ -748,7 +778,6 @@ impl App {
             form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
             wheels_moving: false,
-            old_notes: false,
             reminder_top: 0,
             form: None,
             toast: None,
@@ -791,7 +820,6 @@ impl App {
             settings: Settings::load(),
             brain: if demo.is_none() { luma::Brain::open(chrono::Local::now()) } else { luma::Brain::demo(chrono::Local::now()) },
             todo: Todo::load(),
-            pomo_mode: Phase::Focus,
             brain_ticks: 0,
             shelf: Shelf::load(),
             drag_over: false,
@@ -827,7 +855,6 @@ impl App {
             icon_tints: Default::default(),
             history: VecDeque::new(),
             history_unread: 0,
-            history_open: false,
             history_top: 0,
             lyrics,
             power: sys::power(),
@@ -978,7 +1005,9 @@ impl App {
     fn base_target(&self) -> [f32; 2] {
         match self.mode {
             Mode::Expanded => {
-                if self.lyrics_view() {
+                if self.view == ui::View::Calendar {
+                    CALENDAR
+                } else if self.lyrics_view() {
                     LYRICS
                 } else {
                     EXPANDED
@@ -995,13 +1024,13 @@ impl App {
                 } else if let Some(t) = &self.toast {
                     if t.kind == ToastKind::Message {
                         [MESSAGE_TOAST[0], self.notice_card_height()]
-                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break) {
-                        PHASE_TOAST
+                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break | ToastKind::Task | ToastKind::HeadsUp | ToastKind::LumaApp) {
+                        ACT_TOAST
                     } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
                         WATER_TOAST
                     } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal) {
                         TALL_TOAST
-                    } else if matches!(t.kind, ToastKind::Water | ToastKind::LumaApp | ToastKind::Call | ToastKind::Task | ToastKind::Remind(_) | ToastKind::HeadsUp) {
+                    } else if matches!(t.kind, ToastKind::Water | ToastKind::Call | ToastKind::Remind(_)) {
                         WATER_TOAST
                     } else if t.kind.tall() {
                         TALL_TOAST
@@ -1276,11 +1305,11 @@ impl App {
         self.sw.tune(k, c);
         self.sh.tune(k, c);
         if self.mode == Mode::Expanded && m != Mode::Expanded {
-            self.history_open = false;
-            self.panel = None;
-            self.old_notes = false;
+            self.view = ui::View::Page;
+            self.view_mix.x = 0.0;
         }
         if m == Mode::Expanded {
+            self.sync_wheels();
             self.toast = None;
             // A reminder comes back by itself; a notification waits with the others.
             if let Some((t, _)) = self.covered.take().filter(|(t, _)| !t.kind.waits()) {
@@ -1402,6 +1431,17 @@ impl App {
             }
             moving |= self.chev_mix.step(if self.chev_near { 1.0 } else { 0.0 }, sub);
             moving |= self.pick_mix.step(if self.pick_goal { 1.0 } else { 0.0 }, sub);
+            moving |= self.view_mix.step(0.0, sub);
+            moving |= self.month_mix.step(0.0, sub);
+            moving |= self.wash.step(0.0, sub);
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar);
+            moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
+            moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
+            moving |= self.date_mix.step(if self.date_near { 1.0 } else { 0.0 }, sub);
+            let top = if self.view == ui::View::History { self.history_top } else { self.reminder_top };
+            moving |= self.list_pos.step(top as f32, sub);
+            let (taken, goal) = (self.brain.stats.water, self.brain.cfg.water_goal.max(1));
+            moving |= self.ring.step(taken as f32 / goal as f32, sub);
             moving |= self.water_pulse.step(0.0, sub);
             moving |= self.dot_pos.step(self.dot_target, sub);
             for (sp, target) in self.hover.values_mut() {
@@ -1619,21 +1659,14 @@ impl App {
             self.kick();
             return;
         }
-        if self.expanded() && self.history_open {
+        if self.expanded() && self.view == ui::View::History {
             let last = self.history.len().saturating_sub(2);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
             self.render();
             return;
         }
-        if self.expanded() && self.panel.is_some() {
-            let last = ui::panel_rows(self).saturating_sub(2) as i32;
-            // Two rows to a screen, so a turn moves a whole screen.
-            self.panel_top = (self.panel_top as i32 - 2 * notches.signum() as i32).clamp(0, last.max(0)) as usize;
-            self.render();
-            return;
-        }
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
-            let rows = if self.old_notes { self.todo.tasks.len() } else { self.brain.cfg.custom.len() + (!self.todo.tasks.is_empty()) as usize };
+            let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.brain.cfg.custom.len() + (!self.todo.tasks.is_empty()) as usize };
             self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
             self.render();
             return;
@@ -2287,9 +2320,8 @@ impl App {
                 (left, total.max(1.0), !f.paused(), label)
             }
             None => {
-                let minutes = if self.pomo_mode == Phase::Focus { self.settings.pomo_work } else { self.settings.pomo_rest };
-                let secs = minutes as f64 * 60.0;
-                (secs, secs, false, self.pomo_mode.label().to_string())
+                let secs = self.settings.pomo_work as f64 * 60.0;
+                (secs, secs, false, "Focus time".to_string())
             }
         }
     }
@@ -2425,9 +2457,10 @@ impl App {
         self.page = p;
         self.slide.x = 1.0;
         self.slide.v = 0.0;
-        self.panel = None;
-        self.old_notes = false;
+        self.view = ui::View::Page;
+        self.view_mix.x = 0.0;
         self.reminder_top = 0;
+        self.list_pos.x = 0.0;
         self.form = None;
         self.kick();
     }
@@ -2453,7 +2486,18 @@ impl App {
                 days[*d as usize % 7] = true;
             }
         }
-        self.form = Some(Form { id: item.as_ref().map(|r| r.id.clone()), title: item.map(|r| r.title).unwrap_or_default(), days, step: 0 });
+        self.form = Some(Form { id: item.as_ref().map(|r| r.id.clone()), title: item.map(|r| r.title).unwrap_or_default(), days, step: 0, date: None });
+        self.show_form();
+    }
+
+    /// A name for an important day.
+    fn open_date(&mut self, date: String) {
+        self.form = Some(Form { id: None, title: String::new(), days: [false; 7], step: 0, date: Some(date) });
+        self.show_form();
+    }
+
+    fn show_form(&mut self) {
+        self.go_view(ui::View::Form);
         self.form_anim.x = 0.0;
         self.form_anim.v = 0.0;
         self.set_noactivate(false);
@@ -2466,7 +2510,10 @@ impl App {
     fn close_form(&mut self, save: bool) {
         if let Some(f) = self.form.take() {
             let title = f.title.trim();
-            if save && !title.is_empty() {
+            self.go_view(if f.date.is_some() { ui::View::Calendar } else { ui::View::Page });
+            if let Some(date) = f.date.as_ref().filter(|_| save && !title.is_empty()) {
+                self.brain.add_date(title, date, chrono::Local::now());
+            } else if save && !title.is_empty() && f.date.is_none() {
                 let (h, m) = (self.wheels[ui::WheelId::FormHour as usize].index(), self.wheels[ui::WheelId::FormMinute as usize].index());
                 let days = (0..7u8).filter(|d| f.days[*d as usize]).collect();
                 self.brain.save_reminder(f.id.as_deref(), title, &format!("{h:02}:{m:02}"), days, chrono::Local::now());
@@ -2484,6 +2531,38 @@ impl App {
         if let Some(tx) = &self.media_tx {
             let _ = tx.send(c);
         }
+    }
+
+    /// Everything the open notch moves between goes through here, so nothing just pops.
+    fn go_view(&mut self, v: ui::View) {
+        use ui::View as V;
+        if v == self.view {
+            return;
+        }
+        let deeper = |v: V| match v {
+            V::Page => 0,
+            V::Care(_) | V::Form | V::History | V::OldNotes | V::Calendar => 1,
+            V::Goal | V::Bed => 2,
+        };
+        self.view_dir = if deeper(v) >= deeper(self.view) { 1.0 } else { -1.0 };
+        self.view_from = self.view;
+        self.view = v;
+        self.view_mix.x = 1.0;
+        self.view_mix.v = 0.0;
+        match v {
+            V::Care(t) => self.glow = t.colour(),
+            V::Calendar => self.glow = ui::EVENING,
+            _ => {}
+        }
+        self.list_pos.x = 0.0;
+        self.history_top = 0;
+        if v == V::Calendar && self.view_from != V::Form {
+            use chrono::Datelike;
+            let d = chrono::Local::now().date_naive();
+            self.month = (d.year(), d.month());
+        }
+        self.sync_wheels();
+        self.kick();
     }
 
     fn act(&mut self, a: Act) {
@@ -2524,28 +2603,23 @@ impl App {
                 let now = chrono::Local::now();
                 if self.brain.focus.is_some() {
                     self.brain.toggle_pause(now);
-                } else if self.pomo_mode == Phase::Focus {
+                } else {
                     let s = &self.settings;
                     self.brain.start_pomodoro(s.pomo_work, s.pomo_rest, s.pomo_rounds, "", now);
-                } else {
-                    self.brain.start_rest(self.settings.pomo_rest, now);
                 }
             }
             Act::PomoReset => {
-                // Giving up on a work stretch makes them cry; ending a break doesn't.
+                // Giving up on a work stretch hurts; ending a break doesn't.
                 if self.brain.focus.as_ref().is_some_and(|f| !f.pomodoro.is_some_and(|p| p.resting)) {
-                    self.feel(eyes::Look::Cry);
+                    self.feel(eyes::Look::Sad);
+                    self.sad_at = Some(Instant::now());
                 }
                 self.brain.stop_focus(chrono::Local::now());
-            }
-            Act::PomoPhase(p) => {
-                if self.brain.focus.is_none() {
-                    self.pomo_mode = p;
-                }
             }
             Act::Drank => {
                 let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
                 self.brain.drink(chrono::Local::now());
+                self.drink_splash();
                 if matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Water)) {
                     self.dismiss_toast();
                 }
@@ -2602,13 +2676,12 @@ impl App {
             }
             Act::CallDecline => self.dismiss_toast(),
             Act::History(on) => {
-                self.history_open = on;
-                self.history_top = 0;
+                self.go_view(if on { ui::View::History } else { ui::View::Page });
                 self.history_unread = 0;
             }
             Act::HistoryClear => {
                 self.history.clear();
-                self.history_open = false;
+                self.go_view(ui::View::Page);
             }
             Act::HistoryOpen(i) => {
                 if let Some(n) = self.history.get(i) {
@@ -2624,21 +2697,35 @@ impl App {
             }
             Act::NoticeClose => self.close_notice(),
             Act::Wheel(_) => {}
-            Act::Panel(p) => {
-                self.panel = p;
-                self.panel_top = 0;
-                self.sync_wheels();
+            Act::View(v) => self.go_view(v),
+            Act::PomoMinutes(work) => {
+                self.set_focus_minutes(work);
+                self.wheels[ui::WheelId::FocusMinutes as usize].set(ui::focus_step(work));
             }
-            Act::PomoPlan => {
-                let (work, rest) = match self.settings.pomo_work {
-                    25 => (50, 10),
-                    50 => (90, 15),
-                    _ => (25, 5),
-                };
-                self.settings.pomo_work = work;
-                self.settings.pomo_rest = rest;
-                if self.demo.is_none() {
-                    self.settings.save();
+            Act::Month(by) => {
+                let months = self.month.0 * 12 + self.month.1 as i32 - 1 + by;
+                self.month = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+                self.month_dir = by as f32;
+                self.month_mix.x = 1.0;
+                self.month_mix.v = 0.0;
+            }
+            Act::Day(y, m, d) => self.open_date(format!("{y:04}-{m:02}-{d:02}")),
+            Act::DateDelete(i) => {
+                if let Some((id, ..)) = self.next_dates().into_iter().nth(i) {
+                    if armed.as_deref() == Some(id.as_str()) {
+                        self.brain.delete_date(&id);
+                    } else {
+                        self.trash_armed = Some(id);
+                    }
+                }
+            }
+            Act::DoNow(tile) => {
+                use luma::Showing;
+                if self.brain.showing.is_none() {
+                    let due = Due::Builtin(tile.kind());
+                    self.brain.showing = Some(Showing { due: due.clone(), heads_up_until: None, card_at: None });
+                    self.set_mode(Mode::Compact);
+                    self.present_luma(&due);
                 }
             }
             Act::Set(key) => self.change_setting(key),
@@ -2662,7 +2749,7 @@ impl App {
             }
             Act::WaterReset => self.brain.reset_water(),
             Act::OldNotes(on) => {
-                self.old_notes = on;
+                self.go_view(if on { ui::View::OldNotes } else { ui::View::Page });
                 self.reminder_top = 0;
             }
             Act::OldDelete(i) => {
@@ -2671,12 +2758,12 @@ impl App {
                     self.todo.save();
                 }
                 if self.todo.tasks.is_empty() {
-                    self.old_notes = false;
+                    self.go_view(ui::View::Page);
                 }
             }
             Act::FormNext => {
                 match self.form.as_mut() {
-                    Some(f) if f.step == 2 => self.close_form(true),
+                    Some(f) if f.step == 2 || f.date.is_some() => self.close_form(true),
                     Some(f) if !f.title.trim().is_empty() => f.step += 1,
                     _ => {}
                 }
@@ -2864,7 +2951,11 @@ impl App {
             self.kick();
         }
         let goal = x > cx;
-        if self.panel == Some(ui::Panel::Water) && goal != self.pick_goal {
+        if self.expanded() && (y < 36.0) != self.date_near {
+            self.date_near = y < 36.0;
+            self.kick();
+        }
+        if self.view == ui::View::Goal && goal != self.pick_goal {
             self.pick_goal = goal;
             self.kick();
         }
@@ -2961,6 +3052,7 @@ impl App {
         self.wheels[ui::WheelId::Goal as usize].set(goal);
         self.wheels[ui::WheelId::BedHour as usize].set(hour);
         self.wheels[ui::WheelId::BedMinute as usize].set(minute);
+        self.wheels[ui::WheelId::FocusMinutes as usize].set(ui::focus_step(self.settings.pomo_work));
     }
 
     fn change_setting(&mut self, key: ui::SetKey) {
@@ -3025,9 +3117,47 @@ impl App {
         }
     }
 
+    /// The work stretch; breaks follow it the way the 25/5, 50/10 and 90/15 plans do.
+    fn set_focus_minutes(&mut self, work: u32) {
+        if self.settings.pomo_work != work {
+            self.settings.pomo_work = work;
+            self.settings.pomo_rest = match work {
+                0..=30 => 5,
+                31..=60 => 10,
+                _ => 15,
+            };
+            if self.demo.is_none() {
+                self.settings.save();
+            }
+        }
+    }
+
+    /// A drink: the ring jumps and the colour of water rises and falls.
+    fn drink_splash(&mut self) {
+        self.water_pulse.v += 7.5;
+        self.wash.x = 1.0;
+        self.wash.v = 0.0;
+        self.kick();
+    }
+
+    /// Days still to come, soonest first: (id, title, days from today).
+    pub fn next_dates(&self) -> Vec<(String, String, i64)> {
+        let today = chrono::Local::now().date_naive();
+        let mut v: Vec<_> = self.brain.cfg.dates.iter().filter_map(|d| {
+            let on = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()?;
+            let left = (on - today).num_days();
+            (left >= 0).then(|| (d.id.clone(), d.title.clone(), left))
+        }).collect();
+        v.sort_by_key(|d| d.2);
+        v
+    }
+
     /// A wheel came to rest: what it shows is now the setting.
     fn apply_wheels(&mut self) {
-        if !matches!(self.panel, Some(ui::Panel::Water | ui::Panel::Bed)) {
+        if self.page == Page::Pomo && self.brain.focus.is_none() {
+            self.set_focus_minutes(ui::focus_minutes(self.wheels[ui::WheelId::FocusMinutes as usize].index()));
+        }
+        if !matches!(self.view, ui::View::Goal | ui::View::Bed) {
             return;
         }
         let index = |a: &App, id: ui::WheelId| a.wheels[id as usize].index();
@@ -3141,7 +3271,29 @@ impl App {
 
     unsafe fn menu(&mut self) {
         let Ok(m) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(m, MF_STRING, 9, w!("Settings"));
+        let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let s = &self.settings;
+        let _ = AppendMenuW(m, check(s.hide_banners), 20, w!("Hide Windows banners"));
+        let _ = AppendMenuW(m, check(s.show_text), 21, w!("Show message text"));
+        let _ = AppendMenuW(m, check(self.lyrics_on), 22, w!("Show lyrics"));
+        let _ = AppendMenuW(m, check(s.pet), 23, w!("Eyes"));
+        let _ = AppendMenuW(m, check(s.minimal), 24, w!("Minimal notch"));
+        let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
+        let submenu = |title: &HSTRING, items: &[(HSTRING, usize, bool)]| {
+            let Ok(sub) = CreatePopupMenu() else { return };
+            for (text, id, on) in items {
+                let _ = AppendMenuW(sub, check(*on), *id, text);
+            }
+            let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, title);
+        };
+        let jam = s.jam_mode as usize;
+        submenu(&HSTRING::from("Eye bounce"), &[("Off", 0), ("Every 1–2 min", 1), ("Every 3–5 min", 2)].map(|(t, i)| (HSTRING::from(t), 30 + i, jam == i)));
+        let size = s.lyric_size as u32;
+        submenu(&HSTRING::from("Lyric size"), &[15u32, 18, 22, 26].map(|v| (HSTRING::from(v.to_string()), 40 + v as usize, size == v)));
+        let care = self.brain.cfg.care;
+        use luma::config::Care;
+        submenu(&HSTRING::from("Reminder level"), &[("Light", Care::Light, 70), ("Normal", Care::Normal, 71), ("Strict", Care::Strict, 72)].map(|(t, c, i)| (HSTRING::from(t), i, care == c)));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         if self.sample.is_some() {
             let _ = AppendMenuW(m, MF_STRING, 8, w!("Stop effect test"));
         } else {
@@ -3156,10 +3308,25 @@ impl App {
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, self.hwnd, None);
         let _ = DestroyMenu(m);
         match cmd.0 {
-            9 => {
-                self.set_mode(Mode::Expanded);
-                self.panel = Some(ui::Panel::Menu);
-                self.sync_wheels();
+            20 => self.change_setting(ui::SetKey::Banners),
+            21 => self.change_setting(ui::SetKey::Text),
+            22 => self.change_setting(ui::SetKey::Lyrics),
+            23 => self.change_setting(ui::SetKey::Eyes),
+            24 => self.change_setting(ui::SetKey::Minimal),
+            25 => self.change_setting(ui::SetKey::Autostart),
+            n @ 30..=32 => {
+                self.settings.jam_mode = (n - 30) as u8;
+                self.jam.gap = if n == 32 { 180.0 } else { 60.0 };
+                self.settings.save();
+            }
+            n @ 55..=66 => {
+                self.settings.lyric_size = (n - 40) as f32;
+                self.lyr_font_target = self.settings.lyric_size;
+                self.settings.save();
+            }
+            n @ 70..=72 => {
+                let want = [luma::config::Care::Light, luma::config::Care::Normal, luma::config::Care::Strict][n as usize - 70];
+                self.brain.configure(|c| c.care = want, chrono::Local::now());
             }
             8 => self.toggle_effect_test(),
             4 => {
@@ -3565,20 +3732,32 @@ fn demo_setup(a: &mut App, spec: &str) {
         l.key = "demo".into();
         a.media.lock().unwrap().stamp = Some(Instant::now());
     }
-    if let Some(v) = kv.get("panel") {
-        a.panel = Some(match *v {
-            "notices" => ui::Panel::Notices,
-            "care" => ui::Panel::Care,
-            "music" => ui::Panel::Music,
-            "system" => ui::Panel::System,
-            "water" => ui::Panel::Water,
-            "bed" => ui::Panel::Bed,
-            _ => ui::Panel::Menu,
-        });
+    if let Some(v) = kv.get("view") {
+        a.view = match *v {
+            "stretch" => ui::View::Care(ui::Tile::Stretch),
+            "eyes" => ui::View::Care(ui::Tile::Eyes),
+            "breathe" => ui::View::Care(ui::Tile::Breathe),
+            "sleep" => ui::View::Care(ui::Tile::Sleep),
+            "goal" => ui::View::Goal,
+            "bed" => ui::View::Bed,
+            "calendar" => ui::View::Calendar,
+            _ => ui::View::Page,
+        };
+        a.glow = match a.view {
+            ui::View::Care(t) => t.colour(),
+            _ => ui::EVENING,
+        };
+        let now = chrono::Local::now();
+        a.brain.add_date("Mom's birthday", &(now + chrono::TimeDelta::days(12)).format("%Y-%m-%d").to_string(), now);
+        a.month = { use chrono::Datelike; (now.year(), now.month()) };
         a.sync_wheels();
+    }
+    if kv.get("focus") == Some(&"1") {
+        a.brain.start_pomodoro(25, 5, 4, "", chrono::Local::now());
     }
     if let Some(step) = kv.get("remform").and_then(|v| v.parse::<u8>().ok()) {
         a.open_form(None);
+        a.view_mix.x = 0.0;
         if let Some(f) = a.form.as_mut() {
             f.title = "Take medicine".into();
             f.step = step;
@@ -3682,7 +3861,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         });
     }
     if kv.get("history_open") == Some(&"1") {
-        a.history_open = true;
+        a.view = ui::View::History;
     }
     // "luma=water|stretch|eyes|breathe|sleep|task|headsup|focusend|app": Luma's cards.
     if let Some(v) = kv.get("luma") {

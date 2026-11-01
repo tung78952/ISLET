@@ -359,8 +359,8 @@ impl App {
                 "hide and show"
             }
             23 => {
-                self.history_open = !self.history_open && self.mode == Mode::Expanded;
-                self.history_top = 0;
+                let open = self.view != crate::ui::View::History && self.mode == Mode::Expanded;
+                self.act(crate::ui::Act::History(open));
                 self.render();
                 "history"
             }

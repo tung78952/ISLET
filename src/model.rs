@@ -203,38 +203,6 @@ impl Todo {
     }
 }
 
-// ---------------------------------------------------------------- focus timer
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Focus,
-    Short,
-    Long,
-}
-
-impl Phase {
-    pub fn secs(self) -> f64 {
-        match self {
-            Phase::Focus => 25.0 * 60.0,
-            Phase::Short => 5.0 * 60.0,
-            Phase::Long => 15.0 * 60.0,
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Phase::Focus => "Focus time",
-            Phase::Short => "Short break",
-            Phase::Long => "Long break",
-        }
-    }
-    pub fn chip(self) -> &'static str {
-        match self {
-            Phase::Focus => "Pomodoro",
-            Phase::Short => "Short Break",
-            Phase::Long => "Long Break",
-        }
-    }
-}
 
 // ---------------------------------------------------------------- shelf
 

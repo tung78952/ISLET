@@ -68,6 +68,7 @@ impl Rc {
 }
 
 pub struct Gfx {
+    inter: Option<IDWriteFontCollection>,
     factory: ID2D1Factory,
     dw: IDWriteFactory,
     rt: ID2D1DCRenderTarget,
@@ -98,6 +99,20 @@ pub struct Gfx {
     last_dirty: Option<RECT>,
 }
 
+/// The app's own typeface, from memory: nothing is installed on the machine.
+unsafe fn load_inter() -> Option<IDWriteFontCollection> {
+    static BYTES: &[u8] = include_bytes!("../assets/fonts/Inter.ttf");
+    let dw: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+    let loader = dw.CreateInMemoryFontFileLoader().ok()?;
+    dw.RegisterFontFileLoader(&loader).ok()?;
+    let file = loader.CreateInMemoryFontFileReference(&dw, BYTES.as_ptr() as *const _, BYTES.len() as u32, None).ok()?;
+    let builder = dw.CreateFontSetBuilder().ok()?;
+    builder.AddFontFile(&file).ok()?;
+    let set = builder.CreateFontSet().ok()?;
+    let coll = dw.CreateFontCollectionFromFontSet(&set).ok()?;
+    windows::core::Interface::cast(&coll).ok()
+}
+
 impl Gfx {
     pub unsafe fn new(w: i32, h: i32, scale: f32) -> Result<Self> {
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -117,6 +132,10 @@ impl Gfx {
         };
         let rt = factory.CreateDCRenderTarget(&props)?;
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        // White on black at small sizes needs more contrast than the system's default.
+        if let Ok(params) = dw.CreateCustomRenderingParams(1.8, 1.0, 0.0, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC) {
+            rt.SetTextRenderingParams(&params);
+        }
         let brush = rt.CreateSolidColorBrush(&rgba(0xffffff, 1.0), None)?;
         let round = factory.CreateStrokeStyle(
             &D2D1_STROKE_STYLE_PROPERTIES {
@@ -142,9 +161,11 @@ impl Gfx {
             }
         }
 
+        let inter = load_inter();
         let mem_dc = CreateCompatibleDC(None);
         let mut g = Gfx {
             factory,
+            inter,
             dw,
             rt,
             brush,
@@ -301,7 +322,9 @@ impl Gfx {
             return Some(f.clone());
         }
         unsafe {
+            let inter = matches!(font, Font::Ui) && self.inter.is_some();
             let family = match font {
+                Font::Ui if inter => HSTRING::from("Inter Variable"),
                 Font::Ui => HSTRING::from("Segoe UI"),
                 Font::Icon => self.icon_family.clone(),
                 Font::Sym => HSTRING::from("Segoe UI Symbol"),
@@ -310,7 +333,7 @@ impl Gfx {
                 .dw
                 .CreateTextFormat(
                     &family,
-                    None,
+                    self.inter.as_ref().filter(|_| inter),
                     DWRITE_FONT_WEIGHT(weight as i32),
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,

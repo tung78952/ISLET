@@ -330,7 +330,24 @@ impl Brain {
 
     /// Seconds until the water reminder, if it is on.
     pub fn water_in(&self, now: DateTime<Local>) -> Option<i64> {
-        self.sched.next_in(&self.cfg, now).into_iter().find(|(k, _)| *k == Kind::Water).map(|(_, s)| s)
+        self.next_in(Kind::Water, now)
+    }
+
+    /// Seconds until a reminder, if it is on.
+    pub fn next_in(&self, kind: Kind, now: DateTime<Local>) -> Option<i64> {
+        self.sched.next_in(&self.cfg, now).into_iter().find(|(k, _)| *k == kind).map(|(_, s)| s)
+    }
+
+    pub fn add_date(&mut self, title: &str, date: &str, now: DateTime<Local>) {
+        if self.cfg.dates.len() < config::MAX_DATES {
+            self.cfg.dates.push(config::ImportantDate { id: format!("d{}", now.timestamp_millis()), title: title.to_string(), date: date.to_string() });
+            self.save_config();
+        }
+    }
+
+    pub fn delete_date(&mut self, id: &str) {
+        self.cfg.dates.retain(|d| d.id != id);
+        self.save_config();
     }
 
     /// Cups drunk in each hour today (from the answers Luma keeps).
