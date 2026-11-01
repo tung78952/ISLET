@@ -69,19 +69,23 @@ pub fn at(steps: &[Step], t: f32) -> Option<(usize, f32, f32)> {
     None
 }
 
-pub fn pose(m: Move, u: f32) -> Pose {
+/// The pose `u` (0..1) through a step, `t` seconds in: nothing ever stands quite still.
+pub fn pose(m: Move, u: f32, t: f32) -> Pose {
     use std::f32::consts::TAU;
     let still = Pose { dx: 0.0, dy: 0.0, tilt: 0.0, size: 1.0, look: Look::Neutral };
+    let into = (t / 1.2).clamp(0.0, 1.0);
+    let into = into * into * (3.0 - 2.0 * into);
+    let sway = (t * 2.2).sin();
     match m {
-        Move::ReachUp => Pose { dy: -14.0, ..still },
-        Move::Left => Pose { dx: -24.0, dy: -4.0, tilt: -0.22, ..still },
-        Move::Right => Pose { dx: 24.0, dy: -4.0, tilt: 0.22, ..still },
+        Move::ReachUp => Pose { dy: -14.0 * into + 2.5 * sway, size: 1.0 + 0.05 * into, ..still },
+        Move::Left => Pose { dx: -24.0 * into + 3.0 * sway, dy: -4.0 * into, tilt: -0.22 * into + 0.04 * sway, ..still },
+        Move::Right => Pose { dx: 24.0 * into + 3.0 * sway, dy: -4.0 * into, tilt: 0.22 * into + 0.04 * sway, ..still },
         Move::NeckRoll => {
             let a = -TAU / 4.0 + TAU * 2.0 * u;
             Pose { dx: 22.0 * a.cos(), dy: 13.0 * a.sin(), tilt: 0.28 * a.cos(), ..still }
         }
-        Move::Close => Pose { look: Look::Closed, ..still },
-        Move::FarAway => Pose { size: 0.82, ..still },
+        Move::Close => Pose { look: Look::Closed, size: 1.0 + 0.06 * (t * 1.4).sin(), ..still },
+        Move::FarAway => Pose { dx: 10.0 * (t * 0.8).sin(), dy: 3.0 * (t * 1.1).sin(), size: 0.82, look: if t % 3.4 < 0.14 { Look::Closed } else { Look::Neutral }, ..still },
         Move::BreatheIn => Pose { size: 1.0 + 0.4 * u, ..still },
         Move::Hold => Pose { size: 1.4, ..still },
         Move::BreatheOut => Pose { size: 1.4 - 0.65 * u, ..still },

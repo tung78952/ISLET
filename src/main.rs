@@ -195,6 +195,11 @@ impl ToastKind {
         matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::Call | ToastKind::LumaApp | ToastKind::Shutdown)
     }
 
+    /// Has buttons, so the pointer works on it and the eyes watch it; a call has its own card.
+    pub fn answered(self) -> bool {
+        self != ToastKind::Call && (self.waits() || self == ToastKind::Break)
+    }
+
     /// Comes back if something passing covers it.
     pub fn returns(self) -> bool {
         self.waits() || matches!(self, ToastKind::Notice | ToastKind::Message)
@@ -568,6 +573,8 @@ pub struct App {
     pub shutdown_at: Option<Instant>,
     /// The activity the eyes are leading, if any.
     pub guide: Option<Guide>,
+    /// The pair's place on the guide screen: x, y, tilt and size.
+    pub guide_pose: [Spring; 4],
     /// How much the focus dots may show in this frame.
     pub live_alpha: f32,
     /// The answer a card just got (true for done) and when: the eyes react before it leaves.
@@ -721,7 +728,8 @@ pub struct App {
     pub lyrics: Arc<Mutex<Lyrics>>,
     pub power: Option<sys::Power>,
     layout: isize,
-    hidden: bool,
+    /// Something fills the screen: the notch is down to a sliver.
+    pub hidden: bool,
     pub born: Instant,
     icon: HICON,
     taskbar_created: u32,
@@ -838,6 +846,7 @@ impl App {
             swiped: None,
             shutdown_at: None,
             guide: None,
+            guide_pose: [Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(1.0, 120.0, 16.0)],
             live_alpha: 0.0,
             reaction: None,
             reaction_hops: 0,
@@ -1069,7 +1078,11 @@ impl App {
     /// Target notch size for the current state.
     pub fn target(&self) -> [f32; 2] {
         // Stepping aside: only reminders that need an answer keep their size.
-        let urgent = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Call));
+        let urgent = self.toast.as_ref().is_some_and(|t| t.kind.answered() || t.kind == ToastKind::Call);
+        // A film or a game fills the screen: only a thin sliver stays, and only a call gets past it.
+        if self.hidden && self.mode == Mode::Compact && !self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) {
+            return MINIMAL;
+        }
         if self.yielded && self.mode == Mode::Compact && !urgent {
             return MINIMAL;
         }
@@ -1489,7 +1502,14 @@ impl App {
                 if done { eyes::Look::Love } else { eyes::Look::Sad }
             }
             None => match guide::at(&g.steps, g.time()) {
-                Some((i, u, _)) => guide::pose(g.steps[i].moves, u).look,
+                Some((i, u, left)) => {
+                    let step = g.steps[i];
+                    let p = guide::pose(step.moves, u, step.secs - left);
+                    for (spring, to) in self.guide_pose.iter_mut().zip([p.dx, p.dy, p.tilt, p.size]) {
+                        spring.step(to, dt);
+                    }
+                    p.look
+                }
                 None => {
                     self.end_guide(true);
                     eyes::Look::Love
@@ -1530,7 +1550,7 @@ impl App {
 
     /// How the eyes on a card feel: they watch the pointer, sad on the way to "Later", glad on the
     /// way to "Done", and show what they think of the answer before the card leaves.
-    fn card_mood(&mut self, f: &eyes::ActFrame) -> (eyes::Look, f32) {
+    fn card_mood(&mut self, rest: eyes::Look, rest_gaze: f32, buttons: f32) -> (eyes::Look, f32) {
         use eyes::Look;
         if let Some(look) = self.sample_mood {
             return (look, 0.0);
@@ -1549,13 +1569,13 @@ impl App {
             }
             return (if done { Look::Love } else { Look::Sad }, 0.0);
         }
-        if !self.mouse_in || f.buttons < 0.6 {
-            return (f.look, f.gaze);
+        if !self.mouse_in || buttons < 0.6 {
+            return (rest, rest_gaze);
         }
         let gaze = ((self.mouse.0 - WIN_W / 2.0) / 190.0).clamp(-1.0, 1.0);
         match self.hit(self.mouse.0, self.mouse.1) {
-            Some(Act::LumaLater) => (Look::Sad, gaze),
-            Some(Act::LumaDone | Act::GuideStart) => (Look::Happy, gaze),
+            Some(Act::LumaLater | Act::ShutdownCancel) => (Look::Sad, gaze),
+            Some(Act::LumaDone | Act::GuideStart | Act::LumaNow) => (Look::Happy, gaze),
             _ => (Look::Neutral, gaze),
         }
     }
@@ -1579,9 +1599,13 @@ impl App {
             self.step_guide(dt);
         } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
-            let (look, gaze) = self.card_mood(&f);
+            let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
             let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
             self.eyes.step(feel, dt);
+        } else if self.toast.as_ref().is_some_and(|t| t.kind.answered()) {
+            // Cards without an act of their own still watch the pointer.
+            let (look, gaze) = self.card_mood(eyes::Look::Neutral, 0.0, 1.0);
+            self.eyes.step(eyes::Feel { show: true, look, gaze, ..eyes::Feel::ASLEEP }, dt);
         } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
         }
@@ -1762,9 +1786,6 @@ impl App {
     }
 
     pub fn render(&mut self) {
-        if self.hidden {
-            return;
-        }
         unsafe {
             // Everything is drawn inside the notch (plus its ears) or the minimal hover pad.
             let (cx, w) = self.notch_geometry();
@@ -2179,6 +2200,13 @@ impl App {
         let _ = unsafe { GetCursorPos(&mut pt) };
         self.poll_yield(pt);
         self.sense_eyes(pt, down);
+        // The hook sees nothing pressed in a window running as administrator: Windows still
+        // knows, so the state is compared here too.
+        if !self.caps_settling {
+            if let Some(on) = sys::caps_settle() {
+                self.toast(ToastKind::Caps(on), "Caps Lock", if on { "On" } else { "Off" }, None);
+            }
+        }
         // Fast polling only matters with the pointer near the notch, a button held or typing;
         // otherwise four checks a second are enough.
         let s = self.gfx.scale;
@@ -2429,13 +2457,9 @@ impl App {
             let t = self.eye_time();
             self.eyes.mind.ask(eyes::Peek::Battery, t);
         }
-        // Pressed while Islet could not see the key (locked, not running yet).
-        if !self.caps_settling {
-            sys::caps_settle();
-        }
         // A card nobody can see is not being ignored: its time stands still.
         let since = std::mem::replace(&mut self.last_brain_tick, Instant::now()).elapsed();
-        if !self.toast.as_ref().is_some_and(|t| t.kind.waits()) {
+        if self.hidden || !self.toast.as_ref().is_some_and(|t| t.kind.waits()) {
             self.brain.delay_card(chrono::TimeDelta::from_std(since).unwrap_or_default());
         }
         if self.brain.timed_out(now) {
@@ -2732,9 +2756,7 @@ impl App {
 
     /// A toast with its own buttons stays put under the cursor instead of opening the notch.
     fn interactive_toast(&self) -> bool {
-        self.toast.as_ref().is_some_and(|t| {
-            matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break | ToastKind::Task | ToastKind::Remind(_) | ToastKind::HeadsUp | ToastKind::LumaApp | ToastKind::Call)
-        })
+        self.toast.as_ref().is_some_and(|t| t.kind.answered() || t.kind == ToastKind::Call)
     }
 
     /// Tracks the cursor during a drag (screen pixels).
@@ -3405,14 +3427,7 @@ impl App {
         let cover = sys::foreground_covers(self.monitor, self.hwnd) && !self.expanded();
         if cover != self.hidden {
             self.hidden = cover;
-            unsafe {
-                let _ = ShowWindow(self.hwnd, if cover { SW_HIDE } else { SW_SHOWNOACTIVATE });
-            }
-            if !cover {
-                // Windows may have dropped the hidden window's image.
-                self.gfx.invalidate();
-                self.render();
-            }
+            self.kick();
         }
     }
 
@@ -3444,7 +3459,7 @@ impl App {
             }
             // Brushing the sliver does nothing: the pointer is usually on its way to something
             // just below it. It comes back when the pointer leaves, or on a click.
-            let held = self.yielded || self.no_hover_until.is_some_and(|t| Instant::now() < t);
+            let held = self.yielded || self.hidden || self.no_hover_until.is_some_and(|t| Instant::now() < t);
             if held {
             } else if self.mode == Mode::Compact && self.notice_toast() {
                 // A resting cursor grows the notification instead of opening the widgets.
@@ -3732,7 +3747,9 @@ impl App {
                 }
                 return;
             }
-            self.open_by_hand();
+            if !self.hidden {
+                self.open_by_hand();
+            }
             self.render();
             return;
         }

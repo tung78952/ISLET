@@ -651,7 +651,7 @@ pub fn draw(a: &mut App) {
     let mut small_alpha = (1.0 - (h - fade_from) / 14.0).clamp(0.0, 1.0) * (1.0 - a.fade.x).clamp(0.0, 1.0);
     // A notification grows into its detail view: the card leaves in the first half of the way, the
     // detail comes in the second, so the two are never on screen together.
-    let notice = a.notice_toast() && a.fade.x < 0.01;
+    let notice = a.notice_toast() && a.fade.x < 0.01 && !a.hidden;
     let grown = if notice {
         let card_h = a.notice_card_height();
         ((h - card_h) / (crate::NOTICE_OPEN[1] - card_h)).clamp(0.0, 1.0)
@@ -660,6 +660,9 @@ pub fn draw(a: &mut App) {
     };
     if notice {
         small_alpha = (1.0 - 2.0 * grown).clamp(0.0, 1.0);
+    }
+    if a.hidden && !a.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Call) {
+        small_alpha = 0.0;
     }
 
     if exp_alpha > 0.01 {
@@ -780,16 +783,18 @@ fn clock_text(left_s: f64) -> String {
 }
 
 /// Where the focus dots are. `open` is 0 in the small notch, where they form a ring with the first
-/// at 12 o'clock's left, and 1 in the open one, where the ring has unbent into a straight row.
+/// around 12 o'clock, and 1 in the open one, where the ring has unbent into a straight row.
 pub fn dot_at(i: usize, open: f32, ring: (f32, f32), row: (f32, f32)) -> (f32, f32) {
     let u = i as f32 - (FOCUS_DOTS as f32 - 1.0) / 2.0;
     let turn = -std::f32::consts::FRAC_PI_2 + u / FOCUS_DOTS as f32 * std::f32::consts::TAU;
     let (cx, cy) = (ring.0 + 7.5 * turn.cos(), ring.1 + 7.5 * turn.sin());
-    let (rx, ry) = (row.0 + u * 3.4, row.1);
+    let (rx, ry) = (row.0 + u * 2.3, row.1);
     (cx + (rx - cx) * open, cy + (ry - cy) * open)
 }
 
-const FOCUS_DOTS: usize = 8;
+const FOCUS_DOTS: usize = 12;
+/// A dot that has gone out: dark, but still there.
+const DOT_OUT: u32 = 0x6E2A2E;
 
 /// The focus dots: a ring of light in the notch that unbends into a row as it opens. They go out
 /// one by one, clockwise round the ring.
@@ -805,15 +810,17 @@ fn focus_dots(a: &mut App, left: f32, w: f32, h: f32) {
     let row = (left + (SLOT_LIVE.0 + SLOT_LIVE.1) / 2.0, 19.0);
     let base = a.gfx.alpha;
     a.gfx.alpha = a.live_alpha;
+    let left = FOCUS_DOTS as f32 - gone;
     for i in 0..FOCUS_DOTS {
-        // Clockwise from the top of the ring.
-        let order = (i + FOCUS_DOTS / 2) % FOCUS_DOTS;
-        let k = (order as f32 + 1.0 - gone).clamp(0.0, 1.0);
+        // Clockwise from the top of the ring; from the right along the row.
+        let round = (((i + FOCUS_DOTS / 2) % FOCUS_DOTS) as f32 + 1.0 - gone).clamp(0.0, 1.0);
+        let along = (left - i as f32).clamp(0.0, 1.0);
+        let k = round + (along - round) * open;
         let (x, y) = dot_at(i, open, ring, row);
         if k > 0.02 {
-            a.gfx.fill_circle(x, y, 2.9, 2.9, RED, 0.16 * k);
+            a.gfx.fill_circle(x, y, 2.4, 2.4, RED, 0.18 * k);
         }
-        a.gfx.fill_circle(x, y, 1.4, 1.4, RED, 0.16 + 0.84 * k);
+        a.gfx.fill_circle(x, y, 1.15, 1.15, mix(DOT_OUT, RED, k), 1.0);
     }
     a.gfx.alpha = base;
 }
@@ -1741,7 +1748,7 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
                 ("Skip", Mark::Skip)
             };
             plain_card(a, left, w, h, title, value, |_, _, _| {});
-            pic(a, "ic_focus", left + 44.0, h / 2.0, 30.0, WHITE, 1.0);
+            pic(a, "ic_focus", left + 104.0, h / 2.0, 26.0, WHITE, 1.0);
             card_marks(a, left, w, h, t, live, &[(Mark::Cross, "Close", Act::ToastDismiss), (mark, label, Act::ToastStartPhase)]);
         }
         ToastKind::Task => {
@@ -1814,12 +1821,13 @@ enum Mark {
 
 /// A card that wants an answer without an act: its icon, a line, the words.
 fn plain_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, draw: impl FnOnce(&Gfx, f32, f32)) {
-    let (x, cy) = (left + 44.0, h / 2.0);
-    draw(&a.gfx, x, cy);
-    divider(a, left + 80.0, cy - 20.0, cy + 20.0);
-    let tw = w - 240.0;
-    a.gfx.ui(title, Rc::new(left + 96.0, cy - 21.0, tw, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    a.gfx.ui(value, Rc::new(left + 96.0, cy + 1.0, tw, 18.0), SMALL, 400, 0xA0A0A5, 1.0, Align::L);
+    let cy = h / 2.0;
+    act_eyes(a, left + 56.0, cy, 0.13, 0.0);
+    draw(&a.gfx, left + 104.0, cy);
+    divider(a, left + 132.0, cy - 20.0, cy + 20.0);
+    let tw = w - 292.0;
+    a.gfx.ui(title, Rc::new(left + 146.0, cy - 21.0, tw, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
+    a.gfx.ui(value, Rc::new(left + 146.0, cy + 1.0, tw, 18.0), SMALL, 400, 0xA0A0A5, 1.0, Align::L);
 }
 
 /// The same round answers on every card, right-aligned. On the strict care level "Later" only
@@ -2566,7 +2574,7 @@ fn focus_running(a: &mut App, lx: f32, live: bool) {
         if k > 0.02 {
             a.gfx.fill_circle(x, y, 4.0, 4.0, RED, 0.14 * k * tail);
         }
-        a.gfx.fill_circle(x, y, 1.9, 1.9, RED, 0.08 + 0.92 * k * tail);
+        a.gfx.fill_circle(x, y, 1.9, 1.9, mix(DOT_OUT, RED, k * tail), 1.0);
     }
     pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
     a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
@@ -2590,8 +2598,7 @@ fn guide_page(a: &mut App, lx: f32) {
     let moment = crate::guide::at(&g.steps, time).map(|(i, u, left)| (g.steps[i], u, left));
     back_title(a, lx, tile.name(), Act::GuideBack);
     let (cx, cy) = (lx + 100.0, 84.0);
-    let pose = moment.map(|(s, u, _)| crate::guide::pose(s.moves, u));
-    let (dx, dy, tilt, size) = pose.map_or((0.0, 0.0, 0.0, 1.0), |p| (p.dx, p.dy, p.tilt, p.size));
+    let [dx, dy, tilt, size] = a.guide_pose.each_ref().map(|s| s.x);
     a.gfx.rotate(cx + dx, cy + dy, tilt);
     a.eye_draws.1 += 1;
     let scale = 0.17 * size;
