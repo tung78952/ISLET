@@ -2921,7 +2921,7 @@ fn calendar(a: &mut App, lx: f32) {
                 let (cw, ch) = (col * 7.0 / 3.0, 44.0);
                 let r = Rc::new(x0 + ((m - 1) % 3) as f32 * cw + 3.0, 72.0 + ((m - 1) / 3) as f32 * ch + 3.0, cw - 6.0, ch - 6.0);
                 let on = m == today.month() && year == today.year();
-                pick_cell(a, r, &MONTHS[m as usize - 1][..3], on, Act::PickMonth(m));
+                pick_cell(a, r, &MONTHS[m as usize - 1][..3], on, false, Act::PickMonth(m));
             }
         }
         Cal::Years => {
@@ -2929,7 +2929,8 @@ fn calendar(a: &mut App, lx: f32) {
             for i in 0..12 {
                 let (cw, ch) = (col * 7.0 / 3.0, 44.0);
                 let r = Rc::new(x0 + (i % 3) as f32 * cw + 3.0, 72.0 + (i / 3) as f32 * ch + 3.0, cw - 6.0, ch - 6.0);
-                pick_cell(a, r, &(first + i).to_string(), first + i == today.year(), Act::PickYear(first + i));
+                // The first and last are outside the decade in the heading.
+                pick_cell(a, r, &(first + i).to_string(), first + i == today.year(), i == 0 || i == 11, Act::PickYear(first + i));
             }
         }
     }
@@ -2962,10 +2963,15 @@ fn calendar(a: &mut App, lx: f32) {
     }
 }
 
-fn pick_cell(a: &mut App, r: Rc, text: &str, on: bool, act: Act) {
-    let h = btn(a, r, 0.05);
-    a.gfx.fill_rrect(r, 12.0, if on { RED } else { mix(0x18181A, 0x303034, h.clamp(0.0, 1.0)) }, 1.0);
-    a.gfx.ui(text, r, BODY, 500, WHITE, 1.0, Align::C);
+/// A month or year to jump to: plain text, the current one red with a dot under it.
+fn pick_cell(a: &mut App, r: Rc, text: &str, on: bool, faint: bool, act: Act) {
+    let h = btn(a, r, 0.03).clamp(0.0, 1.0);
+    let rest = if faint { 0x6E6E72 } else { 0xD8D8DA };
+    let (colour, weight) = if on { (RED, 600) } else { (mix(rest, WHITE, h), if h > 0.5 { 600 } else { 400 }) };
+    a.gfx.ui(text, r, 15.0, weight, colour, 1.0, Align::C);
+    if on {
+        a.gfx.fill_circle(r.cx(), r.cy() + 14.0, 2.0, 2.0, RED, 1.0);
+    }
     a.gfx.unzoom();
     hit(a, r, act);
 }

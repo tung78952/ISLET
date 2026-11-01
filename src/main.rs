@@ -1799,7 +1799,7 @@ impl App {
             moving |= self.month_mix.step(0.0, sub);
             moving |= self.gone_mix.step(0.0, sub);
             moving |= self.swipe_mix.step(if self.swiped.is_some() { 1.0 } else { 0.0 }, sub);
-            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form | ui::View::Guide)
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Bed | ui::View::Calendar | ui::View::Form | ui::View::Guide)
                 || self.brief.as_ref().is_some_and(|b| b.date.as_ref().is_some_and(|d| d.1 == 0));
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
@@ -3077,6 +3077,7 @@ impl App {
         self.view_mix.v = 0.0;
         match v {
             V::Care(t) => self.glow = t.colour(),
+            V::Bed => self.glow = ui::Tile::Sleep.colour(),
             V::Calendar => self.glow = ui::EVENING,
             V::Form => self.glow = if self.form.as_ref().is_some_and(|f| f.date.is_some()) { ui::EVENING } else { ui::CALM },
             _ => {}
@@ -3876,13 +3877,13 @@ impl App {
         let Ok(m) = CreatePopupMenu() else { return };
         let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
         let s = &self.settings;
-        let _ = AppendMenuW(m, check(s.hide_banners), 20, w!("Hide Windows banners"));
-        let _ = AppendMenuW(m, check(s.show_text), 21, w!("Show message text"));
+        let _ = AppendMenuW(m, check(s.pet), 23, w!("Show eyes"));
         let _ = AppendMenuW(m, check(self.lyrics_on), 22, w!("Show lyrics"));
-        let _ = AppendMenuW(m, check(s.pet), 23, w!("Eyes"));
-        let _ = AppendMenuW(m, check(s.minimal), 24, w!("Minimal notch"));
-        let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
-        let _ = AppendMenuW(m, check(self.brain.cfg.reminders.sleep.shutdown), 26, w!("Shut down at bedtime"));
+        let _ = AppendMenuW(m, check(s.minimal), 24, w!("Small notch"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, check(s.hide_banners), 20, w!("Hide Windows notifications"));
+        let _ = AppendMenuW(m, check(s.show_text), 21, w!("Show notification text"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let submenu = |title: &HSTRING, items: &[(HSTRING, usize, bool)]| {
             let Ok(sub) = CreatePopupMenu() else { return };
             for (text, id, on) in items {
@@ -3890,14 +3891,12 @@ impl App {
             }
             let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, title);
         };
-        let jam = s.jam_mode as usize;
-        submenu(&HSTRING::from("Eye bounce"), &[("Off", 0), ("Every 1–2 min", 1), ("Every 3–5 min", 2)].map(|(t, i)| (HSTRING::from(t), 30 + i, jam == i)));
-        let size = s.lyric_size as u32;
-        submenu(&HSTRING::from("Lyric size"), &[15u32, 18, 22, 26].map(|v| (HSTRING::from(v.to_string()), 40 + v as usize, size == v)));
         let care = self.brain.cfg.care;
         use luma::config::Care;
-        submenu(&HSTRING::from("Reminder level"), &[("Light", Care::Light, 70), ("Normal", Care::Normal, 71), ("Strict", Care::Strict, 72)].map(|(t, c, i)| (HSTRING::from(t), i, care == c)));
+        submenu(&HSTRING::from("Reminders"), &[("Light", Care::Light, 70), ("Normal", Care::Normal, 71), ("Strict", Care::Strict, 72)].map(|(t, c, i)| (HSTRING::from(t), i, care == c)));
+        let _ = AppendMenuW(m, check(self.brain.cfg.reminders.sleep.shutdown), 26, w!("Shut down at bedtime"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
         if self.sample.is_some() {
             let _ = AppendMenuW(m, MF_STRING, 8, w!("Stop effect test"));
         } else {
@@ -3919,16 +3918,6 @@ impl App {
             24 => self.change_setting(ui::SetKey::Minimal),
             25 => self.change_setting(ui::SetKey::Autostart),
             26 => self.brain.configure(|c| c.reminders.sleep.shutdown ^= true, chrono::Local::now()),
-            n @ 30..=32 => {
-                self.settings.jam_mode = (n - 30) as u8;
-                self.jam.gap = if n == 32 { 180.0 } else { 60.0 };
-                self.settings.save();
-            }
-            n @ 55..=66 => {
-                self.settings.lyric_size = (n - 40) as f32;
-                self.lyr_font_target = self.settings.lyric_size;
-                self.settings.save();
-            }
             n @ 70..=72 => {
                 let want = [luma::config::Care::Light, luma::config::Care::Normal, luma::config::Care::Strict][n as usize - 70];
                 self.brain.configure(|c| c.care = want, chrono::Local::now());
@@ -4345,6 +4334,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         };
         a.glow = match a.view {
             ui::View::Care(t) => t.colour(),
+            ui::View::Bed => ui::Tile::Sleep.colour(),
             _ => ui::EVENING,
         };
         let now = chrono::Local::now();
