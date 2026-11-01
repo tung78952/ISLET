@@ -590,7 +590,7 @@ pub fn act(kind: ActKind, e: f32) -> ActFrame {
         e if (0.5..ACT_HIT).contains(&e) => -0.35 * smooth((e - 0.5) / 0.2),
         e if (ACT_HIT..ACT_HIT + 0.15).contains(&e) => 1.0,
         _ if nudge && waiting < 0.2 => -0.2,
-        _ if nudge && waiting < 0.34 => 0.6,
+        _ if nudge && waiting < 0.34 => 1.0,
         _ => 0.0,
     };
     let play = ((e - 1.2) / (ACT_END - 1.2)).clamp(0.0, 1.0);
@@ -831,7 +831,7 @@ pub struct Eyes {
     last: Look,
     /// Seconds of slow reopening left after a blink.
     reopening: f32,
-    last_lunge: f32,
+    struck: bool,
 }
 
 impl Eyes {
@@ -855,7 +855,7 @@ impl Eyes {
             mind: Mind::new(),
             last: Look::Closed,
             reopening: 0.0,
-            last_lunge: 0.0,
+            struck: false,
         }
     }
 
@@ -878,14 +878,17 @@ impl Eyes {
             self.hop.v = -38.0;
         }
         self.hop.step(0.0, dt);
-        // Contact: the battery is shoved, rocks and dents, then springs back.
-        if lunge > 0.5 && self.last_lunge <= 0.5 {
-            self.shove.v += 150.0;
-            self.rock.v += 5.0;
+        self.lunge.step(lunge, dt);
+        // Contact: only once they have really got there is it shoved, rocks and dents.
+        if lunge > 0.5 && !self.struck && self.lunge.x >= 0.85 {
+            self.struck = true;
+            self.shove.v += 200.0;
+            self.rock.v += 6.0;
             self.dent.v += 16.0;
         }
-        self.last_lunge = lunge;
-        self.lunge.step(lunge, dt);
+        if lunge <= 0.5 {
+            self.struck = false;
+        }
         self.shove.step(0.0, dt);
         self.rock.step(0.0, dt);
         self.dent.step(0.0, dt);

@@ -81,7 +81,7 @@ const SWIPE_TIME: Duration = Duration::from_secs(4);
 /// No more movement for this long means the fingers have lifted.
 const SWIPE_REST_MS: u128 = 120;
 /// Sideways wheel units that move one page.
-const SWIPE_PAGE: f32 = 520.0;
+const SWIPE_PAGE: f32 = 1300.0;
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
@@ -91,7 +91,7 @@ pub const WIN_H: f32 = 300.0;
 /// Notch sizes measured from the reference app (layout units).
 pub const COMPACT: [f32; 2] = [150.0, 30.0];
 pub const PEEK: [f32; 2] = [208.0, 52.0];
-pub const EXPANDED: [f32; 2] = [420.0, 140.0];
+pub const EXPANDED: [f32; 2] = [420.0, 124.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
 pub const CALENDAR: [f32; 2] = [420.0, 280.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
@@ -533,6 +533,9 @@ pub struct App {
     /// The row whose Delete button is showing, the last one to, how far it has slid (0..1), and
     /// when it slides back by itself.
     pub swiped: Option<String>,
+    /// The answer a card just got (true for done) and when: the eyes react before it leaves.
+    pub reaction: Option<(Instant, bool)>,
+    reaction_hops: u8,
     pub swipe_last: String,
     pub swipe_mix: Spring,
     swipe_until: Instant,
@@ -795,6 +798,8 @@ impl App {
             pick_mix: Spring::new(0.0, 170.0, 24.0),
             pick_goal: false,
             swiped: None,
+            reaction: None,
+            reaction_hops: 0,
             swipe_last: String::new(),
             swipe_mix: Spring::new(0.0, 260.0, 28.0),
             swipe_until: Instant::now(),
@@ -1377,6 +1382,30 @@ impl App {
         self.kick();
     }
 
+    /// How the eyes on a card feel: they watch the pointer, sad on the way to "Later", glad on the
+    /// way to "Done", and show what they think of the answer before the card leaves.
+    fn card_mood(&mut self, f: &eyes::ActFrame) -> (eyes::Look, f32) {
+        use eyes::Look;
+        if let Some((at, done)) = self.reaction {
+            let age = at.elapsed().as_secs_f32();
+            let hops = (age / 0.42) as u8 + 1;
+            if done && self.reaction_hops < hops.min(2) {
+                self.reaction_hops += 1;
+                self.eyes.hop.v -= 90.0;
+            }
+            return (if done { Look::Love } else { Look::Sad }, 0.0);
+        }
+        if !self.mouse_in || f.buttons < 0.6 {
+            return (f.look, f.gaze);
+        }
+        let gaze = ((self.mouse.0 - WIN_W / 2.0) / 190.0).clamp(-1.0, 1.0);
+        match self.hit(self.mouse.0, self.mouse.1) {
+            Some(Act::LumaLater) => (Look::Sad, gaze),
+            Some(Act::LumaDone) => (Look::Happy, gaze),
+            _ => (Look::Neutral, gaze),
+        }
+    }
+
     fn step(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
@@ -1384,7 +1413,8 @@ impl App {
         self.sample_step(dt);
         if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
-            let feel = eyes::Feel { show: true, look: f.look, blink: f.blink, gaze: f.gaze, lunge: f.lunge, ..eyes::Feel::ASLEEP };
+            let (look, gaze) = self.card_mood(&f);
+            let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
             self.eyes.step(feel, dt);
         } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
@@ -1531,6 +1561,7 @@ impl App {
             || self.mini_busy
             || self.wheels_moving
             || self.jam_show
+            || self.reaction.is_some()
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             // A card's eyes stay out while it waits, and need frames only when the act says so.
@@ -2352,7 +2383,15 @@ impl App {
         if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
             self.brain.start_focus(minutes, &label, now);
         }
-        if self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus)) {
+        if self.act_now().is_some() && !timed_out {
+            // The card stays a moment for the eyes to react, then leaves by itself.
+            let done = outcome == Outcome::Done;
+            self.reaction = Some((Instant::now(), done));
+            self.reaction_hops = 0;
+            if let Some(t) = self.toast.as_mut() {
+                t.until = Instant::now() + Duration::from_millis(if done { 1500 } else { 800 });
+            }
+        } else if self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus)) {
             self.dismiss_toast();
         }
         if water && outcome == Outcome::Done {
@@ -3034,6 +3073,9 @@ impl App {
             if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Notice | ToastKind::Message)) {
                 t.until = t.until.max(Instant::now() + Duration::from_secs(2));
             }
+        }
+        if self.reaction.is_some() && self.act_now().is_none() {
+            self.reaction = None;
         }
         if self.swiped.is_some() && Instant::now() >= self.swipe_until {
             self.swiped = None;
