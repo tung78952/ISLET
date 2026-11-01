@@ -2836,7 +2836,6 @@ fn today(a: &mut App, lx: f32) {
     let marked: Vec<chrono::NaiveDate> = a.brain.cfg.dates.iter().filter_map(|d| chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()).collect();
     let strip = Rc::new(lx + 24.0, 38.0, 372.0, 54.0);
     let line_box = Rc::new(lx + 28.0, 98.0, 220.0, 24.0);
-    let hot = hovering(a, strip) || hovering(a, line_box);
     let h = btn(a, strip, 0.0);
     if h > 0.0 {
         a.gfx.fill_rrect(strip, 14.0, 0xFFFFFF, 0.05 * h.min(1.0));
@@ -2866,7 +2865,7 @@ fn today(a: &mut App, lx: f32) {
         Some((_, name, left)) => format!("{name} {}", days_left(*left)),
         _ => "Add a day that matters".to_string(),
     };
-    a.gfx.ui(&line, Rc::new(lx + 54.0, CY - 11.0, 176.0, 22.0), 13.0, 400, if hot { WHITE } else { 0xD8D8DA }, 1.0, Align::L);
+    a.gfx.ui(&line, Rc::new(lx + 54.0, CY - 11.0, 176.0, 22.0), 13.0, 400, 0xD8D8DA, 1.0, Align::L);
     divider(a, lx + 236.0, CY - 8.0, CY + 8.0);
     let cfg = &a.brain.cfg;
     let litres = (a.brain.stats.water * cfg.cup_ml) as f32 / 1000.0;
@@ -3203,7 +3202,7 @@ fn shelf(a: &mut App, lx: f32) {
     let items = a.shelf.items.clone();
     if drag && !items.is_empty() {
         // Nusa keeps the Clear chip next to the title while files are dragged in.
-        let clear = Rc::new(lx + 100.0, 10.8, 40.0, 17.6);
+        let clear = Rc::new(lx + 100.0, 10.2, 40.0, 17.6);
         a.gfx.fill_rrect(clear, 8.8, 0x2A2A2A, 1.0);
         a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
     }
@@ -3257,7 +3256,7 @@ fn shelf(a: &mut App, lx: f32) {
             a.gfx.alpha = base;
         }
     }
-    let clear = Rc::new(lx + 84.0, 10.8, 40.0, 17.6);
+    let clear = Rc::new(lx + 100.0, 10.2, 40.0, 17.6);
     let h = btn(a, clear, 0.08);
     a.gfx.fill_rrect(clear, 8.8, mix(0x2A2A2A, 0x444444, h), 1.0);
     a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
