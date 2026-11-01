@@ -260,6 +260,31 @@ impl Guide {
     }
 }
 
+/// The day's briefing: the morning hello, or what was missed while away.
+pub struct Brief {
+    pub hello: bool,
+    pub missed: Vec<(String, String)>,
+    pub coming: Vec<(String, String)>,
+    /// The nearest important day within a month, and how far off.
+    pub date: Option<(String, i64)>,
+    pub bedtime: Option<String>,
+    opened: Instant,
+}
+
+#[cfg(test)]
+impl Brief {
+    pub fn sample(hello: bool, missed: Vec<(String, String)>, coming: Vec<(String, String)>, date: Option<(String, i64)>, bedtime: Option<String>) -> Self {
+        Brief { hello, missed, coming, date, bedtime, opened: Instant::now() }
+    }
+}
+
+/// How long the briefing stays without the pointer on it.
+/// Ticks after starting before it looks, so it doesn't race the desktop coming up.
+const BRIEF_DELAY_TICKS: u32 = 20;
+const BRIEF_TIME: Duration = Duration::from_secs(9);
+/// How far ahead an important day is worth mentioning.
+const DATE_HORIZON: i64 = 30;
+
 pub struct Form {
     /// The reminder being edited; None for a new one.
     pub id: Option<String>,
@@ -569,6 +594,8 @@ pub struct App {
     pub shutdown_at: Option<Instant>,
     /// The activity the eyes are leading, if any.
     pub guide: Option<Guide>,
+    /// What the briefing shows while it is open.
+    pub brief: Option<Brief>,
     /// The pair's place on the guide screen: x, y, tilt and size.
     pub guide_pose: [Spring; 4],
     /// How much the focus dots may show in this frame.
@@ -842,6 +869,7 @@ impl App {
             swiped: None,
             shutdown_at: None,
             guide: None,
+            brief: None,
             guide_pose: [Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(0.0, 120.0, 16.0), Spring::new(1.0, 120.0, 16.0)],
             live_alpha: 0.0,
             reaction: None,
@@ -1304,7 +1332,7 @@ impl App {
         let t = start.elapsed().as_secs_f32();
         // The tour plays every effect in turn until it is stopped.
         let (what, t) = if what == "tour" {
-            match t % 114.0 {
+            match t % 122.0 {
                 c if c < 17.5 => ("eyes".to_string(), c),
                 c if c < 23.0 => ("battery".to_string(), c - 17.5),
                 c if c < 28.5 => ("bell".to_string(), c - 23.0),
@@ -1314,13 +1342,20 @@ impl App {
                 c if c < 86.0 => ("guide:stretch".to_string(), c - 71.0),
                 c if c < 96.0 => ("guide:eyes".to_string(), c - 86.0),
                 c if c < 108.0 => ("guide:breathe".to_string(), c - 96.0),
-                c => ("night".to_string(), c - 108.0),
+                c if c < 114.0 => ("night".to_string(), c - 108.0),
+                c => ("brief".to_string(), c - 114.0),
             }
         } else {
             (what, t)
         };
         let (eyes_at, card) = match what.as_str() {
             "eyes" => (Some(t % 17.5), None),
+            "brief" => {
+                if self.brief.is_none() && t < 0.3 {
+                    self.open_brief(true, Vec::new());
+                }
+                return;
+            }
             "night" => {
                 if self.shutdown_at.is_none() && t < 0.3 {
                     self.shutdown_at = Some(Instant::now() + Duration::from_secs(5));
@@ -1462,6 +1497,7 @@ impl App {
         if self.mode == Mode::Expanded && m != Mode::Expanded {
             self.view = ui::View::Page;
             self.view_mix.x = 0.0;
+            self.brief = None;
         }
         if m == Mode::Expanded {
             self.sync_wheels();
@@ -1514,6 +1550,48 @@ impl App {
         };
         self.eyes.step(eyes::Feel { show: true, look, ..eyes::Feel::ASLEEP }, dt);
         self.kick();
+    }
+
+    /// Opens the briefing, when there is anything to say and nothing else is going on.
+    fn open_brief(&mut self, hello: bool, missed: Vec<(String, String)>) {
+        let date = self.all_dates().into_iter().filter(|d| (0..=DATE_HORIZON).contains(&d.2)).min_by_key(|d| d.2).map(|d| (d.1, d.2));
+        let sleep = &self.brain.cfg.reminders.sleep;
+        let bedtime = sleep.enabled.then(|| sleep.time.clone());
+        self.brief = Some(Brief { hello, missed, coming: self.upcoming(), date, bedtime, opened: Instant::now() });
+        self.glow = ui::EVENING;
+        self.set_mode(Mode::Expanded);
+        self.go_view(ui::View::Brief);
+        self.glow = ui::EVENING;
+    }
+
+    /// Checked with Luma's ticks: the first look of the day, or reminders that went by unseen.
+    fn watch_brief(&mut self) {
+        if self.brief.is_some() {
+            let over = self.brief.as_ref().is_some_and(|b| b.opened.elapsed() > BRIEF_TIME);
+            if over && !self.mouse_in {
+                self.set_mode(Mode::Compact);
+            }
+            return;
+        }
+        let quiet = self.demo.is_none() && self.mode == Mode::Compact && self.toast.is_none() && !self.hidden && !self.yielded && self.guide.is_none() && self.shutdown_at.is_none();
+        let idle = idle_seconds() as u64;
+        if !quiet || idle > 60 || self.brain_ticks < BRIEF_DELAY_TICKS {
+            return;
+        }
+        let missed = self.brain.take_missed(chrono::Local::now());
+        let hello = self.brain.greet_due(idle);
+        if hello || !missed.is_empty() {
+            self.open_brief(hello, missed);
+        }
+    }
+
+    /// Storm only: the briefing opens or closes at a random moment.
+    pub fn storm_brief(&mut self) {
+        if self.brief.is_some() {
+            self.set_mode(Mode::Compact);
+        } else if self.guide.is_none() {
+            self.open_brief(true, vec![("Storm".into(), "10:00".into())]);
+        }
     }
 
     /// Starts an activity. `secs` overrides each step's length, for the preview.
@@ -1602,6 +1680,8 @@ impl App {
         self.sample_step(dt);
         if self.guide.is_some() {
             self.step_guide(dt);
+        } else if self.view == ui::View::Brief {
+            self.eyes.step(eyes::Feel { show: true, look: eyes::Look::Happy, ..eyes::Feel::ASLEEP }, dt);
         } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
@@ -1712,7 +1792,8 @@ impl App {
             moving |= self.month_mix.step(0.0, sub);
             moving |= self.gone_mix.step(0.0, sub);
             moving |= self.swipe_mix.step(if self.swiped.is_some() { 1.0 } else { 0.0 }, sub);
-            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form | ui::View::Guide);
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form | ui::View::Guide)
+                || self.brief.as_ref().is_some_and(|b| b.date.as_ref().is_some_and(|d| d.1 == 0));
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
             if let Some((from, level)) = self.wash_from {
@@ -2976,7 +3057,7 @@ impl App {
         }
         let deeper = |v: V| match v {
             V::Page => 0,
-            V::Care(_) | V::Form | V::History | V::OldNotes | V::Calendar | V::Guide => 1,
+            V::Care(_) | V::Form | V::History | V::OldNotes | V::Calendar | V::Guide | V::Brief => 1,
             V::Goal | V::Bed => 2,
         };
         self.view_dir = if deeper(v) >= deeper(self.view) { 1.0 } else { -1.0 };
@@ -3207,6 +3288,7 @@ impl App {
                 }
             }
             Act::RowDelete => self.confirm_delete(),
+            Act::BriefClose => self.set_mode(Mode::Compact),
             Act::GuideStart => {
                 let tile = ui::Tile::of(self.brain.showing.as_ref().map(|s| &s.due));
                 if let Some(tile) = tile {
@@ -3325,6 +3407,7 @@ impl App {
             self.reaction = None;
         }
         self.watch_shutdown();
+        self.watch_brief();
         if self.swiped.is_some() && Instant::now() >= self.swipe_until {
             self.swiped = None;
             self.kick();
@@ -4259,6 +4342,13 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.focus_mix.x = 1.0;
     }
     a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
+    if let Some(v) = kv.get("brief") {
+        let now = chrono::Local::now();
+        let day = |d: i64| (now + chrono::TimeDelta::days(d)).format("%Y-%m-%d").to_string();
+        a.brain.add_date("Mom's birthday", &day(if *v == "today" { 0 } else { 12 }), now);
+        let missed = if *v == "away" { vec![("Drink water".to_string(), "13:00".to_string()), ("Stretch break".to_string(), "14:30".to_string())] } else { Vec::new() };
+        a.open_brief(*v != "away", missed);
+    }
     if let Some(what) = kv.get("guide") {
         let tile = match *what {
             "eyes" => ui::Tile::Eyes,

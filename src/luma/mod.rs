@@ -338,6 +338,28 @@ impl Brain {
         self.sched.next_in(&self.cfg, now).into_iter().find(|(k, _)| *k == kind).map(|(_, s)| s)
     }
 
+    /// The first look at the user each day: true once, then marked.
+    pub fn greet_due(&mut self, idle: u64) -> bool {
+        if !self.cfg.greeting || self.stats.greeted || idle > 60 || self.showing.is_some() {
+            return false;
+        }
+        self.stats.greeted = true;
+        self.save_stats();
+        true
+    }
+
+    /// The user's reminders whose catch-up time has run out unseen, as (title, time). They count
+    /// as shown today, so they never pop up late on their own.
+    pub fn take_missed(&mut self, now: DateTime<Local>) -> Vec<(String, String)> {
+        let ids = self.sched.missed_custom(&self.cfg, now, &self.stats.fired);
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        self.stats.fired.extend(ids.iter().cloned());
+        self.save_stats();
+        ids.iter().filter_map(|id| self.cfg.custom.iter().find(|c| &c.id == id)).map(|c| (c.title.clone(), c.time.clone())).collect()
+    }
+
     pub fn add_date(&mut self, title: &str, date: &str, now: DateTime<Local>) {
         if self.cfg.dates.len() < config::MAX_DATES {
             self.cfg.dates.push(config::ImportantDate { id: format!("d{}", now.timestamp_millis()), title: title.to_string(), date: date.to_string() });

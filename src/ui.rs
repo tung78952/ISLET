@@ -100,6 +100,8 @@ pub enum View {
     Bed,
     Calendar,
     Guide,
+    /// The morning hello, or what went by while away.
+    Brief,
 }
 
 /// The small tiles on Care, each with its own colour when opened.
@@ -240,6 +242,7 @@ pub enum Act {
     SaveWheels,
     RowTrash(u8, usize),
     RowDelete,
+    BriefClose,
     GuideStart,
     GuidePause,
     GuideBack,
@@ -1864,7 +1867,7 @@ fn header(a: &mut App, lx: f32) {
         icon::charging(&a.gfx, x - 13.0, 19.0, 7.6, a.charge_level(), 1.0);
     }
     right_indicator(a, lx + SLOT_LIVE.0, 19.0);
-    if !a.history.is_empty() {
+    if !a.history.is_empty() && a.view != View::Brief {
         let bell = Rc::new(lx + SLOT_BELL.0, 7.0, SLOT_BELL.1 - SLOT_BELL.0, 24.0);
         let h = btn(a, bell, 0.15);
         a.gfx.fill_circle(bell.cx(), bell.cy(), 12.0, 12.0, 0xFFFFFF, 0.1 + 0.12 * h);
@@ -2082,6 +2085,7 @@ fn body(a: &mut App, lx: f32, view: View) {
         View::Bed => bed(a, lx),
         View::Calendar => calendar(a, lx),
         View::Guide => guide_page(a, lx),
+        View::Brief => brief(a, lx),
     }
 }
 
@@ -2556,6 +2560,99 @@ fn focus_running(a: &mut App, lx: f32, live: bool) {
         }
     });
     labelled(a, lx + 382.0, 72.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
+}
+
+// ---------------------------------------------------------------- briefing
+
+/// Up to three lines for the right of the briefing: what was missed, then what is coming, with
+/// the important day and bedtime kept in if there is room.
+fn brief_lines(b: &crate::Brief) -> Vec<(BriefRow, String, String)> {
+    let mut v: Vec<(BriefRow, String, String)> = b.missed.iter().map(|(t, at)| (BriefRow::Missed, t.clone(), at.clone())).collect();
+    if b.hello {
+        v.extend(b.coming.iter().map(|(t, at)| (BriefRow::Coming, t.clone(), at.clone())));
+        let keep = 3 - b.date.is_some() as usize - b.bedtime.is_some() as usize;
+        v.truncate(keep);
+        if let Some((title, left)) = &b.date {
+            v.push((BriefRow::Date, format!("{title} {}", days_left(*left)), String::new()));
+        }
+        if let Some(at) = &b.bedtime {
+            v.push((BriefRow::Bed, "Bedtime".to_string(), at.clone()));
+        }
+    }
+    v.truncate(3);
+    v
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BriefRow {
+    Missed,
+    Coming,
+    Date,
+    Bed,
+}
+
+fn brief(a: &mut App, lx: f32) {
+    let Some(b) = a.brief.as_ref() else { return };
+    let lines = brief_lines(b);
+    let (hello, today) = (b.hello, b.date.clone().filter(|d| d.1 == 0));
+    title(a, lx, "Today");
+    head_button(a, Rc::new(lx + SLOT_BELL.0, 7.0, 24.0, 24.0), Act::BriefClose, |g, x, y| icon::cross(g, x, y, 4.5, WHITE, 1.0));
+    let eyes_y = if hello && today.is_none() { 74.0 } else { 84.0 };
+    act_eyes(a, lx + 92.0, eyes_y, 0.19, 0.0);
+    divider(a, lx + 186.0, 50.0, 122.0);
+    if let Some((name, _)) = today {
+        // The day itself: nothing else on the right.
+        pic(a, "ic_star", lx + 212.0, 74.0, 17.0, RED, 1.0);
+        a.gfx.text(&format!("{name} is today"), Rc::new(lx + 230.0, 58.0, 150.0, 56.0), 17.0, 500, WHITE, 1.0, Align::LW, Font::Ui);
+        return;
+    }
+    if hello {
+        use chrono::Timelike;
+        let hello_at = match chrono::Local::now().hour() {
+            4..=10 => "Good morning",
+            11..=17 => "Good afternoon",
+            _ => "Good evening",
+        };
+        a.gfx.ui(hello_at, Rc::new(lx + 24.0, 100.0, 136.0, 24.0), 16.0, 500, WHITE, 1.0, Align::C);
+    } else {
+        a.gfx.ui("While you were away", Rc::new(lx + 202.0, 50.0, 190.0, 22.0), BODY, 500, WHITE, 1.0, Align::L);
+    }
+    let (y0, gap) = if hello { (60.0, 30.0) } else { (92.0, 26.0) };
+    for (i, (row, text, time)) in lines.into_iter().enumerate() {
+        let y = y0 + i as f32 * gap;
+        let dim = if row == BriefRow::Missed { 0.55 } else { 1.0 };
+        match row {
+            BriefRow::Missed => icon::bell(&a.gfx, lx + 210.0, y, WHITE, dim),
+            BriefRow::Coming => pic(a, "t_today", lx + 210.0, y, 14.0, WHITE, 1.0),
+            BriefRow::Date => pic(a, "ic_star", lx + 210.0, y, 13.0, RED, 1.0),
+            BriefRow::Bed => pic(a, "ic_sleep", lx + 210.0, y, 14.0, 0xFFD9A0, 1.0),
+        }
+        let w = if time.is_empty() { 172.0 } else { 124.0 };
+        a.gfx.ui(&text, Rc::new(lx + 226.0, y - 11.0, w, 22.0), 13.0, 400, WHITE, dim, Align::L);
+        a.gfx.ui(&time, Rc::new(lx + 340.0, y - 11.0, 56.0, 22.0), 12.0, 400, 0xC8C8CC, dim, Align::R);
+    }
+}
+
+#[cfg(test)]
+mod brief_tests {
+    use super::*;
+
+    fn b(hello: bool, missed: usize, coming: usize, date: bool, bed: bool) -> crate::Brief {
+        let items = |n| (0..n).map(|i| (format!("t{i}"), "10:00".to_string())).collect();
+        crate::Brief::sample(hello, items(missed), items(coming), date.then(|| ("Day".to_string(), 3)), bed.then(|| "23:00".to_string()))
+    }
+
+    #[test]
+    fn the_morning_keeps_the_day_and_bedtime_in_view() {
+        let rows: Vec<_> = brief_lines(&b(true, 0, 5, true, true)).into_iter().map(|r| r.0).collect();
+        assert_eq!(rows, [BriefRow::Coming, BriefRow::Date, BriefRow::Bed]);
+    }
+
+    #[test]
+    fn away_lists_only_what_was_missed() {
+        let rows: Vec<_> = brief_lines(&b(false, 2, 5, true, true)).into_iter().map(|r| r.0).collect();
+        assert_eq!(rows, [BriefRow::Missed, BriefRow::Missed]);
+    }
 }
 
 // ---------------------------------------------------------------- guide
