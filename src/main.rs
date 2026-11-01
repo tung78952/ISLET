@@ -474,6 +474,11 @@ pub struct App {
     pub panel_top: usize,
     pub chev_mix: Spring,
     chev_near: bool,
+    /// Which side of the goal screen is being set: 0 the cup, 1 the goal.
+    pub pick_mix: Spring,
+    pick_goal: bool,
+    /// The reminder whose trash was pressed once.
+    pub trash_armed: Option<String>,
     pub switches: std::collections::HashMap<(i32, i32), (Spring, bool)>,
     /// Glides between the steps of the reminder form.
     pub form_anim: Spring,
@@ -708,6 +713,9 @@ impl App {
             panel_top: 0,
             chev_mix: Spring::new(0.0, 170.0, 24.0),
             chev_near: false,
+            pick_mix: Spring::new(0.0, 170.0, 24.0),
+            pick_goal: false,
+            trash_armed: None,
             switches: std::collections::HashMap::new(),
             form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
@@ -1196,7 +1204,7 @@ impl App {
         if shown != card {
             match card {
                 Some(i) => {
-                    let (title, sub) = [("Uống nước nhé", "Đã 45 phút rồi"), ("Chúc ngủ ngon", "Đến giờ nghỉ rồi"), ("Hít thở", "Chậm và sâu"), ("Giãn cơ thôi", "Đứng dậy nào"), ("Nghỉ mắt", "Nhìn ra xa 20 giây"), ("Sắp tới giờ họp", "Còn 5 phút nữa"), ("Mắt nhún cạnh lời bài hát", "Thanh lời dài ra 1–2 phút một lần"), ("Bài mới", "Tên ca sĩ")][i as usize % 8];
+                    let (title, sub) = [("Time for water", "It has been 45 minutes"), ("Good night", "Time to rest"), ("Breathe", "Slow and deep"), ("Stretch", "Get up for a moment"), ("Rest your eyes", "Look far away for 20 seconds"), ("Meeting soon", "5 minutes left"), ("Eyes bounce by the lyrics", "The lyric bar grows every 1–2 minutes"), ("New song", "Artist name")][i as usize % 8];
                     self.toast(ToastKind::Sample(i), title, sub, None);
                     if let Some(t) = self.toast.as_mut() {
                         t.until = Instant::now() + Duration::from_secs(3600);
@@ -1355,6 +1363,7 @@ impl App {
                 moving |= spring.step(if *on { 1.0 } else { 0.0 }, sub);
             }
             moving |= self.chev_mix.step(if self.chev_near { 1.0 } else { 0.0 }, sub);
+            moving |= self.pick_mix.step(if self.pick_goal { 1.0 } else { 0.0 }, sub);
             moving |= self.water_pulse.step(0.0, sub);
             moving |= self.dot_pos.step(self.dot_target, sub);
             for (sp, target) in self.hover.values_mut() {
@@ -2377,6 +2386,7 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
+        let armed = self.trash_armed.take();
         match a {
             Act::PagePrev => self.go_page(self.page.prev()),
             Act::PageNext => self.go_page(self.page.next()),
@@ -2538,6 +2548,18 @@ impl App {
                     self.brain.set_reminder_on(&r.id, !r.enabled, chrono::Local::now());
                 }
             }
+            Act::ReminderDelete(i) => {
+                if let Some(r) = self.reminders().into_iter().nth(i) {
+                    if armed.as_deref() == Some(r.id.as_str()) {
+                        self.brain.delete_task(&r.id);
+                        let rows = self.reminders().len() + (!self.todo.tasks.is_empty()) as usize;
+                        self.reminder_top = self.reminder_top.min(rows.saturating_sub(2));
+                    } else {
+                        self.trash_armed = Some(r.id);
+                    }
+                }
+            }
+            Act::WaterReset => self.brain.reset_water(),
             Act::OldNotes(on) => {
                 self.old_notes = on;
                 self.reminder_top = 0;
@@ -2741,6 +2763,11 @@ impl App {
         let near = self.expanded() && (x - (cx - w / 2.0) < 46.0 || (cx + w / 2.0) - x < 46.0);
         if near != self.chev_near {
             self.chev_near = near;
+            self.kick();
+        }
+        let goal = x > cx;
+        if self.panel == Some(ui::Panel::Water) && goal != self.pick_goal {
+            self.pick_goal = goal;
             self.kick();
         }
         if let Some(id) = self.wheel_held {
@@ -3434,7 +3461,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     if let Some(step) = kv.get("remform").and_then(|v| v.parse::<u8>().ok()) {
         a.open_form(None);
         if let Some(f) = a.form.as_mut() {
-            f.title = "Uống thuốc".into();
+            f.title = "Take medicine".into();
             f.step = step;
         }
         a.form_anim.x = step as f32;
@@ -3445,6 +3472,9 @@ fn demo_setup(a: &mut App, spec: &str) {
             let (title, time) = t.split_once('@').unwrap_or((t, ""));
             a.add_todo(title, time);
         }
+    }
+    if let Some(cups) = kv.get("cups").and_then(|v| v.parse().ok()) {
+        a.brain.stats.water = cups;
     }
     if let Some(ml) = kv.get("water") {
         a.toast = Some(Toast {
@@ -3472,7 +3502,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         ("wifi_on", ToastKind::Net(true), "Phong 2_5G", "Connected"),
         ("wifi_off", ToastKind::Net(false), "Phong 2_5G", "Disconnected"),
         ("bright", ToastKind::Brightness, "Brightness", "70%"),
-        ("task", ToastKind::Task, "Task Time!", "Học từ vựng"),
+        ("task", ToastKind::Task, "Task Time!", "Study vocabulary"),
         ("goal", ToastKind::Goal, "Goal reached", "2.0 L today"),
         ("song", ToastKind::Song, "You're Sorry", "Some Artist"),
     ] {
@@ -3504,7 +3534,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.keep_notice(NoticeInfo::of(&n));
     };
     if kv.get("history") == Some(&"1") {
-        for (app, title, body) in [("Shopee", "Đơn hàng", "Đơn hàng của bạn đang được giao"), ("YouTube", "Sơn Tùng M-TP", "vừa đăng video mới"), ("Messenger", "Denis", "Tối nay đi ăn không?"), ("Zalo", "Minh Anh", "Mai họp lúc mấy giờ?")] {
+        for (app, title, body) in [("Shopee", "Order", "Your order is on its way"), ("YouTube", "A channel", "uploaded a new video"), ("Messenger", "Denis", "Dinner tonight?"), ("Zalo", "Minh Anh", "What time is the meeting tomorrow?")] {
             demo_notice(a, app, title, body);
         }
     }
