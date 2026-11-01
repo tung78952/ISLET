@@ -679,7 +679,7 @@ pub fn draw(a: &mut App) {
         }
         // While the notch steps aside only its sliver remains: nothing may be drawn over the app
         // below (reminders that need an answer keep their size and stay).
-        let urgent = a.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Focus | ToastKind::Break));
+        let urgent = a.interactive_toast();
         if pm > 0.01 && a.lyric_line().is_some() && !a.yielded {
             // The eyes take over from the lyrics for a moment, in a notch that keeps its size.
             let show = a.eyes.show.x.clamp(0.0, 1.0);
@@ -796,6 +796,106 @@ fn sunset(a: &mut App, cx: f32, cy: f32, r: f32, left: f32) {
         let y = horizon + band * 0.5 + k * gap;
         a.gfx.fill_rrect(Rc::new(cx + drift - half, y, 2.0 * half, band), band / 2.0, RED, (0.95 - 0.28 * k) * (0.55 + 0.45 * left));
     }
+}
+
+/// The sun on the Focus page is cut into this many slices.
+const SLICES: usize = 8;
+/// Seconds a slice takes to reach the water, and its rings to fade there.
+const SLICE_FALL: f32 = 1.2;
+const RING_LIFE: f32 = 3.5;
+
+/// How far the sun has come apart: slices gone, how loose the next one is (0 to 1), and how many
+/// seconds ago the last one let go.
+fn slices_gone(left: f32, total_s: f32) -> (usize, f32, f32) {
+    let used = (1.0 - left).clamp(0.0, 1.0) * SLICES as f32;
+    let part = used.fract();
+    (used as usize, part, part * total_s / SLICES as f32)
+}
+
+/// Rings spreading on the water, `age` seconds after something touched it.
+fn water_rings(a: &App, cx: f32, y: f32, age: f32, reach: f32, strength: f32) {
+    for ring in 0..3 {
+        let k = (age - 0.4 * ring as f32) / RING_LIFE;
+        if !(0.0..1.0).contains(&k) {
+            continue;
+        }
+        let k = 1.0 - (1.0 - k) * (1.0 - k);
+        let (rx, ry) = (6.0 + reach * k, (6.0 + reach * k) * 0.2);
+        let oval: Vec<(f32, f32)> = (0..=44)
+            .map(|n| {
+                let t = n as f32 / 44.0 * std::f32::consts::TAU;
+                (cx + rx * t.cos(), y + ry * t.sin())
+            })
+            .collect();
+        a.gfx.polyline(&oval, 1.3, RED, strength * (1.0 - k) * (1.0 - k));
+    }
+}
+
+/// The focus timer: a sun cut into slices that loosen and fall into the sea one by one, each
+/// leaving rings on the water. `left` is how much of the time remains.
+fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
+    const R: f32 = 30.0;
+    const CY: f32 = 71.0;
+    const HORIZON: f32 = 105.0;
+    const GAP: f32 = 2.2;
+    let t = a.born.elapsed().as_secs_f32();
+    let (gone, part, since) = slices_gone(left, total_s);
+    let band = 2.0 * R / SLICES as f32;
+    let warm = |k: f32| {
+        let mix = |top: u32, low: u32| low + ((top as f32 - low as f32) * k) as u32;
+        let (r, g, b) = (0xFF, mix(0x78, 0x2C), mix(0x48, 0x28));
+        r << 16 | g << 8 | b
+    };
+    let slice = |g: &Gfx, k: usize, drop: f32, thin: f32, alpha: f32| {
+        let y1 = CY + R - k as f32 * band - GAP / 2.0;
+        let high = (band - GAP) * thin;
+        let side = |n: i32| {
+            let y = y1 - high * n as f32 / 6.0;
+            ((R * R - (y - CY) * (y - CY)).max(0.0).sqrt(), y + drop)
+        };
+        let mut shape: Vec<(f32, f32)> = (0..=6).map(side).map(|(half, y)| (cx + half, y)).collect();
+        shape.extend((0..=6).rev().map(side).map(|(half, y)| (cx - half, y)));
+        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), alpha);
+    };
+    a.gfx.glow_ellipse(cx, CY, R * 1.5, R * 1.4, RED, 0.2 * (1.0 - gone as f32 / SLICES as f32) + 0.04);
+    for k in gone..SLICES {
+        // The one about to go comes loose slowly, and the one above follows a little.
+        let (drop, thin) = match k - gone {
+            0 => (7.0 * part, 1.0 - 0.45 * part),
+            1 => (2.0 * part, 1.0),
+            _ => (0.0, 1.0),
+        };
+        slice(&a.gfx, k, drop, thin, 1.0);
+    }
+    if gone > 0 && since < SLICE_FALL {
+        let k = gone - 1;
+        let start = 7.0;
+        let reach = HORIZON + 3.0 - (CY + R - k as f32 * band) - start;
+        let q = since / SLICE_FALL;
+        a.gfx.push_clip(Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0));
+        slice(&a.gfx, k, start + reach * q * q, 0.55, 1.0);
+        a.gfx.pop_clip();
+    }
+    // The water: light under the sun that goes with it, a line, and rings where slices landed.
+    let sun_left = 1.0 - gone as f32 / SLICES as f32;
+    for i in 0..4 {
+        let k = i as f32;
+        let half = (R * 0.8 - 5.0 * k) * sun_left + 1.0 * (t * 1.2 + k).sin();
+        if half > 2.0 {
+            a.gfx.fill_rrect(Rc::new(cx - half, HORIZON + 4.0 + k * 4.2, 2.0 * half, 1.6), 0.8, RED, (0.5 - 0.09 * k) * sun_left);
+        }
+    }
+    a.gfx.fill_rrect_hgrad(Rc::new(cx - 62.0, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.0), (RED, 0.95));
+    a.gfx.fill_rrect_hgrad(Rc::new(cx, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.95), (RED, 0.0));
+    a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
+    if gone > 0 && since >= SLICE_FALL {
+        water_rings(a, cx, HORIZON + 9.0, since - SLICE_FALL, 50.0, 0.95);
+    }
+    if running {
+        // Now and then the sea moves by itself.
+        water_rings(a, cx, HORIZON + 9.0, (t % 7.0) - 0.8, 30.0, 0.32);
+    }
+    a.gfx.pop_clip();
 }
 
 /// The small sun that stays in the notch while focus runs, moving with it as it opens.
@@ -2521,7 +2621,7 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
 fn focus_running(a: &mut App, lx: f32, live: bool) {
     let (left_s, total_s, running, phase) = a.pomo_view();
     let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
-    sunset(a, lx + 104.0, 70.0, 36.0, left);
+    sun_slices(a, lx + 104.0, left, total_s as f32, running);
     pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
     a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
     a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
@@ -2582,7 +2682,7 @@ fn brief(a: &mut App, lx: f32) {
     if hello {
         use chrono::Timelike;
         let hello_at = match chrono::Local::now().hour() {
-            4..=10 => "Good morning",
+            0..=10 => "Good morning",
             11..=17 => "Good afternoon",
             _ => "Good evening",
         };
@@ -3560,3 +3660,18 @@ fn form(a: &mut App, lx: f32) {
     form_button(a, lx + 376.0, CY, if step == 2 || date.is_some() { FormButton::Done } else { FormButton::Next }, Act::FormNext);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{slices_gone, SLICES};
+
+    #[test]
+    fn slices_leave_one_by_one_as_time_runs_out() {
+        assert_eq!(slices_gone(1.0, 800.0).0, 0);
+        assert_eq!(slices_gone(0.0, 800.0).0, SLICES);
+        let (gone, part, since) = slices_gone(0.7, 800.0);
+        assert_eq!(gone, 2);
+        assert!((part - 0.4).abs() < 0.01);
+        assert!((since - 40.0).abs() < 1.0, "seconds since the last one let go");
+    }
+}

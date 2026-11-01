@@ -3,7 +3,6 @@
 
 mod anim;
 mod bt;
-mod captions;
 mod devices;
 mod drop;
 mod eyes;
@@ -749,7 +748,6 @@ pub struct App {
     /// First row shown in the history list.
     pub history_top: usize,
     pub lyrics: Arc<Mutex<Lyrics>>,
-    captions: captions::Captions,
     pub power: Option<sys::Power>,
     layout: isize,
     /// Something fills the screen: the notch is down to a sliver.
@@ -965,7 +963,6 @@ impl App {
             history_unread: 0,
             history_top: 0,
             lyrics,
-            captions: captions::Captions::default(),
             power: sys::power(),
             layout: sys::current_layout().0,
             hidden: false,
@@ -994,7 +991,6 @@ impl App {
             sys::watch_volume(self.hwnd);
             sys::hook_foreground(self.hwnd);
             bt::spawn(self.hwnd);
-            self.captions.spawn();
             self.devices = Some(devices::Tracker::start(self.hwnd));
             sys::watch_audio_devices(self.hwnd);
             notify::spawn(self.hwnd);
@@ -1098,16 +1094,13 @@ impl App {
         if l.status == media::LyrStatus::Loading {
             return Some("Loading lyrics...".into());
         }
-        if self.settings.captions && (l.status == media::LyrStatus::Missing || l.held) {
-            return self.captions.line().or_else(|| Some("Listening...".into()));
-        }
         l.line_at(pos).map(str::to_string)
     }
 
     /// Target notch size for the current state.
     pub fn target(&self) -> [f32; 2] {
         // Stepping aside: only reminders that need an answer keep their size.
-        let urgent = self.toast.as_ref().is_some_and(|t| t.kind.answered());
+        let urgent = self.interactive_toast();
         // A film or a game fills the screen: only a thin sliver stays.
         if self.hidden && self.mode == Mode::Compact {
             return MINIMAL;
@@ -2662,7 +2655,10 @@ impl App {
         self.later_row = if outcome == Outcome::Snooze && !timed_out { self.later_row + 1 } else { 0 };
         if timed_out || self.later_row >= 3 {
             self.later_row = 0;
-            self.feel(eyes::Look::Sad);
+            // A card with eyes shows it itself, below.
+            if self.act_now().is_none() {
+                self.feel(eyes::Look::Sad);
+            }
             self.sad_at = Some(Instant::now());
         }
         let bedtime = outcome == Outcome::Done && matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Builtin(CareKind::Sleep)));
@@ -2675,7 +2671,7 @@ impl App {
             self.start_shutdown();
             return;
         }
-        if self.act_now().is_some() && !timed_out {
+        if self.act_now().is_some() {
             // The card stays a moment for the eyes to react, then leaves by itself.
             let done = outcome == Outcome::Done;
             self.reaction = Some((Instant::now(), done));
@@ -3421,11 +3417,6 @@ impl App {
             self.reaction = None;
         }
         self.watch_shutdown();
-        let silent = {
-            let l = self.lyrics.lock().unwrap();
-            l.status == media::LyrStatus::Missing || l.held
-        };
-        self.captions.want(self.settings.captions && self.demo.is_none() && self.playing() && silent);
         self.watch_brief();
         if self.swiped.is_some() && Instant::now() >= self.swipe_until {
             self.swiped = None;
@@ -3892,7 +3883,6 @@ impl App {
         let _ = AppendMenuW(m, check(s.minimal), 24, w!("Minimal notch"));
         let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
         let _ = AppendMenuW(m, check(self.brain.cfg.reminders.sleep.shutdown), 26, w!("Shut down at bedtime"));
-        let _ = AppendMenuW(m, check(self.settings.captions), 27, w!("Live captions"));
         let submenu = |title: &HSTRING, items: &[(HSTRING, usize, bool)]| {
             let Ok(sub) = CreatePopupMenu() else { return };
             for (text, id, on) in items {
@@ -3928,10 +3918,6 @@ impl App {
             23 => self.change_setting(ui::SetKey::Eyes),
             24 => self.change_setting(ui::SetKey::Minimal),
             25 => self.change_setting(ui::SetKey::Autostart),
-            27 => {
-                self.settings.captions ^= true;
-                self.settings.save();
-            }
             26 => self.brain.configure(|c| c.reminders.sleep.shutdown ^= true, chrono::Local::now()),
             n @ 30..=32 => {
                 self.settings.jam_mode = (n - 30) as u8;
@@ -3951,8 +3937,7 @@ impl App {
             4 => {
                 MessageBoxW(
                     Some(self.hwnd),
-                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics from LRCLIB (lrclib.net), NetEase and AMLL TTML DB.
-Live captions by Windows."),
+                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics from LRCLIB (lrclib.net), NetEase and AMLL TTML DB."),
                     w!("About Islet"),
                     MB_OK | MB_ICONINFORMATION,
                 );
@@ -4268,7 +4253,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ENDSESSION if wp.0 != 0 => a.brain.save_schedule(chrono::Local::now()),
         WM_DESTROY => {
             a.brain.save_schedule(chrono::Local::now());
-            a.captions.stop();
             a.tray(NIM_DELETE);
             let _ = RevokeDragDrop(hwnd);
             PostQuitMessage(0);
