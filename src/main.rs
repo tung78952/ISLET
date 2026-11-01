@@ -1494,9 +1494,6 @@ impl App {
             self.view = ui::View::Page;
             self.view_mix.x = 0.0;
             self.brief = None;
-            self.mode = m;
-            // Closed over a full-screen app: back to the sliver.
-            self.watch();
         }
         if m == Mode::Expanded {
             self.sync_wheels();
@@ -1516,6 +1513,10 @@ impl App {
             }
         }
         self.mode = m;
+        // Closed over a full-screen app: back to the sliver.
+        if m != Mode::Expanded {
+            self.watch();
+        }
         self.kick();
     }
 
