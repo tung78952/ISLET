@@ -39,8 +39,8 @@ pub struct Storm {
 
 /// One event of each feature for the pair table (see `storm_event`): volume, brightness, Caps
 /// Lock, charger, Bluetooth, notice, message, pointer, widgets, stepping aside, reminder, focus,
-/// a sideways swipe.
-const PAIRED: [u64; 13] = [0, 1, 2, 4, 5, 7, 10, 12, 16, 17, 19, 21, 24];
+/// a sideways swipe, an activity.
+const PAIRED: [u64; 14] = [0, 1, 2, 4, 5, 7, 10, 12, 16, 17, 19, 21, 24, 25];
 const PAIR_GAP_MS: u64 = 250;
 const PAIR_WATCH_MS: u64 = 1600;
 const PAIR_REST_MS: u64 = 700;
@@ -191,7 +191,7 @@ impl App {
         let (cx, w) = self.notch_geometry();
         let ev = match s.forced.take() {
             Some(e) => e,
-            None => s.pick(25),
+            None => s.pick(26),
         };
         match ev {
             0 => {
@@ -360,6 +360,10 @@ impl App {
                 self.gfx.invalidate();
                 self.render();
                 "hide and show"
+            }
+            25 => {
+                self.storm_guide();
+                "guide"
             }
             24 => {
                 self.set_mode(Mode::Expanded);

@@ -7,6 +7,7 @@ mod devices;
 mod drop;
 mod eyes;
 mod gfx;
+mod guide;
 mod luma;
 mod media;
 mod model;
@@ -78,6 +79,12 @@ const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
 const SWIPE_TIME: Duration = Duration::from_secs(4);
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(60);
+
+/// The real command only ever runs in the real app, never in a demo, a test or a preview.
+fn allow_shutdown(demo: bool, storm: bool, sample: bool) -> bool {
+    !demo && !storm && !sample
+}
 /// No more movement for this long means the fingers have lifted.
 const SWIPE_REST_MS: u128 = 120;
 /// Sideways wheel units that move one page.
@@ -178,12 +185,14 @@ pub enum ToastKind {
     Song,
     /// Preview of an animated icon.
     Sample(u8),
+    /// Counting down to switching the PC off at bedtime.
+    Shutdown,
 }
 
 impl ToastKind {
     /// Stays until it is answered.
     pub fn waits(self) -> bool {
-        matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::Call | ToastKind::LumaApp)
+        matches!(self, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus | ToastKind::Call | ToastKind::LumaApp | ToastKind::Shutdown)
     }
 
     /// Comes back if something passing covers it.
@@ -196,6 +205,7 @@ impl ToastKind {
             self,
             ToastKind::Bluetooth(_)
                 | ToastKind::Sample(_)
+                | ToastKind::Shutdown
                 | ToastKind::Song
                 | ToastKind::Device(_)
                 | ToastKind::Notice
@@ -228,6 +238,27 @@ pub struct Toast {
 
 /// Where a to-do lives: a Luma reminder (has a time) or an untimed to-do of Islet's.
 /// One row of the To-do page.
+/// An activity under way. `ended` is when it finished or was left, and how: the eyes react to
+/// that for a moment before the notch closes.
+pub struct Guide {
+    pub tile: ui::Tile,
+    pub steps: Vec<guide::Step>,
+    started: Instant,
+    paused: Option<Instant>,
+    pub ended: Option<(Instant, bool)>,
+}
+
+impl Guide {
+    /// Seconds in, not counting pauses.
+    pub fn time(&self) -> f32 {
+        self.paused.unwrap_or_else(Instant::now).duration_since(self.started).as_secs_f32()
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.is_some()
+    }
+}
+
 pub struct Form {
     /// The reminder being edited; None for a new one.
     pub id: Option<String>,
@@ -533,6 +564,12 @@ pub struct App {
     /// The row whose Delete button is showing, the last one to, how far it has slid (0..1), and
     /// when it slides back by itself.
     pub swiped: Option<String>,
+    /// When the PC goes off at bedtime, while that is counting down.
+    pub shutdown_at: Option<Instant>,
+    /// The activity the eyes are leading, if any.
+    pub guide: Option<Guide>,
+    /// How much the focus dots may show in this frame.
+    pub live_alpha: f32,
     /// The answer a card just got (true for done) and when: the eyes react before it leaves.
     pub reaction: Option<(Instant, bool)>,
     reaction_hops: u8,
@@ -799,6 +836,9 @@ impl App {
             pick_mix: Spring::new(0.0, 170.0, 24.0),
             pick_goal: false,
             swiped: None,
+            shutdown_at: None,
+            guide: None,
+            live_alpha: 0.0,
             reaction: None,
             reaction_hops: 0,
             sample_mood: None,
@@ -1059,7 +1099,7 @@ impl App {
                 } else if let Some(t) = &self.toast {
                     if t.kind == ToastKind::Message {
                         [MESSAGE_TOAST[0], self.notice_card_height()]
-                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break | ToastKind::Task | ToastKind::HeadsUp | ToastKind::LumaApp) {
+                    } else if matches!(t.kind, ToastKind::Focus | ToastKind::Break | ToastKind::Task | ToastKind::HeadsUp | ToastKind::LumaApp | ToastKind::Shutdown) {
                         ACT_TOAST
                     } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
                         WATER_TOAST
@@ -1180,7 +1220,7 @@ impl App {
         let t = self.toast.as_ref()?;
         let kind = match t.kind {
             ToastKind::Water | ToastKind::Sample(0) => A::Water,
-            ToastKind::Sample(1) | ToastKind::Remind(K::Sleep | K::Water) => A::Sleep,
+            ToastKind::Sample(1) | ToastKind::Remind(K::Sleep | K::Water) | ToastKind::Shutdown => A::Sleep,
             ToastKind::Sample(2) | ToastKind::Remind(K::Breathe) => A::Breathe,
             ToastKind::Sample(3) | ToastKind::Remind(K::Stretch) => A::Stretch,
             ToastKind::Sample(4) | ToastKind::Remind(K::Eyes) => A::Rest,
@@ -1241,6 +1281,8 @@ impl App {
             if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Sample(_))) {
                 t.until = Instant::now();
             }
+            self.shutdown_at = None;
+            self.end_guide(false);
         } else {
             self.sample = Some((Instant::now(), "tour".to_string()));
         }
@@ -1253,19 +1295,41 @@ impl App {
         let t = start.elapsed().as_secs_f32();
         // The tour plays every effect in turn until it is stopped.
         let (what, t) = if what == "tour" {
-            match t % 71.0 {
+            match t % 114.0 {
                 c if c < 17.5 => ("eyes".to_string(), c),
                 c if c < 23.0 => ("battery".to_string(), c - 17.5),
                 c if c < 28.5 => ("bell".to_string(), c - 23.0),
                 c if c < 32.0 => ("volume".to_string(), c - 28.5),
                 c if c < 62.0 => ((((c - 32.0) / 6.0) as u8).to_string(), c - 32.0),
-                c => ((5 + ((c - 62.0) / 3.0) as u8).to_string(), c),
+                c if c < 71.0 => ((5 + ((c - 62.0) / 3.0) as u8).to_string(), c),
+                c if c < 86.0 => ("guide:stretch".to_string(), c - 71.0),
+                c if c < 96.0 => ("guide:eyes".to_string(), c - 86.0),
+                c if c < 108.0 => ("guide:breathe".to_string(), c - 96.0),
+                c => ("night".to_string(), c - 108.0),
             }
         } else {
             (what, t)
         };
         let (eyes_at, card) = match what.as_str() {
             "eyes" => (Some(t % 17.5), None),
+            "night" => {
+                if self.shutdown_at.is_none() && t < 0.3 {
+                    self.shutdown_at = Some(Instant::now() + Duration::from_secs(5));
+                    self.show_shutdown();
+                }
+                return;
+            }
+            w if w.starts_with("guide:") => {
+                if self.guide.is_none() && t < 0.3 {
+                    let tile = match w {
+                        "guide:eyes" => ui::Tile::Eyes,
+                        "guide:breathe" => ui::Tile::Breathe,
+                        _ => ui::Tile::Stretch,
+                    };
+                    self.start_guide(tile, Some(if tile == ui::Tile::Breathe { 4 } else { 3 }));
+                }
+                return;
+            }
             "volume" => {
                 if !matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Volume(_))) && t < 0.2 {
                     self.toast(ToastKind::Volume(false), "Volume", "100%", Some(1.0));
@@ -1375,7 +1439,7 @@ impl App {
     }
 
     fn set_mode(&mut self, m: Mode) {
-        if self.mode == m {
+        if self.mode == m || (m != Mode::Expanded && self.guide.as_ref().is_some_and(|g| g.ended.is_none())) {
             return;
         }
         // Spring constants per transition, as measured from the reference app.
@@ -1411,6 +1475,59 @@ impl App {
         self.kick();
     }
 
+    /// Leads the activity on, and hands over when it is done.
+    fn step_guide(&mut self, dt: f32) {
+        let Some(g) = self.guide.as_ref() else { return };
+        let look = match g.ended {
+            Some((at, done)) => {
+                if at.elapsed() > Duration::from_millis(if done { 1500 } else { 800 }) {
+                    self.guide = None;
+                    self.go_view(ui::View::Page);
+                    self.set_mode(Mode::Compact);
+                    return;
+                }
+                if done { eyes::Look::Love } else { eyes::Look::Sad }
+            }
+            None => match guide::at(&g.steps, g.time()) {
+                Some((i, u, _)) => guide::pose(g.steps[i].moves, u).look,
+                None => {
+                    self.end_guide(true);
+                    eyes::Look::Love
+                }
+            },
+        };
+        self.eyes.step(eyes::Feel { show: true, look, ..eyes::Feel::ASLEEP }, dt);
+        self.kick();
+    }
+
+    /// Starts an activity. `secs` overrides each step's length, for the preview.
+    fn start_guide(&mut self, tile: ui::Tile, secs: Option<u32>) {
+        use luma::config::Kind;
+        let r = &self.brain.cfg.reminders;
+        let length = secs.unwrap_or(match tile.kind() {
+            Kind::Stretch => r.stretch.seconds,
+            Kind::Eyes => r.eyes.seconds,
+            _ => r.breathe.seconds,
+        });
+        self.guide = Some(Guide { tile, steps: guide::steps(tile, length), started: Instant::now(), paused: None, ended: None });
+        self.toast = None;
+        self.set_mode(Mode::Expanded);
+        self.glow = tile.colour();
+        self.go_view(ui::View::Guide);
+        self.glow = tile.colour();
+    }
+
+    /// Finished, or left half way: left counts as "Later".
+    fn end_guide(&mut self, done: bool) {
+        if let Some(g) = self.guide.as_mut().filter(|g| g.ended.is_none()) {
+            g.ended = Some((Instant::now(), done));
+            if self.brain.showing.is_some() {
+                self.answer_luma(if done { Outcome::Done } else { Outcome::Snooze }, false);
+            }
+            self.kick();
+        }
+    }
+
     /// How the eyes on a card feel: they watch the pointer, sad on the way to "Later", glad on the
     /// way to "Done", and show what they think of the answer before the card leaves.
     fn card_mood(&mut self, f: &eyes::ActFrame) -> (eyes::Look, f32) {
@@ -1419,7 +1536,12 @@ impl App {
             return (look, 0.0);
         }
         if let Some((at, done)) = self.reaction {
-            let age = at.elapsed().as_secs_f32();
+            // Water is drunk first: they tip back while the drop empties.
+            let drink = self.drink_time();
+            let age = at.elapsed().as_secs_f32() - drink;
+            if age < 0.0 {
+                return (Look::Happy, -0.5);
+            }
             let hops = (age / 0.42) as u8 + 1;
             if done && self.reaction_hops < hops.min(2) {
                 self.reaction_hops += 1;
@@ -1433,8 +1555,18 @@ impl App {
         let gaze = ((self.mouse.0 - WIN_W / 2.0) / 190.0).clamp(-1.0, 1.0);
         match self.hit(self.mouse.0, self.mouse.1) {
             Some(Act::LumaLater) => (Look::Sad, gaze),
-            Some(Act::LumaDone) => (Look::Happy, gaze),
+            Some(Act::LumaDone | Act::GuideStart) => (Look::Happy, gaze),
             _ => (Look::Neutral, gaze),
+        }
+    }
+
+    /// How long the eyes take to drink on a water card that was answered "Drank".
+    pub fn drink_time(&self) -> f32 {
+        let water = self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Sample(0)));
+        if water && self.reaction.is_some_and(|r| r.1) {
+            1.5
+        } else {
+            0.0
         }
     }
 
@@ -1443,7 +1575,9 @@ impl App {
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
         self.sample_step(dt);
-        if let Some((kind, e)) = self.act_now() {
+        if self.guide.is_some() {
+            self.step_guide(dt);
+        } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(&f);
             let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
@@ -1549,7 +1683,7 @@ impl App {
             moving |= self.month_mix.step(0.0, sub);
             moving |= self.gone_mix.step(0.0, sub);
             moving |= self.swipe_mix.step(if self.swiped.is_some() { 1.0 } else { 0.0 }, sub);
-            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form);
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form | ui::View::Guide);
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
             if let Some((from, level)) = self.wash_from {
@@ -1595,6 +1729,7 @@ impl App {
             || self.wheels_moving
             || self.jam_show
             || self.reaction.is_some()
+            || self.guide.is_some()
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             // A card's eyes stay out while it waits, and need frames only when the act says so.
@@ -1685,6 +1820,13 @@ impl App {
             }
             return;
         }
+        // A call ends whatever the eyes are leading.
+        if kind == ToastKind::Call && self.guide.is_some() {
+            self.end_guide(false);
+            self.guide = None;
+            self.go_view(ui::View::Page);
+            self.set_mode(Mode::Compact);
+        }
         // Sadness is about an unanswered card; whatever comes next, that moment has passed.
         self.eyes.mind.forget(eyes::Look::Sad);
         // A call keeps the notch: what matters waits for it, the rest passes unseen.
@@ -1748,7 +1890,7 @@ impl App {
         }
         let Some((mut t, since)) = self.covered.take() else { return };
         // A reminder may have been dealt with in the meantime.
-        if t.kind.waits() && !matches!(t.kind, ToastKind::Call | ToastKind::LumaApp) && self.brain.showing.is_none() {
+        if t.kind.waits() && !matches!(t.kind, ToastKind::Call | ToastKind::LumaApp | ToastKind::Shutdown) && self.brain.showing.is_none() {
             return;
         }
         let away = since.elapsed();
@@ -2411,10 +2553,15 @@ impl App {
             self.feel(eyes::Look::Sad);
             self.sad_at = Some(Instant::now());
         }
+        let bedtime = outcome == Outcome::Done && matches!(self.brain.showing.as_ref().map(|s| &s.due), Some(Due::Builtin(CareKind::Sleep)));
         self.covered = self.covered.take().filter(|(t, _)| !t.kind.waits() || matches!(t.kind, ToastKind::Call | ToastKind::LumaApp));
         self.card_rings = 0;
         if let Some((minutes, label)) = self.brain.answer(outcome, timed_out, now) {
             self.brain.start_focus(minutes, &label, now);
+        }
+        if bedtime && !timed_out && self.brain.cfg.reminders.sleep.shutdown {
+            self.start_shutdown();
+            return;
         }
         if self.act_now().is_some() && !timed_out {
             // The card stays a moment for the eyes to react, then leaves by itself.
@@ -2422,7 +2569,8 @@ impl App {
             self.reaction = Some((Instant::now(), done));
             self.reaction_hops = 0;
             if let Some(t) = self.toast.as_mut() {
-                t.until = Instant::now() + Duration::from_millis(if done { 1500 } else { 800 });
+                let water = matches!(t.kind, ToastKind::Water) as u64;
+                t.until = Instant::now() + Duration::from_millis(if done { 1500 + 1500 * water } else { 800 });
             }
         } else if self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Water | ToastKind::Remind(_) | ToastKind::Task | ToastKind::HeadsUp | ToastKind::Focus)) {
             self.dismiss_toast();
@@ -2435,6 +2583,47 @@ impl App {
             }
         }
         self.kick();
+    }
+
+    /// Good night: the card counts down, and "Cancel" stays on it until the end.
+    fn start_shutdown(&mut self) {
+        self.shutdown_at = Some(Instant::now() + SHUTDOWN_WAIT);
+        self.show_shutdown();
+    }
+
+    /// Storm only: an activity begun, or left, at a random moment.
+    pub fn storm_guide(&mut self) {
+        if self.guide.is_some() {
+            self.end_guide(false);
+        } else {
+            self.start_guide(ui::Tile::Stretch, Some(1));
+        }
+    }
+
+    fn show_shutdown(&mut self) {
+        self.toast(ToastKind::Shutdown, "Save your work", "", None);
+        if let Some(t) = self.toast.as_mut().filter(|t| t.kind == ToastKind::Shutdown) {
+            t.until = Instant::now() + 2 * SHUTDOWN_WAIT;
+        }
+    }
+
+    /// Runs on every tick while the countdown is on. It must stay in sight to be cancellable.
+    fn watch_shutdown(&mut self) {
+        let Some(at) = self.shutdown_at else { return };
+        if Instant::now() >= at {
+            self.shutdown_at = None;
+            if allow_shutdown(self.demo.is_some(), self.storm.is_some(), self.sample.is_some()) {
+                sys::shut_down();
+            }
+            self.dismiss_toast();
+            return;
+        }
+        if self.mode == Mode::Expanded {
+            self.set_mode(Mode::Compact);
+        }
+        if !self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Shutdown) && self.covered.is_none() {
+            self.show_shutdown();
+        }
     }
 
     /// The Focus-styled card is the time's-up card of a session (not a Pomodoro phase notice).
@@ -2772,7 +2961,7 @@ impl App {
         }
         let deeper = |v: V| match v {
             V::Page => 0,
-            V::Care(_) | V::Form | V::History | V::OldNotes | V::Calendar => 1,
+            V::Care(_) | V::Form | V::History | V::OldNotes | V::Calendar | V::Guide => 1,
             V::Goal | V::Bed => 2,
         };
         self.view_dir = if deeper(v) >= deeper(self.view) { 1.0 } else { -1.0 };
@@ -3011,6 +3200,25 @@ impl App {
                 }
             }
             Act::RowDelete => self.confirm_delete(),
+            Act::GuideStart => {
+                let tile = ui::Tile::of(self.brain.showing.as_ref().map(|s| &s.due));
+                if let Some(tile) = tile {
+                    self.start_guide(tile, None);
+                }
+            }
+            Act::GuidePause => {
+                if let Some(g) = self.guide.as_mut() {
+                    match g.paused.take() {
+                        Some(at) => g.started += at.elapsed(),
+                        None => g.paused = Some(Instant::now()),
+                    }
+                }
+            }
+            Act::GuideBack => self.end_guide(false),
+            Act::ShutdownCancel => {
+                self.shutdown_at = None;
+                self.dismiss_toast();
+            }
             Act::SaveWheels => self.save_wheels(),
             Act::WaterReset => self.brain.reset_water(),
             Act::OldNotes(on) => {
@@ -3109,6 +3317,7 @@ impl App {
         if self.reaction.is_some() && self.act_now().is_none() {
             self.reaction = None;
         }
+        self.watch_shutdown();
         if self.swiped.is_some() && Instant::now() >= self.swipe_until {
             self.swiped = None;
             self.kick();
@@ -3563,6 +3772,7 @@ impl App {
         let _ = AppendMenuW(m, check(s.pet), 23, w!("Eyes"));
         let _ = AppendMenuW(m, check(s.minimal), 24, w!("Minimal notch"));
         let _ = AppendMenuW(m, check(sys::autostart_enabled()), 25, w!("Start with Windows"));
+        let _ = AppendMenuW(m, check(self.brain.cfg.reminders.sleep.shutdown), 26, w!("Shut down at bedtime"));
         let submenu = |title: &HSTRING, items: &[(HSTRING, usize, bool)]| {
             let Ok(sub) = CreatePopupMenu() else { return };
             for (text, id, on) in items {
@@ -3598,6 +3808,7 @@ impl App {
             23 => self.change_setting(ui::SetKey::Eyes),
             24 => self.change_setting(ui::SetKey::Minimal),
             25 => self.change_setting(ui::SetKey::Autostart),
+            26 => self.brain.configure(|c| c.reminders.sleep.shutdown ^= true, chrono::Local::now()),
             n @ 30..=32 => {
                 self.settings.jam_mode = (n - 30) as u8;
                 self.jam.gap = if n == 32 { 180.0 } else { 60.0 };
@@ -4045,6 +4256,17 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.focus_mix.x = 1.0;
     }
     a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
+    if let Some(what) = kv.get("guide") {
+        let tile = match *what {
+            "eyes" => ui::Tile::Eyes,
+            "breathe" => ui::Tile::Breathe,
+            _ => ui::Tile::Stretch,
+        };
+        a.start_guide(tile, None);
+    }
+    if kv.get("bedoff") == Some(&"1") {
+        a.start_shutdown();
+    }
     if let Some(mode) = kv.get("cal") {
         a.cal = if *mode == "years" { ui::Cal::Years } else { ui::Cal::Months };
     }
@@ -4389,5 +4611,18 @@ mod zone_tests {
         assert!(!touches((0.0, 46.0, 1600.0, 80.0), notch), "address bar under the notch");
         assert!(touches((0.0, 20.0, 1600.0, 60.0), notch), "a field reaching into the notch");
         assert!(!touches((0.0, 0.0, 200.0, 60.0), notch), "a field beside the notch");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::allow_shutdown;
+
+    #[test]
+    fn only_the_real_app_can_switch_the_pc_off() {
+        assert!(allow_shutdown(false, false, false));
+        assert!(!allow_shutdown(true, false, false));
+        assert!(!allow_shutdown(false, true, false));
+        assert!(!allow_shutdown(false, false, true));
     }
 }

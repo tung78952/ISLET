@@ -40,9 +40,6 @@ const fn oval(a: f32, b: f32) -> Lens {
 }
 
 const NEUTRAL: Lens = oval(46.0, 68.0);
-/// The lens on the side being looked at opens; the other one narrows.
-const GLANCE_NEAR: Lens = oval(50.0, 74.0);
-const GLANCE_FAR: Lens = oval(42.0, 60.0);
 const SURPRISED: Lens = oval(52.0, 82.0);
 const SLIT: Lens = ((-186.0, 0.0), (-54.0, 0.0), [(-186.0, -9.0), (-54.0, -9.0)], [(-186.0, 9.0), (-54.0, 9.0)]);
 const HAPPY: Lens = ((-188.0, 26.0), (-52.0, 26.0), [(-176.0, -88.0), (-64.0, -88.0)], [(-150.0, -20.0), (-90.0, -20.0)]);
@@ -92,7 +89,7 @@ fn trace((from, to, top, low): Lens, right: bool) -> Vec<P> {
     upper.chain(lower).map(|p| (p.0 * side, p.1)).collect()
 }
 
-fn outline(look: Look, right: bool, gaze: f32, lift: f32) -> Vec<P> {
+fn outline(look: Look, right: bool) -> Vec<P> {
     let lens = match look {
         Look::Closed | Look::Dizzy => SLIT,
         Look::Love => {
@@ -107,12 +104,7 @@ fn outline(look: Look, right: bool, gaze: f32, lift: f32) -> Vec<P> {
                 })
                 .collect();
         }
-        Look::Neutral => {
-            let side = if (gaze > 0.0) == right { GLANCE_NEAR } else { GLANCE_FAR };
-            let k = gaze.abs().min(1.0);
-            let mix = |a: Vec<P>, b: Vec<P>, k: f32| -> Vec<P> { a.iter().zip(b).map(|(a, b)| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k)).collect() };
-            return mix(mix(trace(NEUTRAL, right), trace(side, right), k), trace(DOWN, right), lift);
-        }
+        Look::Neutral => NEUTRAL,
         Look::Happy => HAPPY,
         Look::Surprised => SURPRISED,
         Look::Sleepy => SLEEPY,
@@ -604,7 +596,7 @@ pub fn act(kind: ActKind, e: f32) -> ActFrame {
                 gaze = 0.0;
                 look = match play {
                     p if p < 0.45 => Look::Sleepy,
-                    p if p < 0.65 => Look::Closed,
+                    p if p < 0.65 => Look::Squint,
                     p if p < 0.8 => Look::Sleepy,
                     _ => Look::Closed,
                 };
@@ -813,7 +805,8 @@ impl Mini {
 pub struct Eyes {
     pub show: Spring,
     /// Where the lenses look: quick, like the eyes themselves.
-    pub gaze: Spring,
+    /// How far the pair has dropped, following a pointer below the notch.
+    pub drop: Spring,
     /// Where the pair sits: slower and with a little swing, like the head behind them.
     pub lean: Spring,
     /// A little hop whenever the expression changes.
@@ -837,19 +830,19 @@ pub struct Eyes {
 impl Eyes {
     pub fn new() -> Self {
         let eye = |right| {
-            let points = outline(Look::Closed, right, 0.0, 0.0);
+            let points = outline(Look::Closed, right);
             Eye { speed: vec![(0.0, 0.0); points.len()], points }
         };
         Eyes {
             show: Spring::new(0.0, 170.0, 24.0),
-            gaze: Spring::new(0.0, 900.0, 46.0),
+            drop: Spring::new(0.0, 130.0, 15.0),
             lean: Spring::new(0.0, 130.0, 13.0),
             hop: Spring::new(0.0, 320.0, 15.0),
             scene: Spring::new(0.0, 170.0, 24.0),
             lunge: Spring::new(0.0, 700.0, 30.0),
             shove: Spring::new(0.0, 160.0, 10.0),
             rock: Spring::new(0.0, 220.0, 7.0),
-            dent: Spring::new(0.0, 420.0, 20.0),
+            dent: Spring::new(0.0, 170.0, 11.0),
             dizzy: Spring::new(0.0, 170.0, 24.0),
             pair: [eye(false), eye(true)],
             mind: Mind::new(),
@@ -871,8 +864,8 @@ impl Eyes {
             (300.0, 23.0)
         };
         let shape = if blink { Look::Closed } else { look };
-        self.gaze.step(gaze, dt);
         self.lean.step(gaze, dt);
+        self.drop.step(lift, dt);
         if look != self.last {
             self.last = look;
             self.hop.v = -38.0;
@@ -884,7 +877,7 @@ impl Eyes {
             self.struck = true;
             self.shove.v += 200.0;
             self.rock.v += 6.0;
-            self.dent.v += 16.0;
+            self.dent.v += 15.0;
         }
         if lunge <= 0.5 {
             self.struck = false;
@@ -893,9 +886,8 @@ impl Eyes {
         self.rock.step(0.0, dt);
         self.dent.step(0.0, dt);
         self.scene.step(if battery { 1.0 } else { 0.0 }, dt);
-        let leaning = self.gaze.x;
         for (i, eye) in self.pair.iter_mut().enumerate() {
-            let target = outline(shape, i == 1, leaning, lift);
+            let target = outline(shape, i == 1);
             eye.ease(&target, k, c, dt);
         }
         self.show.step(if show { 1.0 } else { 0.0 }, dt);
@@ -911,7 +903,7 @@ mod tests {
     fn every_expression_has_the_same_points_so_any_can_morph_into_any() {
         for look in [Look::Closed, Look::Neutral, Look::Happy, Look::Surprised, Look::Sleepy, Look::Squint, Look::Wink, Look::Angry, Look::Sad, Look::Love, Look::Dizzy, Look::Up, Look::Down, Look::Smug] {
             for right in [false, true] {
-                let o = outline(look, right, 0.5, 0.2);
+                let o = outline(look, right);
                 assert_eq!(o.len(), 2 * EDGE);
                 assert!(o.iter().all(|p| p.0.is_finite() && p.1.is_finite()));
             }
@@ -919,10 +911,16 @@ mod tests {
     }
 
     #[test]
-    fn a_glance_opens_the_near_lens_and_narrows_the_far_one() {
-        let height = |o: Vec<P>| o.iter().map(|p| p.1).fold(f32::MIN, f32::max) - o.iter().map(|p| p.1).fold(f32::MAX, f32::min);
-        let (near, far) = (height(outline(Look::Neutral, true, 1.0, 0.0)), height(outline(Look::Neutral, false, 1.0, 0.0)));
-        assert!(near > far, "{near} {far}");
+    fn looking_leaves_the_eyes_their_shape() {
+        let mut e = Eyes::new();
+        let at_rest = outline(Look::Neutral, true);
+        for _ in 0..400 {
+            e.step(Feel { show: true, look: Look::Neutral, gaze: 1.0, ..Feel::ASLEEP }, 1.0 / 60.0);
+        }
+        assert!(e.lean.x > 0.9);
+        for (a, b) in e.pair[1].points.iter().zip(&at_rest) {
+            assert!((a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0);
+        }
     }
 
     fn sense(t: f32, x: f32) -> Sense {

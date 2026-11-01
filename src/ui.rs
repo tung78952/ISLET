@@ -99,6 +99,7 @@ pub enum View {
     /// Choosing bedtime.
     Bed,
     Calendar,
+    Guide,
 }
 
 /// The small tiles on Care, each with its own colour when opened.
@@ -111,6 +112,17 @@ pub enum Tile {
 }
 
 impl Tile {
+    /// The activity a reminder leads to, for those that have one.
+    pub fn of(due: Option<&crate::luma::scheduler::Due>) -> Option<Tile> {
+        use crate::luma::{config::Kind as K, scheduler::Due};
+        match due? {
+            Due::Builtin(K::Stretch) => Some(Tile::Stretch),
+            Due::Builtin(K::Eyes) => Some(Tile::Eyes),
+            Due::Builtin(K::Breathe) => Some(Tile::Breathe),
+            _ => None,
+        }
+    }
+
     const ALL: [Tile; 4] = [Tile::Stretch, Tile::Eyes, Tile::Breathe, Tile::Sleep];
 
     pub fn kind(self) -> crate::luma::config::Kind {
@@ -228,6 +240,10 @@ pub enum Act {
     SaveWheels,
     RowTrash(u8, usize),
     RowDelete,
+    GuideStart,
+    GuidePause,
+    GuideBack,
+    ShutdownCancel,
     FocusMode(bool),
     PomoPlan(u32, u32),
     FormPreset(u8),
@@ -581,6 +597,7 @@ mod icon {
 pub fn draw(a: &mut App) {
     a.hits.clear();
     a.loop_rect = None;
+    a.live_alpha = 0.0;
     a.eye_draws = (0, 0);
     let (visual_cx, visual_w) = a.notch_geometry();
     let (w, h) = (visual_w.max(1.0), a.sh.x.max(1.0));
@@ -677,7 +694,7 @@ pub fn draw(a: &mut App) {
             lyric_pill(a, left, w);
             a.gfx.alpha = na * small_alpha * pm;
             if show > 0.3 && seat == Seat::Lyrics {
-                eyes(a, left + w / 2.0, h / 2.0, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
+                eyes(a, left + w / 2.0, h / 2.0, (show - 0.3) / 0.7, (w / 2.0 - 48.0).max(14.0));
             }
             a.gfx.alpha = 1.0;
         }
@@ -703,6 +720,7 @@ pub fn draw(a: &mut App) {
             }
         }
     }
+    focus_dots(a, left, w, h);
     if notice {
         let d = (2.0 * grown - 1.0).clamp(0.0, 1.0);
         if d > 0.01 {
@@ -746,7 +764,7 @@ fn compact(a: &mut App, left: f32, w: f32) {
     right_indicator(a, left + w - 28.0, cy);
     a.gfx.alpha = base;
     if show > 0.3 {
-        eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
+        eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 48.0).max(14.0));
     }
     // The battery reaches past the compact notch, so that scene redraws everything.
     if a.eyes.scene.x > 0.01 || a.eye_feel_wide() {
@@ -761,22 +779,52 @@ fn clock_text(left_s: f64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
+/// Where the focus dots are. `open` is 0 in the small notch, where they form a ring with the first
+/// at 12 o'clock's left, and 1 in the open one, where the ring has unbent into a straight row.
+pub fn dot_at(i: usize, open: f32, ring: (f32, f32), row: (f32, f32)) -> (f32, f32) {
+    let u = i as f32 - (FOCUS_DOTS as f32 - 1.0) / 2.0;
+    let turn = -std::f32::consts::FRAC_PI_2 + u / FOCUS_DOTS as f32 * std::f32::consts::TAU;
+    let (cx, cy) = (ring.0 + 7.5 * turn.cos(), ring.1 + 7.5 * turn.sin());
+    let (rx, ry) = (row.0 + u * 3.4, row.1);
+    (cx + (rx - cx) * open, cy + (ry - cy) * open)
+}
+
+const FOCUS_DOTS: usize = 8;
+
+/// The focus dots: a ring of light in the notch that unbends into a row as it opens. They go out
+/// one by one, clockwise round the ring.
+fn focus_dots(a: &mut App, left: f32, w: f32, h: f32) {
+    if a.brain.focus.is_none() || a.live_alpha <= 0.01 {
+        return;
+    }
+    let (time, total, _, _) = a.pomo_view();
+    let gone = (1.0 - (time / total) as f32) * FOCUS_DOTS as f32;
+    let open = ((h - 30.0) / 110.0).clamp(0.0, 1.0);
+    let open = open * open * (3.0 - 2.0 * open);
+    let ring = (left + w - 19.0, 14.8);
+    let row = (left + (SLOT_LIVE.0 + SLOT_LIVE.1) / 2.0, 19.0);
+    let base = a.gfx.alpha;
+    a.gfx.alpha = a.live_alpha;
+    for i in 0..FOCUS_DOTS {
+        // Clockwise from the top of the ring.
+        let order = (i + FOCUS_DOTS / 2) % FOCUS_DOTS;
+        let k = (order as f32 + 1.0 - gone).clamp(0.0, 1.0);
+        let (x, y) = dot_at(i, open, ring, row);
+        if k > 0.02 {
+            a.gfx.fill_circle(x, y, 2.9, 2.9, RED, 0.16 * k);
+        }
+        a.gfx.fill_circle(x, y, 1.4, 1.4, RED, 0.16 + 0.84 * k);
+    }
+    a.gfx.alpha = base;
+}
+
 /// Equalizer bars while music plays, or the focus dots while it runs.
 fn right_indicator(a: &mut App, x: f32, cy: f32) {
     // The only part that moves when nothing else does: frames can redraw just this box.
     a.loop_rect = Some(Rc::new(x - 3.0, cy - 12.0, 27.0, 24.0));
+    // Focus has its dots, drawn by `focus_dots`; this only says how visible they may be.
     if a.brain.focus.is_some() {
-        // Six dots going out one by one from the right.
-        let (left, total, _, _) = a.pomo_view();
-        let lit = (left / total) as f32 * 6.0;
-        for i in 0..6 {
-            let k = (lit - i as f32).clamp(0.0, 1.0);
-            let dx = x + 1.6 + i as f32 * 3.9;
-            if k > 0.02 {
-                a.gfx.fill_circle(dx, cy, 2.9, 2.9, RED, 0.16 * k);
-            }
-            a.gfx.fill_circle(dx, cy, 1.5, 1.5, RED, 0.2 + 0.8 * k);
-        }
+        a.live_alpha = a.gfx.alpha;
         return;
     }
     let mix = a.eq_mix.x.clamp(0.0, 1.0);
@@ -792,6 +840,9 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
     }
 }
 
+/// How far the pair tips when looking all the way to one side (about 8°).
+const TILT: f32 = 0.14;
+
 /// One eye: scan lines of light, with dark gaps that stay put as its outline moves. The gaps are
 /// lines of the notch's own black, so what shows through is the lit part.
 fn lens(g: &Gfx, outline: &[(f32, f32)], gap: f32, a: f32) {
@@ -800,7 +851,11 @@ fn lens(g: &Gfx, outline: &[(f32, f32)], gap: f32, a: f32) {
     let mut rim = outline.to_vec();
     rim.push(rim[0]);
     g.polyline(&rim, 1.6, c, 0.35 * a);
-    stripes(g, outline, gap, a);
+    // Inside the outline only: on a coloured glow, lines past the edge would show.
+    if g.push_outline_clip(outline) {
+        stripes(g, outline, gap, a);
+        g.pop_layer();
+    }
 }
 
 fn stripes(g: &Gfx, shape: &[(f32, f32)], gap: f32, a: f32) {
@@ -829,11 +884,14 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     let t = a.born.elapsed().as_secs_f32();
     let breath = 0.35 * (t * 1.7).sin();
     let g = &a.gfx;
+    // Looking moves the whole pair, tipped a little as a head would be; the eyes keep their size.
+    let (px, py) = (cx + lean * reach, cy + breath + e.hop.x + 7.0 * e.drop.x);
+    g.rotate(px, py, TILT * lean);
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
-        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (cx + lean * reach + p.0 * SCALE, cy + breath + e.hop.x + p.1 * SCALE)).collect();
-        g.glow_ellipse(cx + lean * reach + side * 21.0, cy, 18.0, 15.0, crate::CHARACTER, 0.16 * show);
+        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (px + p.0 * SCALE, py + p.1 * SCALE)).collect();
+        g.glow_ellipse(px + side * 21.0, py, 18.0, 15.0, crate::CHARACTER, 0.16 * show);
         lens(g, &outline, GAP, show * (1.0 - e.dizzy.x.clamp(0.0, 1.0)));
-        let (ex, ey) = (cx + lean * reach + side * 21.0, cy + breath + e.hop.x);
+        let (ex, ey) = (px + side * 21.0, py);
         let dizzy = e.dizzy.x.clamp(0.0, 1.0);
         if dizzy > 0.01 {
             let turn = t * 7.0 * side;
@@ -848,6 +906,7 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
             stripes(g, &spiral, GAP, show * dizzy);
         }
     }
+    g.unzoom();
     // The battery never leaves the notch as it narrows again.
     let half = a.sw.x / 2.0;
     g.push_clip(Rc::new(centre - half, 0.0, half * 2.0, a.sh.x));
@@ -1342,13 +1401,16 @@ fn bell(a: &mut App, x: f32, y: f32, s: f32, t: f32) {
 fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
     a.eye_draws.1 += 1;
     let hop = a.eyes.hop.x;
-    let lean = a.eyes.lean.x * 7.0;
+    let lean = a.eyes.lean.x;
+    let (px, py) = (cx + lean * 7.0, cy + hop);
+    a.gfx.rotate(px, py, TILT * lean);
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
-        let x = cx + side * spread + lean;
-        a.gfx.glow_ellipse(x + side * 120.0 * scale, cy, 16.0, 14.0, crate::CHARACTER, 0.14);
-        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, cy + hop + p.1 * scale)).collect();
+        let x = px + side * spread;
+        a.gfx.glow_ellipse(x + side * 120.0 * scale, py, 16.0, 14.0, crate::CHARACTER, 0.14);
+        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, py + p.1 * scale)).collect();
         lens(&a.gfx, &outline, 3.0, 1.0);
     }
+    a.gfx.unzoom();
 }
 
 fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, kind: crate::eyes::ActKind, e: f32) {
@@ -1368,6 +1430,15 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
         match kind {
             K::Water => {
                 a.gfx.rotate(px, cy + S / 2.0, 0.09 * rock + 0.03 * (e * 1.6).sin());
+                let drink = a.drink_time();
+                if drink > 0.0 {
+                    // Drunk from the top down.
+                    let age = a.reaction.map_or(0.0, |r| r.0.elapsed().as_secs_f32());
+                    let top = cy - S / 2.0 + S * (age / drink).clamp(0.0, 1.0);
+                    a.gfx.push_clip(Rc::new(px - S, top, 2.0 * S, S));
+                    a.gfx.droplet(px, cy + 3.0, S * 0.48, WATER, 1.0);
+                    a.gfx.pop_clip();
+                }
                 pic(a, "ic_water", px, cy + 0.6 * (e * 3.4).sin(), S, WATER, 1.0);
                 a.gfx.unzoom();
             }
@@ -1391,7 +1462,8 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
     a.gfx.push_clip(Rc::new(left + 12.0, 0.0, w - 24.0, h));
     act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 33.0 * f.stretch);
     a.gfx.pop_clip();
-    if let Some(age) = a.reaction.filter(|r| r.1).map(|r| r.0.elapsed().as_secs_f32()) {
+    let drink = a.drink_time();
+    if let Some(age) = a.reaction.filter(|r| r.1).map(|r| r.0.elapsed().as_secs_f32() - drink).filter(|age| *age > 0.0) {
         // Little hearts of scan lines drift up from the eyes.
         for i in 0..6 {
             let k = (age - 0.08 * i as f32) / 1.2;
@@ -1412,8 +1484,10 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
     // The words come out from behind the prop, the second line a beat later.
     let tx = centre - 72.0 + if kind == K::Rest { -24.0 } else { 0.0 };
     let tw = 170.0;
-    a.gfx.push_clip(Rc::new(tx - 4.0, 0.0, tw + 12.0, h));
-    let drift = 6.0 * f.swell;
+    a.gfx.push_clip(Rc::new(tx - 4.0, 0.0, tw + 70.0, h));
+    // The words give way: the eye's edge can push them but never pass through.
+    let eye_edge = eyes_at + reach * a.eyes.lunge.x + 33.0 * f.stretch + 166.0 * scale + 7.0;
+    let drift = 6.0 * f.swell + (eye_edge + 10.0 - tx).max(0.0);
     let (k1, k2) = (f.title, f.subtitle);
     a.gfx.ui(title, Rc::new(tx - 60.0 * (1.0 - k1) + 1.0 * shove + drift, cy - 17.6, tw, 20.0), 15.0, 700, WHITE, k1.clamp(0.0, 1.0), Align::L);
     a.gfx.ui(value, Rc::new(tx - 60.0 * (1.0 - k2) + 0.8 * shove + drift, cy + 2.4, tw, 16.0), 11.5, 400, 0xA0A0A0, k2.clamp(0.0, 1.0), Align::L);
@@ -1676,13 +1750,13 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         }
         ToastKind::Remind(k) => {
             use crate::luma::config::Kind as K;
-            let done = if matches!(k, K::Sleep | K::Water) { "Sleep" } else { "Done" };
+            let sleep = matches!(k, K::Sleep | K::Water);
             if let Some((act, e)) = a.act_now() {
                 act_card(a, left, w, h, title, value, act, e);
                 let base = a.gfx.alpha;
                 let shown = crate::eyes::act(act, e).buttons;
                 a.gfx.alpha = base * shown;
-                card_marks(a, left, w, h, t, live && shown > 0.6 && a.reaction.is_none(), &[(Mark::Later, "Later", Act::LumaLater), (Mark::Tick(WHITE), done, Act::LumaDone)]);
+                card_marks(a, left, w, h, t, live && shown > 0.6 && a.reaction.is_none(), &[(Mark::Later, "Later", Act::LumaLater), if sleep { (Mark::Tick(WHITE), "Sleep", Act::LumaDone) } else { (Mark::Play, "Start", Act::GuideStart) }]);
                 a.gfx.alpha = base;
             }
         }
@@ -1695,6 +1769,13 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         ToastKind::LumaApp => {
             plain_card(a, left, w, h, title, value, |g, x, y| icon::bell(g, x, y, WHITE, 1.0));
             card_marks(a, left, w, h, t, live, &[(Mark::Later, "Later", Act::ToastDismiss), (Mark::Cross, "Turn off", Act::LumaAppOff)]);
+        }
+        ToastKind::Shutdown => {
+            let left_s = a.shutdown_at.map_or(0, |at| at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1);
+            if let Some((act, e)) = a.act_now() {
+                act_card(a, left, w, h, &format!("Shutting down in {left_s} s"), title, act, e);
+            }
+            card_marks(a, left, w, h, t, live, &[(Mark::Cross, "Cancel", Act::ShutdownCancel)]);
         }
         ToastKind::Water => {
             if let Some((act, e)) = a.act_now() {
@@ -1999,6 +2080,8 @@ fn expanded(a: &mut App, lx: f32) {
     body(a, lx, view);
     a.gfx.offset(0.0, 0.0);
     a.gfx.alpha = base;
+    // The open pages have moving parts of their own: a frame always redraws all of it.
+    a.loop_rect = None;
     if view == View::Page && lyr < 0.99 {
         a.gfx.alpha = base * (1.0 - lyr) * (1.0 - s);
         chevrons(a, lx);
@@ -2021,6 +2104,7 @@ fn body(a: &mut App, lx: f32, view: View) {
         View::Goal => goal(a, lx),
         View::Bed => bed(a, lx),
         View::Calendar => calendar(a, lx),
+        View::Guide => guide_page(a, lx),
     }
 }
 
@@ -2495,6 +2579,70 @@ fn focus_running(a: &mut App, lx: f32, live: bool) {
         }
     });
     labelled(a, lx + 382.0, 72.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
+}
+
+// ---------------------------------------------------------------- guide
+
+/// The eyes lead an activity: them on the left, the step and its time on the right.
+fn guide_page(a: &mut App, lx: f32) {
+    let Some(g) = a.guide.as_ref() else { return };
+    let (tile, paused, time, ended) = (g.tile, g.paused(), g.time(), g.ended);
+    let moment = crate::guide::at(&g.steps, time).map(|(i, u, left)| (g.steps[i], u, left));
+    back_title(a, lx, tile.name(), Act::GuideBack);
+    let (cx, cy) = (lx + 100.0, 84.0);
+    let pose = moment.map(|(s, u, _)| crate::guide::pose(s.moves, u));
+    let (dx, dy, tilt, size) = pose.map_or((0.0, 0.0, 0.0, 1.0), |p| (p.dx, p.dy, p.tilt, p.size));
+    a.gfx.rotate(cx + dx, cy + dy, tilt);
+    a.eye_draws.1 += 1;
+    let scale = 0.17 * size;
+    for i in 0..2 {
+        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (cx + dx + p.0 * scale, cy + dy + a.eyes.hop.x + p.1 * scale)).collect();
+        lens(&a.gfx, &outline, 3.4, 1.0);
+    }
+    a.gfx.unzoom();
+    if let Some(age) = ended.filter(|e| e.1).map(|e| e.0.elapsed().as_secs_f32()) {
+        for i in 0..6 {
+            let k = (age - 0.08 * i as f32) / 1.2;
+            if (0.0..1.0).contains(&k) {
+                a.gfx.fill_circle(cx + (i as f32 - 2.5) * 14.0, cy - 8.0 - 36.0 * k, 3.0, 3.0, crate::CHARACTER, 1.0 - k);
+            }
+        }
+    }
+    divider(a, lx + 196.0, 50.0, 118.0);
+    let tint = tile.colour();
+    match (moment, ended) {
+        (_, Some((_, true))) => a.gfx.ui("Well done", Rc::new(lx + 212.0, 66.0, 130.0, 26.0), 18.0, 600, WHITE, 1.0, Align::L),
+        (_, Some(_)) => a.gfx.ui("Maybe later", Rc::new(lx + 212.0, 66.0, 130.0, 26.0), 18.0, 600, WHITE, 1.0, Align::L),
+        (Some((step, u, left)), _) => {
+            a.gfx.ui(step.label, Rc::new(lx + 212.0, 50.0, 136.0, 22.0), BODY, 500, WHITE, 1.0, Align::L);
+            use crate::guide::Move as M;
+            match step.moves {
+                M::NeckRoll => {
+                    for i in 0..12 {
+                        let t = -std::f32::consts::FRAC_PI_2 + i as f32 / 12.0 * std::f32::consts::TAU;
+                        let on = i as f32 / 12.0 <= u;
+                        a.gfx.fill_circle(lx + 238.0 + 16.0 * t.cos(), 96.0 + 16.0 * t.sin(), 1.8, 1.8, tint, if on { 1.0 } else { 0.25 });
+                    }
+                }
+                M::BreatheIn | M::Hold | M::BreatheOut | M::HoldEmpty => {
+                    let bar = Rc::new(lx + 212.0, 92.0, 130.0, 6.0);
+                    a.gfx.fill_rrect(bar, 3.0, WHITE, 0.14);
+                    a.gfx.fill_rrect(Rc::new(bar.x, bar.y, (bar.w * u).max(bar.h), bar.h), 3.0, tint, 1.0);
+                }
+                _ => a.gfx.ui(&format!("{}", left.ceil() as u32), Rc::new(lx + 212.0, 72.0, 90.0, 40.0), 30.0, 600, WHITE, 1.0, Align::L),
+            }
+        }
+        _ => {}
+    }
+    if ended.is_none() {
+        labelled(a, lx + 372.0, 72.0, if paused { "Resume" } else { "Pause" }, true, Act::GuidePause, |g, x, y| {
+            if paused {
+                icon::play(g, x + 1.0, y, 11.0, WHITE, 1.0);
+            } else {
+                icon::pause(g, x, y, 11.0, WHITE, 1.0);
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------- today

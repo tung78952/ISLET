@@ -531,6 +531,12 @@ static CAPS_HELD: AtomicBool = AtomicBool::new(false);
 /// can be set to turn Caps off with Shift), so `caps_settle` puts it right afterwards.
 static CAPS_ON: AtomicBool = AtomicBool::new(false);
 
+pub fn shut_down() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("shutdown").args(["/s", "/t", "0", "/f"]).creation_flags(CREATE_NO_WINDOW).spawn();
+}
+
 /// Once the key has been quiet: Windows' word against the prediction. Returns the real state if
 /// the prediction was wrong.
 pub fn caps_settle() -> Option<bool> {

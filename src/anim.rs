@@ -52,7 +52,7 @@ pub fn battery(g: &Gfx, cx: f32, cy: f32, w: f32, h: f32, dent: f32) {
     // The left side bows inwards.
     body.extend((1..=8).map(|i| {
         let k = i as f32 / 9.0;
-        (l + dent * h * 0.3 * (PI * k).sin(), b - rad - (h - 2.0 * rad) * k)
+        (l + dent * h * 0.55 * (PI * k).sin(), b - rad - (h - 2.0 * rad) * k)
     }));
     body.push(body[0]);
     g.polyline(&body, STROKE, INK, 1.0);
