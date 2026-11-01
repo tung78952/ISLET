@@ -78,6 +78,7 @@ const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
 const SWIPE_TIME: Duration = Duration::from_secs(4);
+const EYES_AFTER_CLOSE: f32 = 1.5;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(60);
 
 /// The real command only ever runs in the real app, never in a demo, a test or a preview.
@@ -1512,7 +1513,13 @@ impl App {
                 self.toast = Some(t);
             }
         }
+        let closing = self.mode == Mode::Expanded;
         self.mode = m;
+        if closing {
+            // The pointer has only just left: that is no reason for the eyes to open.
+            let t = self.eye_time();
+            self.eyes.mind.hold(t + EYES_AFTER_CLOSE);
+        }
         // Closed over a full-screen app: back to the sliver.
         if m != Mode::Expanded {
             self.watch();

@@ -293,6 +293,11 @@ impl Mind {
         self.pending = Some((peek, t));
     }
 
+    /// They stay shut until `until`, whatever the pointer does.
+    pub fn hold(&mut self, until: f32) {
+        self.rest_until = self.rest_until.max(until);
+    }
+
     /// A mood waiting to be shown no longer applies.
     pub fn forget(&mut self, look: Look) {
         self.pending = self.pending.filter(|(p, _)| *p != Peek::Mood(look));
