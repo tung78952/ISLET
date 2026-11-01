@@ -1563,7 +1563,7 @@ impl App {
     fn open_brief(&mut self, hello: bool, missed: Vec<(String, String)>) {
         let date = self.all_dates().into_iter().filter(|d| (0..=DATE_HORIZON).contains(&d.2)).min_by_key(|d| d.2).map(|d| (d.1, d.2));
         let sleep = &self.brain.cfg.reminders.sleep;
-        let bedtime = sleep.enabled.then(|| sleep.time.clone());
+        let bedtime = (sleep.enabled && self.brain.past_bedtime(chrono::Local::now()).is_none()).then(|| sleep.time.clone());
         self.brief = Some(Brief { hello, missed, coming: self.upcoming(), date, bedtime, opened: Instant::now() });
         self.glow = ui::EVENING;
         self.set_mode(Mode::Expanded);
@@ -2598,10 +2598,13 @@ impl App {
                 let sub = if self.brain.stats.water >= cfg.water_goal { "Only if you're thirsty".to_string() } else { format!("Stay hydrated! · {} ml", cfg.cup_ml) };
                 (ToastKind::Water, "Time to Drink".to_string(), sub)
             }
-            Due::Builtin(CareKind::Stretch) => (ToastKind::Remind(CareKind::Stretch), "Stretch Time".into(), format!("3 moves · {} s", cfg.reminders.stretch.seconds * 3)),
+            Due::Builtin(CareKind::Stretch) => {
+                let moves = guide::steps(ui::Tile::Stretch, cfg.reminders.stretch.seconds);
+                (ToastKind::Remind(CareKind::Stretch), "Stretch Time".into(), format!("{} moves · {} s", moves.len(), guide::total(&moves)))
+            }
             Due::Builtin(CareKind::Eyes) => (ToastKind::Remind(CareKind::Eyes), "Rest Your Eyes".into(), format!("Look far away · {} s", cfg.reminders.eyes.seconds)),
-            Due::Builtin(CareKind::Breathe) => (ToastKind::Remind(CareKind::Breathe), "Breathe".into(), "4-4-4-4 · 1 min".into()),
-            Due::Builtin(CareKind::Sleep) => (ToastKind::Remind(CareKind::Sleep), "Bedtime".into(), format!("It's {} · time to rest", cfg.reminders.sleep.time)),
+            Due::Builtin(CareKind::Breathe) => (ToastKind::Remind(CareKind::Breathe), "Breathe".into(), format!("4-4-4-4 · {} s", guide::total(&guide::steps(ui::Tile::Breathe, cfg.reminders.breathe.seconds)))),
+            Due::Builtin(CareKind::Sleep) => (ToastKind::Remind(CareKind::Sleep), "Bedtime".into(), bedtime_line(&cfg.reminders.sleep.time, self.brain.past_bedtime(chrono::Local::now()))),
             Due::Custom(id) => (ToastKind::Task, "Task Time!".into(), self.brain.task(id).map(|c| c.title.clone()).unwrap_or_default()),
             Due::Focus(min) => (ToastKind::Focus, "Focus time's up!".into(), format!("{min} min · great work")),
         };
@@ -4617,6 +4620,16 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if let Some(stretch) = kv.get("stretch").and_then(|v| v.parse::<f32>().ok()) {
         a.vol_stretch.x = stretch.clamp(-1.0, 1.0);
+    }
+}
+
+/// What the bedtime card says: the time when it is on time, how late it is when it is not.
+fn bedtime_line(time: &str, past: Option<u32>) -> String {
+    match past.unwrap_or(0) {
+        0..=1 => format!("It's {time} · time to rest"),
+        m @ 2..=59 => format!("{m} min past bedtime"),
+        m if m % 60 == 0 => format!("{} h past bedtime", m / 60),
+        m => format!("{} h {} min past bedtime", m / 60, m % 60),
     }
 }
 

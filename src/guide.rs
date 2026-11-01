@@ -41,7 +41,7 @@ pub fn steps(tile: Tile, secs: u32) -> Vec<Step> {
     let s = secs as f32;
     let step = |label, secs, moves| Step { label, secs, moves };
     match tile {
-        Tile::Stretch => vec![step("Reach up · 1/3", s, Move::ReachUp), step("Lean left · 2/3", s, Move::Left), step("Lean right · 3/3", s, Move::Right), step("Neck roll", s, Move::NeckRoll)],
+        Tile::Stretch => vec![step("Reach up · 1/4", s, Move::ReachUp), step("Lean left · 2/4", s, Move::Left), step("Lean right · 3/4", s, Move::Right), step("Neck roll · 4/4", s, Move::NeckRoll)],
         Tile::Eyes => vec![step("Close your eyes", (s * 0.25).max(2.0), Move::Close), step("Look far away", s, Move::FarAway)],
         Tile::Breathe => {
             let rounds = ((s / (4.0 * BREATH)).round() as usize).max(1);
@@ -52,7 +52,6 @@ pub fn steps(tile: Tile, secs: u32) -> Vec<Step> {
     }
 }
 
-#[cfg(test)]
 pub fn total(steps: &[Step]) -> f32 {
     steps.iter().map(|s| s.secs).sum()
 }

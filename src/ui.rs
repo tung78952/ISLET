@@ -1938,11 +1938,24 @@ fn pic(a: &mut App, name: &'static str, cx: f32, cy: f32, s: f32, tint: u32, alp
 }
 
 /// The top row, the same everywhere; each thing has its own slot, so nothing can overlap.
+/// Where the clock and date start, centred in their slot.
+fn clock_at(a: &mut App, lx: f32) -> (f32, f32, f32) {
+    let (time, date) = (a.clock().time_label(), short_date());
+    let (tw, dw) = (a.gfx.measure(&time, HEAD, 600), a.gfx.measure(&date, SMALL, 400));
+    (lx + (SLOT_CLOCK.0 + SLOT_CLOCK.1) / 2.0 - (tw + 8.0 + dw) / 2.0, tw, dw)
+}
+
+/// The Clear chip, halfway between the Shelf title and what stands left of the clock.
+fn clear_chip(a: &mut App, lx: f32) -> Rc {
+    let title_end = lx + 49.0 + a.gfx.measure("Shelf", HEAD, 600);
+    let clock = clock_at(a, lx).0 - if a.power.is_some_and(|p| p.battery && p.ac) { 13.0 + 7.6 } else { 0.0 };
+    Rc::new((title_end + clock) / 2.0 - 20.0, 10.2, 40.0, 17.6)
+}
+
 fn header(a: &mut App, lx: f32) {
     let time = a.clock().time_label();
     let date = short_date();
-    let (tw, dw) = (a.gfx.measure(&time, HEAD, 600), a.gfx.measure(&date, SMALL, 400));
-    let x = lx + (SLOT_CLOCK.0 + SLOT_CLOCK.1) / 2.0 - (tw + 8.0 + dw) / 2.0;
+    let (x, tw, dw) = clock_at(a, lx);
     a.gfx.ui(&time, Rc::new(x, 8.0, tw + 2.0, 22.0), HEAD, 600, WHITE, 1.0, Align::L);
     a.gfx.ui(&date, Rc::new(x + tw + 8.0, 8.0, dw + 2.0, 22.0), SMALL, 400, 0xA0A0A5, 1.0, Align::L);
     if a.view == View::History {
@@ -3202,7 +3215,7 @@ fn shelf(a: &mut App, lx: f32) {
     let items = a.shelf.items.clone();
     if drag && !items.is_empty() {
         // Nusa keeps the Clear chip next to the title while files are dragged in.
-        let clear = Rc::new(lx + 100.0, 10.2, 40.0, 17.6);
+        let clear = clear_chip(a, lx);
         a.gfx.fill_rrect(clear, 8.8, 0x2A2A2A, 1.0);
         a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);
     }
@@ -3256,7 +3269,7 @@ fn shelf(a: &mut App, lx: f32) {
             a.gfx.alpha = base;
         }
     }
-    let clear = Rc::new(lx + 100.0, 10.2, 40.0, 17.6);
+    let clear = clear_chip(a, lx);
     let h = btn(a, clear, 0.08);
     a.gfx.fill_rrect(clear, 8.8, mix(0x2A2A2A, 0x444444, h), 1.0);
     a.gfx.ui("Clear", clear, 10.0, 600, 0xD6D6D6, 1.0, Align::C);

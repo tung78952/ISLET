@@ -1,7 +1,7 @@
 //! Decides when each reminder is due. Pure logic: the caller feeds it the clock and idle time.
 
 use super::config::{Config, CustomReminder, Kind};
-use chrono::{DateTime, Datelike, Days, Local, NaiveTime, TimeDelta, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, NaiveTime, TimeDelta, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::OnceLock};
 
@@ -51,6 +51,13 @@ pub fn minutes(m: u32) -> TimeDelta {
     static UNIT: OnceLock<i64> = OnceLock::new();
     let unit = *UNIT.get_or_init(|| if std::env::var_os("ISLET_FAST").is_some() { 2 } else { 60 });
     TimeDelta::seconds(m as i64 * unit)
+}
+
+/// Minutes since `bed` if `now` lies between it and the morning, across midnight too.
+pub fn minutes_past(now: NaiveTime, bed: NaiveTime, morning: NaiveTime) -> Option<u32> {
+    let mins = |t: NaiveTime| (t.hour() * 60 + t.minute()) as i32;
+    let since = (mins(now) - mins(bed)).rem_euclid(1440);
+    (since < (mins(morning) - mins(bed)).rem_euclid(1440)).then_some(since as u32)
 }
 
 pub fn parse_hm(text: &str) -> Option<NaiveTime> {
@@ -451,6 +458,16 @@ mod tests {
 
     fn due(s: &mut Scheduler, cfg: &Config, now: DateTime<Local>, fired: &[String]) -> Option<Due> {
         s.tick(cfg, now, 0, fired)
+    }
+
+    #[test]
+    fn past_bedtime_runs_over_midnight_and_ends_in_the_morning() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let (bed, morning) = (t(23, 0), t(7, 0));
+        assert_eq!(minutes_past(t(22, 59), bed, morning), None);
+        assert_eq!(minutes_past(t(23, 0), bed, morning), Some(0));
+        assert_eq!(minutes_past(t(0, 38), bed, morning), Some(98));
+        assert_eq!(minutes_past(t(8, 0), bed, morning), None);
     }
 
     #[test]

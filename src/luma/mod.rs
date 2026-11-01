@@ -396,6 +396,12 @@ impl Brain {
         (self.habits.day_start(), bed)
     }
 
+    /// Minutes since bedtime, while it has gone by and the next day has not started.
+    pub fn past_bedtime(&self, now: DateTime<Local>) -> Option<u32> {
+        let bed = scheduler::parse_hm(&self.cfg.reminders.sleep.time)?;
+        scheduler::minutes_past(now.time(), bed, self.habits.day_start())
+    }
+
     // ------------------------------------------------------------ focus
 
     fn add_focus(&mut self, minutes: u32, now: DateTime<Local>) {
