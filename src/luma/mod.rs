@@ -345,6 +345,13 @@ impl Brain {
         }
     }
 
+    pub fn rename_date(&mut self, id: &str, title: &str) {
+        if let Some(d) = self.cfg.dates.iter_mut().find(|d| d.id == id) {
+            d.title = title.to_string();
+            self.save_config();
+        }
+    }
+
     pub fn delete_date(&mut self, id: &str) {
         self.cfg.dates.retain(|d| d.id != id);
         self.save_config();

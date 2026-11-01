@@ -93,6 +93,8 @@ pub struct Settings {
     pub pomo_rounds: u32,
     /// How often the lyric bar grows for the eyes: 0 never, 1 every 1-2 min, 2 every 3-5 min.
     pub jam_mode: u8,
+    /// Focus page: work and break in rounds, rather than one plain stretch.
+    pub pomodoro: bool,
 }
 
 impl Settings {
@@ -106,10 +108,11 @@ impl Settings {
             luma_app_off: num(&m, "luma_app_off", 0u8) == 1,
             lyrics: num(&m, "lyrics", 1u8) == 1,
             show_text: num(&m, "show_text", 0u8) == 1,
-            pomo_work: num(&m, "pomo_work", 25u32).clamp(5, 90),
+            pomo_work: num(&m, "pomo_work", 25u32).clamp(5, 120),
             pomo_rest: num(&m, "pomo_rest", 5u32).clamp(1, 30),
             pomo_rounds: num(&m, "pomo_rounds", 4u32).clamp(1, 8),
             jam_mode: num(&m, "jam_mode", 1u8).min(2),
+            pomodoro: num(&m, "pomodoro", 0u8) == 1,
         }
     }
     pub fn save(&self) {
@@ -127,6 +130,7 @@ impl Settings {
                 ("pomo_rest", self.pomo_rest.to_string()),
                 ("pomo_rounds", self.pomo_rounds.to_string()),
                 ("jam_mode", self.jam_mode.to_string()),
+                ("pomodoro", (self.pomodoro as u8).to_string()),
             ],
         );
     }

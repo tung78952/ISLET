@@ -404,6 +404,11 @@ fn load_art(p: &GlobalSystemMediaTransportControlsSessionMediaProperties) -> win
 
 /// Decodes encoded image bytes into a center-cropped square premultiplied BGRA bitmap.
 pub fn decode_art(buf: &[u8]) -> windows::core::Result<Arc<Art>> {
+    decode_square(buf, 160)
+}
+
+/// A square image at exactly `size` pixels, so what is drawn 1:1 stays sharp.
+pub fn decode_square(buf: &[u8], size: u32) -> windows::core::Result<Arc<Art>> {
     unsafe {
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let ist = SHCreateMemStream(Some(buf)).ok_or_else(windows::core::Error::empty)?;
@@ -416,7 +421,8 @@ pub fn decode_art(buf: &[u8]) -> windows::core::Result<Arc<Art>> {
         let clip = wic.CreateBitmapClipper()?;
         let rect = WICRect { X: ((w - side) / 2) as i32, Y: ((h - side) / 2) as i32, Width: side as i32, Height: side as i32 };
         clip.Initialize(&frame, &rect)?;
-        const OUT: u32 = 160;
+        #[allow(non_snake_case)]
+        let OUT = size;
         let scaler = wic.CreateBitmapScaler()?;
         scaler.Initialize(&clip, OUT, OUT, WICBitmapInterpolationModeFant)?;
         let conv = wic.CreateFormatConverter()?;

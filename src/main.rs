@@ -77,6 +77,7 @@ const T_CAPS: usize = 11;
 const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
+const UNDO_TIME: Duration = Duration::from_secs(4);
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
@@ -223,6 +224,12 @@ pub struct Toast {
 
 /// Where a to-do lives: a Luma reminder (has a time) or an untimed to-do of Islet's.
 /// One row of the To-do page.
+enum Deleted {
+    Reminder(luma::config::CustomReminder),
+    Date(luma::config::ImportantDate),
+    Note(usize, model::Task),
+}
+
 pub struct Form {
     /// The reminder being edited; None for a new one.
     pub id: Option<String>,
@@ -500,7 +507,7 @@ pub struct App {
     pub lyrics_on: bool,
     pub page: Page,
     /// The rolling pickers on show, by what they set.
-    pub wheels: [wheel::Wheel; 7],
+    pub wheels: [wheel::Wheel; 8],
     /// What the open notch shows, what it is leaving, and how far along that is (1 → 0).
     pub view: ui::View,
     pub view_from: ui::View,
@@ -509,12 +516,10 @@ pub struct App {
     /// The colour that comes up when something opens, how much of it, and one brief wash.
     pub glow: u32,
     pub glow_mix: Spring,
-    pub wash: Spring,
+    pub wash: f32,
     /// Lists glide to their row; the ring and the litres count up; the date comes on hover.
     pub list_pos: Spring,
     pub ring: Spring,
-    pub date_mix: Spring,
-    date_near: bool,
     /// The month on the calendar, and its slide.
     pub month: (i32, u32),
     pub month_mix: Spring,
@@ -526,8 +531,15 @@ pub struct App {
     /// Which side of the goal screen is being set: 0 the cup, 1 the goal.
     pub pick_mix: Spring,
     pick_goal: bool,
-    /// The reminder whose trash was pressed once.
-    pub trash_armed: Option<String>,
+    /// What was just deleted, until the time to take it back runs out.
+    undo: Option<(Deleted, Instant)>,
+    /// The row that just left its list, sliding away (1 → 0), with what it said.
+    pub gone: Option<(usize, String, String)>,
+    pub gone_mix: Spring,
+    /// When a drink started the wash, and how high it was then.
+    wash_from: Option<(Instant, f32)>,
+    /// The calendar shows days, months or years.
+    pub cal: ui::Cal,
     pub switches: std::collections::HashMap<(i32, i32), (Spring, bool)>,
     /// Glides between the steps of the reminder form.
     pub form_anim: Spring,
@@ -552,6 +564,7 @@ pub struct App {
     jam_show: bool,
     /// The props, plain and in the character's colour.
     props: std::collections::HashMap<(&'static str, bool), Option<ID2D1Bitmap>>,
+    pics: std::collections::HashMap<(&'static str, u32, u32), Option<ID2D1Bitmap>>,
     /// How far the equalizer bars are up (0..1), and when music was last heard of.
     pub eq_mix: Spring,
     last_playing: Instant,
@@ -762,18 +775,16 @@ impl App {
             springs_moving: false,
             lyrics_on: false,
             page: Page::Today,
-            wheels: [wheel::Wheel::new(model::CUPS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(model::GOALS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 22).tall(ui::CLOCK_ROW), wheel::Wheel::new(4, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(ui::FOCUS_STEPS, 4).tall(ui::CLOCK_ROW)],
+            wheels: [wheel::Wheel::new(model::CUPS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(model::GOALS.len(), 2).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 22).tall(ui::CLOCK_ROW), wheel::Wheel::new(4, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(24, 8).tall(ui::CLOCK_ROW), wheel::Wheel::new(60, 0).tall(ui::CLOCK_ROW), wheel::Wheel::new(ui::FOCUS_STEPS, 4).tall(ui::CLOCK_ROW), wheel::Wheel::new(8, 3).tall(ui::CLOCK_ROW)],
             view: ui::View::Page,
             view_from: ui::View::Page,
             view_dir: 1.0,
             view_mix: Spring::new(0.0, 260.0, 26.0),
             glow: 0,
             glow_mix: Spring::new(0.0, 120.0, 20.0),
-            wash: Spring::new(0.0, 60.0, 14.0),
+            wash: 0.0,
             list_pos: Spring::new(0.0, 300.0, 30.0),
             ring: Spring::new(0.0, 120.0, 20.0),
-            date_mix: Spring::new(0.0, 200.0, 26.0),
-            date_near: false,
             month: (2026, 1),
             month_mix: Spring::new(0.0, 260.0, 26.0),
             month_dir: 1.0,
@@ -782,7 +793,11 @@ impl App {
             chev_near: false,
             pick_mix: Spring::new(0.0, 170.0, 24.0),
             pick_goal: false,
-            trash_armed: None,
+            undo: None,
+            gone: None,
+            gone_mix: Spring::new(0.0, 220.0, 26.0),
+            wash_from: None,
+            cal: ui::Cal::Days,
             switches: std::collections::HashMap::new(),
             form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
@@ -801,6 +816,7 @@ impl App {
             jam_x: Spring::new(0.0, 170.0, 21.0),
             jam_show: false,
             props: std::collections::HashMap::new(),
+            pics: std::collections::HashMap::new(),
             eq_mix: Spring::new(0.0, 170.0, 24.0),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
@@ -1163,6 +1179,25 @@ impl App {
         Some((kind, t.born.elapsed().as_secs_f32()))
     }
 
+    /// One of the icons at exactly `px` pixels, multiplied by `tint` (white leaves it as drawn).
+    pub fn pic(&mut self, name: &'static str, px: u32, tint: u32) -> Option<ID2D1Bitmap> {
+        if let Some(b) = self.pics.get(&(name, px, tint)) {
+            return b.clone();
+        }
+        let bmp = ui::prop_bytes(name).and_then(|bytes| media::decode_square(bytes, px).ok()).and_then(|art| {
+            let mut out = art.px.clone();
+            let (r, g, b) = (tint >> 16 & 255, tint >> 8 & 255, tint & 255);
+            for p in out.chunks_exact_mut(4) {
+                p[0] = (p[0] as u32 * b / 255) as u8;
+                p[1] = (p[1] as u32 * g / 255) as u8;
+                p[2] = (p[2] as u32 * r / 255) as u8;
+            }
+            self.gfx.bitmap(art.w, art.h, &out)
+        });
+        self.pics.insert((name, px, tint), bmp.clone());
+        bmp
+    }
+
     /// A prop's picture, `tinted` for the part in the character's colour.
     pub fn prop(&mut self, name: &'static str, tinted: bool) -> Option<ID2D1Bitmap> {
         if let Some(b) = self.props.get(&(name, tinted)) {
@@ -1443,11 +1478,19 @@ impl App {
             moving |= self.pick_mix.step(if self.pick_goal { 1.0 } else { 0.0 }, sub);
             moving |= self.view_mix.step(0.0, sub);
             moving |= self.month_mix.step(0.0, sub);
-            moving |= self.wash.step(0.0, sub);
-            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar);
+            moving |= self.gone_mix.step(0.0, sub);
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form);
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
-            moving |= self.date_mix.step(if self.date_near { 1.0 } else { 0.0 }, sub);
+            if let Some((from, level)) = self.wash_from {
+                let t = from.elapsed().as_secs_f32();
+                self.wash = ui::wash_curve(t, level);
+                moving |= t < ui::WASH_SECS;
+                if t >= ui::WASH_SECS {
+                    self.wash_from = None;
+                    self.wash = 0.0;
+                }
+            }
             let top = if self.view == ui::View::History { self.history_top } else { self.reminder_top };
             moving |= self.list_pos.step(top as f32, sub);
             let (taken, goal) = (self.brain.stats.water, self.brain.cfg.water_goal.max(1));
@@ -1672,13 +1715,13 @@ impl App {
         if self.expanded() && self.view == ui::View::History {
             let last = self.history.len().saturating_sub(2);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
-            self.render();
+            self.kick();
             return;
         }
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
-            let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.brain.cfg.custom.len() + (!self.todo.tasks.is_empty()) as usize };
+            let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.reminders().len() + (!self.todo.tasks.is_empty()) as usize };
             self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
-            self.render();
+            self.kick();
             return;
         }
         if !(self.expanded() && self.page == Page::Music && self.lyr_mix.x > 0.5) {
@@ -2361,6 +2404,7 @@ impl App {
     /// The user's own reminders, by time of day.
     pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
         let mut v = self.brain.cfg.custom.clone();
+        v.retain(|r| !matches!(&self.undo, Some((Deleted::Reminder(d), _)) if d.id == r.id));
         v.sort_by(|a, b| a.time.cmp(&b.time));
         v
     }
@@ -2509,7 +2553,9 @@ impl App {
 
     /// A name for an important day.
     fn open_date(&mut self, date: String) {
-        self.form = Some(Form { id: None, title: String::new(), days: [false; 7], step: 0, date: Some(date) });
+        let known = self.brain.cfg.dates.iter().find(|d| d.date == date).cloned();
+        let (id, title) = known.map_or((None, String::new()), |d| (Some(d.id), d.title));
+        self.form = Some(Form { id, title, days: [false; 7], step: 0, date: Some(date) });
         self.show_form();
     }
 
@@ -2529,7 +2575,10 @@ impl App {
             let title = f.title.trim();
             self.go_view(if f.date.is_some() { ui::View::Calendar } else { ui::View::Page });
             if let Some(date) = f.date.as_ref().filter(|_| save && !title.is_empty()) {
-                self.brain.add_date(title, date, chrono::Local::now());
+                match &f.id {
+                    Some(id) => self.brain.rename_date(id, title),
+                    None => self.brain.add_date(title, date, chrono::Local::now()),
+                }
             } else if save && !title.is_empty() && f.date.is_none() {
                 let (h, m) = (self.wheels[ui::WheelId::FormHour as usize].index(), self.wheels[ui::WheelId::FormMinute as usize].index());
                 let days = (0..7u8).filter(|d| f.days[*d as usize]).collect();
@@ -2548,6 +2597,34 @@ impl App {
         if let Some(tx) = &self.media_tx {
             let _ = tx.send(c);
         }
+    }
+
+    /// Pointed at or clicked open: the song if there is one, else the day. A file being dragged
+    /// goes to the shelf by its own path.
+    fn open_by_hand(&mut self) {
+        self.page = if self.has_media() { Page::Music } else { Page::Today };
+        self.slide.x = 0.0;
+        self.set_mode(Mode::Expanded);
+    }
+
+    /// Takes something out of sight; it only really goes when the time to undo is over.
+    fn delete(&mut self, what: Deleted) {
+        self.commit_delete();
+        self.undo = Some((what, Instant::now() + UNDO_TIME));
+        self.kick();
+    }
+
+    fn commit_delete(&mut self) {
+        match self.undo.take() {
+            Some((Deleted::Reminder(r), _)) => self.brain.delete_task(&r.id),
+            Some((Deleted::Date(d), _)) => self.brain.delete_date(&d.id),
+            _ => {}
+        }
+    }
+
+    /// Whether "Deleted · Undo" is up.
+    pub fn undoing(&self) -> bool {
+        self.undo.is_some()
     }
 
     /// Everything the open notch moves between goes through here, so nothing just pops.
@@ -2569,11 +2646,13 @@ impl App {
         match v {
             V::Care(t) => self.glow = t.colour(),
             V::Calendar => self.glow = ui::EVENING,
+            V::Form => self.glow = if self.form.as_ref().is_some_and(|f| f.date.is_some()) { ui::EVENING } else { ui::CALM },
             _ => {}
         }
         self.list_pos.x = 0.0;
         self.history_top = 0;
         if v == V::Calendar && self.view_from != V::Form {
+            self.cal = ui::Cal::Days;
             use chrono::Datelike;
             let d = chrono::Local::now().date_naive();
             self.month = (d.year(), d.month());
@@ -2583,7 +2662,6 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
-        let armed = self.trash_armed.take();
         match a {
             Act::PagePrev => self.go_page(self.page.prev()),
             Act::PageNext => self.go_page(self.page.next()),
@@ -2620,9 +2698,11 @@ impl App {
                 let now = chrono::Local::now();
                 if self.brain.focus.is_some() {
                     self.brain.toggle_pause(now);
-                } else {
+                } else if self.settings.pomodoro {
                     let s = &self.settings;
                     self.brain.start_pomodoro(s.pomo_work, s.pomo_rest, s.pomo_rounds, "", now);
+                } else {
+                    self.brain.start_focus(self.settings.pomo_work, "", now);
                 }
             }
             Act::PomoReset => {
@@ -2720,20 +2800,50 @@ impl App {
                 self.wheels[ui::WheelId::FocusMinutes as usize].set(ui::focus_step(work));
             }
             Act::Month(by) => {
-                let months = self.month.0 * 12 + self.month.1 as i32 - 1 + by;
-                self.month = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+                match self.cal {
+                    ui::Cal::Days => {
+                        let months = self.month.0 * 12 + self.month.1 as i32 - 1 + by;
+                        self.month = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+                    }
+                    ui::Cal::Months => self.month.0 += by,
+                    ui::Cal::Years => self.month.0 += 10 * by,
+                }
                 self.month_dir = by as f32;
                 self.month_mix.x = 1.0;
                 self.month_mix.v = 0.0;
             }
             Act::Day(y, m, d) => self.open_date(format!("{y:04}-{m:02}-{d:02}")),
             Act::DateDelete(i) => {
-                if let Some((id, ..)) = self.next_dates().into_iter().nth(i) {
-                    if armed.as_deref() == Some(id.as_str()) {
-                        self.brain.delete_date(&id);
-                    } else {
-                        self.trash_armed = Some(id);
-                    }
+                let id = self.all_dates().into_iter().nth(i).map(|d| d.0);
+                if let Some(d) = id.and_then(|id| self.brain.cfg.dates.iter().find(|d| d.id == id).cloned()) {
+                    self.delete(Deleted::Date(d));
+                }
+            }
+            Act::CalMode(mode) => self.cal = mode,
+            Act::PickMonth(m) => {
+                self.month.1 = m;
+                self.cal = ui::Cal::Days;
+            }
+            Act::PickYear(y) => {
+                self.month.0 = y;
+                self.cal = ui::Cal::Months;
+            }
+            Act::FocusMode(on) => {
+                self.settings.pomodoro = on;
+                if self.demo.is_none() {
+                    self.settings.save();
+                }
+            }
+            Act::PomoPlan(work, rest) => {
+                self.set_focus_minutes(work);
+                self.settings.pomo_rest = rest;
+                if self.demo.is_none() {
+                    self.settings.save();
+                }
+            }
+            Act::FormPreset(p) => {
+                if let Some(f) = self.form.as_mut() {
+                    f.days = ui::PRESETS[p as usize];
                 }
             }
             Act::DoNow(tile) => {
@@ -2755,14 +2865,23 @@ impl App {
             }
             Act::ReminderDelete(i) => {
                 if let Some(r) = self.reminders().into_iter().nth(i) {
-                    if armed.as_deref() == Some(r.id.as_str()) {
-                        self.brain.delete_task(&r.id);
-                        let rows = self.reminders().len() + (!self.todo.tasks.is_empty()) as usize;
-                        self.reminder_top = self.reminder_top.min(rows.saturating_sub(2));
-                    } else {
-                        self.trash_armed = Some(r.id);
+                    self.gone = Some((i, r.title.clone(), r.time.clone()));
+                    self.gone_mix.x = 1.0;
+                    self.gone_mix.v = 0.0;
+                    self.delete(Deleted::Reminder(r));
+                    let rows = self.reminders().len() + (!self.todo.tasks.is_empty()) as usize;
+                    self.reminder_top = self.reminder_top.min(rows.saturating_sub(2));
+                }
+            }
+            Act::Undo => {
+                if let Some((what, _)) = self.undo.take() {
+                    if let Deleted::Note(i, t) = what {
+                        self.todo.tasks.insert(i.min(self.todo.tasks.len()), t);
+                        self.todo.save();
                     }
                 }
+                self.gone = None;
+                self.kick();
             }
             Act::WaterReset => self.brain.reset_water(),
             Act::OldNotes(on) => {
@@ -2771,8 +2890,9 @@ impl App {
             }
             Act::OldDelete(i) => {
                 if i < self.todo.tasks.len() {
-                    self.todo.tasks.remove(i);
+                    let t = self.todo.tasks.remove(i);
                     self.todo.save();
+                    self.delete(Deleted::Note(i, t));
                 }
                 if self.todo.tasks.is_empty() {
                     self.go_view(ui::View::Page);
@@ -2802,10 +2922,15 @@ impl App {
                 }
             }
             Act::FormDelete => {
-                if let Some(id) = self.form.as_ref().and_then(|f| f.id.clone()) {
-                    self.brain.delete_task(&id);
-                }
+                let (id, date) = self.form.as_ref().map_or((None, false), |f| (f.id.clone(), f.date.is_some()));
+                let what = id.and_then(|id| match date {
+                    true => self.brain.cfg.dates.iter().find(|d| d.id == id).cloned().map(Deleted::Date),
+                    false => self.brain.cfg.custom.iter().find(|r| r.id == id).cloned().map(Deleted::Reminder),
+                });
                 self.close_form(false);
+                if let Some(what) = what {
+                    self.delete(what);
+                }
             }
             Act::ShelfOpen(i) => {
                 if let Some(p) = self.shelf.items.get(i) {
@@ -2864,6 +2989,10 @@ impl App {
             if let Some(t) = self.toast.as_mut().filter(|t| matches!(t.kind, ToastKind::Notice | ToastKind::Message)) {
                 t.until = t.until.max(Instant::now() + Duration::from_secs(2));
             }
+        }
+        if self.undo.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
+            self.commit_delete();
+            self.kick();
         }
         // Waiting device cards play once the current card is done (or the widgets closed).
         let device_done = match &self.toast {
@@ -2969,10 +3098,6 @@ impl App {
             self.kick();
         }
         let goal = x > cx;
-        if self.expanded() && (y < 36.0) != self.date_near {
-            self.date_near = y < 36.0;
-            self.kick();
-        }
         if self.view == ui::View::Goal && goal != self.pick_goal {
             self.pick_goal = goal;
             self.kick();
@@ -3071,6 +3196,7 @@ impl App {
         self.wheels[ui::WheelId::BedHour as usize].set(hour);
         self.wheels[ui::WheelId::BedMinute as usize].set(minute);
         self.wheels[ui::WheelId::FocusMinutes as usize].set(ui::focus_step(self.settings.pomo_work));
+        self.wheels[ui::WheelId::Rounds as usize].set(self.settings.pomo_rounds as usize - 1);
     }
 
     fn change_setting(&mut self, key: ui::SetKey) {
@@ -3153,27 +3279,37 @@ impl App {
     /// A drink: the ring jumps and the colour of water rises and falls.
     fn drink_splash(&mut self) {
         self.water_pulse.v += 7.5;
-        self.wash.x = 1.0;
-        self.wash.v = 0.0;
+        // Pressing again carries on from where the colour is, so it never jumps.
+        self.wash_from = Some((Instant::now(), self.wash));
         self.kick();
     }
 
-    /// Days still to come, soonest first: (id, title, days from today).
-    pub fn next_dates(&self) -> Vec<(String, String, i64)> {
+    /// Every important day: (id, title, days from today), what is to come first, soonest first,
+    /// then what has passed, latest first.
+    pub fn all_dates(&self) -> Vec<(String, String, i64)> {
         let today = chrono::Local::now().date_naive();
-        let mut v: Vec<_> = self.brain.cfg.dates.iter().filter_map(|d| {
+        let mut v: Vec<_> = self.brain.cfg.dates.iter().filter(|d| !matches!(&self.undo, Some((Deleted::Date(u), _)) if u.id == d.id)).filter_map(|d| {
             let on = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()?;
-            let left = (on - today).num_days();
-            (left >= 0).then(|| (d.id.clone(), d.title.clone(), left))
+            Some((d.id.clone(), d.title.clone(), (on - today).num_days()))
         }).collect();
-        v.sort_by_key(|d| d.2);
+        v.sort_by_key(|d| if d.2 >= 0 { d.2 } else { i64::MAX + d.2 });
         v
     }
 
     /// A wheel came to rest: what it shows is now the setting.
     fn apply_wheels(&mut self) {
         if self.page == Page::Pomo && self.brain.focus.is_none() {
-            self.set_focus_minutes(ui::focus_minutes(self.wheels[ui::WheelId::FocusMinutes as usize].index()));
+            if self.settings.pomodoro {
+                let rounds = self.wheels[ui::WheelId::Rounds as usize].index() as u32 + 1;
+                if self.settings.pomo_rounds != rounds {
+                    self.settings.pomo_rounds = rounds;
+                    if self.demo.is_none() {
+                        self.settings.save();
+                    }
+                }
+            } else {
+                self.set_focus_minutes(ui::focus_minutes(self.wheels[ui::WheelId::FocusMinutes as usize].index()));
+            }
         }
         if !matches!(self.view, ui::View::Goal | ui::View::Bed) {
             return;
@@ -3257,7 +3393,7 @@ impl App {
                 }
                 return;
             }
-            self.set_mode(Mode::Expanded);
+            self.open_by_hand();
             self.render();
             return;
         }
@@ -3428,7 +3564,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let (ax, ay) = a.hover_anchor;
                     let moved = ((a.mouse.0 - ax).powi(2) + (a.mouse.1 - ay).powi(2)).sqrt();
                     if moved < 6.0 {
-                        a.set_mode(Mode::Expanded);
+                        a.open_by_hand();
                     } else {
                         a.hover_anchor = a.mouse;
                         SetTimer(Some(hwnd), T_HOVER, 90, None);
@@ -3775,6 +3911,14 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if kv.get("focus") == Some(&"1") {
         a.brain.start_pomodoro(25, 5, 4, "", chrono::Local::now());
+        a.focus_mix.x = 1.0;
+    }
+    a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
+    if let Some(mode) = kv.get("cal") {
+        a.cal = if *mode == "years" { ui::Cal::Years } else { ui::Cal::Months };
+    }
+    if kv.get("view").is_some() || kv.get("expanded").is_some() {
+        a.sync_wheels();
     }
     if let Some(step) = kv.get("remform").and_then(|v| v.parse::<u8>().ok()) {
         a.open_form(None);
