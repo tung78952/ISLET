@@ -486,7 +486,7 @@ fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: Str
         // A service that is down says nothing about the song, so keep asking while it plays.
         let mut attempt = 0;
         loop {
-            let lines = fetch_any(&title, &artist, dur);
+            let lines = fetch_best(&title, &artist, dur);
             let mut l = lyrics.lock().unwrap();
             if l.key != key {
                 return;
@@ -582,6 +582,79 @@ fn fetch_any(title: &str, artist: &str, dur: f64) -> Result<Option<Vec<(f64, Str
         }
     }
     fetch_query(&format!("{t} {a}"), dur)
+}
+
+/// LRCLIB first; lines that run with the song from elsewhere beat plain text from it. Those other
+/// services are unofficial and may go at any time, so their failures never count.
+fn fetch_best(title: &str, artist: &str, dur: f64) -> Result<Option<Vec<(f64, String)>>, Unreachable> {
+    let first = fetch_any(title, artist, dur);
+    let timed = |v: &Vec<(f64, String)>| v.first().is_some_and(|l| l.0 >= 0.0);
+    if matches!(&first, Ok(Some(v)) if timed(v)) {
+        return first;
+    }
+    match fetch_netease(title, artist, dur) {
+        Some(v) => Ok(Some(v)),
+        None => first,
+    }
+}
+
+/// Letters and digits only, for comparing names.
+fn plain(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The song in a NetEase search result that really is this one: same name, and the same length or
+/// artist. A wrong song's words are worse than none.
+fn pick_song(songs: &[serde_json::Value], title: &str, artist: &str, dur: f64) -> Option<u64> {
+    let (t, a) = (plain(title), plain(artist));
+    if t.is_empty() {
+        return None;
+    }
+    let of = |s: &serde_json::Value| -> Option<(u64, f64)> {
+        let name = plain(s.get("name")?.as_str()?);
+        if name != t && !name.starts_with(&t) && !t.starts_with(&name) {
+            return None;
+        }
+        let long = s.get("dt").and_then(|d| d.as_f64()).unwrap_or(0.0) / 1000.0;
+        let close = dur > 0.0 && long > 0.0 && (long - dur).abs() < 4.0;
+        let singer = !a.is_empty() && s.get("ar")?.as_array()?.iter().filter_map(|x| x.get("name")?.as_str()).any(|n| { let n = plain(n); !n.is_empty() && (a.contains(&n) || n.contains(&a)) });
+        let id = s.get("id")?.as_u64()?;
+        (close || singer).then_some((id, (long - dur).abs()))
+    };
+    songs.iter().filter_map(of).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)
+}
+
+/// Credit lines NetEase keeps among the timed ones.
+fn drop_credits(lines: Vec<(f64, String)>) -> Vec<(f64, String)> {
+    const CREDITS: [&str; 7] = ["作词", "作曲", "编曲", "制作人", "混音", "母带", "监制"];
+    lines.into_iter().filter(|l| !CREDITS.iter().any(|c| l.1.contains(c))).collect()
+}
+
+fn fetch_netease(title: &str, artist: &str, dur: f64) -> Option<Vec<(f64, String)>> {
+    let t = strip_feat(&clean_title(title));
+    let (t, a) = match t.split_once(" - ").filter(|_| artist.trim().is_empty()) {
+        Some((left, right)) => (strip_feat(right.trim()), left.trim().to_string()),
+        None => (t.clone(), clean_artist(artist)),
+    };
+    let found = get_text(&format!("https://music.163.com/api/cloudsearch/pc?s={}&type=1&limit=10", enc(&format!("{t} {a}"))))?;
+    let found: serde_json::Value = serde_json::from_str(&found).ok()?;
+    let id = pick_song(found.get("result")?.get("songs")?.as_array()?, &t, &a, dur)?;
+    // The AMLL database (CC0) is hand-made where it has the song.
+    if let Some(v) = get_text(&format!("https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/ncm-lyrics/{id}.lrc")).map(|lrc| parse_lrc(&lrc)).filter(|v| !v.is_empty()) {
+        return Some(v);
+    }
+    let body = get_text(&format!("https://music.163.com/api/song/lyric?id={id}&lv=1"))?;
+    let body: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(drop_credits(parse_lrc(body.get("lrc")?.get("lyric")?.as_str()?))).filter(|v| v.len() > 3)
+}
+
+fn get_text(url: &str) -> Option<String> {
+    let client = HttpClient::new().ok()?;
+    let headers = client.DefaultRequestHeaders().ok()?;
+    let _ = headers.UserAgent().and_then(|ua| ua.TryParseAdd(&HSTRING::from("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")));
+    let _ = headers.TryAppendWithoutValidation(&HSTRING::from("Referer"), &HSTRING::from("https://music.163.com/"));
+    let uri = Uri::CreateUri(&HSTRING::from(url)).ok()?;
+    client.GetStringAsync(&uri).and_then(|op| op.join()).ok().map(|s| s.to_string())
 }
 
 fn enc(s: &str) -> String {
@@ -683,6 +756,16 @@ mod tests {
 
     #[test]
     fn an_empty_search_means_no_lyrics_not_a_failure() {
+        let songs = serde_json::json!([
+            { "id": 1, "name": "Shape of You", "dt": 100000, "ar": [{ "name": "Someone Else" }] },
+            { "id": 2, "name": "Other Song", "dt": 233000, "ar": [{ "name": "Ed Sheeran" }] },
+            { "id": 3, "name": "Shape of You", "dt": 233000, "ar": [{ "name": "Ed Sheeran" }] }
+        ]);
+        let songs = songs.as_array().unwrap();
+        assert_eq!(pick_song(songs, "Shape of You", "Ed Sheeran", 234.0), Some(3));
+        assert_eq!(pick_song(songs, "Chúng Ta", "Ed Sheeran", 234.0), None, "a different song's words are worse than none");
+        assert_eq!(pick_song(songs, "Shape of You", "", 300.0), None, "same name, nothing else agrees");
+        assert_eq!(drop_credits(vec![(0.0, "作词 : A".to_string()), (1.0, "Hello".to_string())]).len(), 1);
         assert_eq!(best_lyrics(&[], 200.0, false), None);
         let held = Lyrics { status: LyrStatus::Ready, lines: vec![(0.0, "Hello".to_string())], held: true, ..Default::default() };
         assert_eq!(held.line_at(1.0), None, "a clip over the song shows none of its words");

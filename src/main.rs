@@ -3934,7 +3934,7 @@ impl App {
             4 => {
                 MessageBoxW(
                     Some(self.hwnd),
-                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics provided by LRCLIB (lrclib.net)."),
+                    w!("Islet 0.2.0\nA living notch for Windows.\n\nMusic, lyrics, focus timer, water reminder, to-do and file shelf.\nLyrics from LRCLIB (lrclib.net), NetEase and AMLL TTML DB."),
                     w!("About Islet"),
                     MB_OK | MB_ICONINFORMATION,
                 );
