@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, BSTR, VARIANT};
+use windows::core::{w, BSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Descendants, UIA_AutomationIdPropertyId};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindowVisible, ShowWindow, SW_HIDE};
 
@@ -50,18 +51,22 @@ impl Captions {
                 if window.is_none() {
                     block = None;
                     let mut c = child.lock().unwrap();
-                    if c.is_none() {
+                    if c.as_mut().map_or(true, |k| !matches!(k.try_wait(), Ok(None))) {
                         *c = Command::new("LiveCaptions.exe").spawn().ok();
                     }
                     continue;
                 }
                 let window = window.unwrap_or(HWND::default());
+                // Its text can only be found while the window shows.
+                if block.is_none() {
+                    block = find_block(&uia, window);
+                    if block.is_none() {
+                        continue;
+                    }
+                }
                 // The user's own window stays as they left it.
                 if child.lock().unwrap().is_some() && IsWindowVisible(window).as_bool() {
                     let _ = ShowWindow(window, SW_HIDE);
-                }
-                if block.is_none() {
-                    block = find_block(&uia, window);
                 }
                 let read = block.as_ref().and_then(|b| b.CurrentName().ok());
                 match read {
@@ -97,7 +102,10 @@ fn close(child: &Mutex<Option<Child>>) {
 
 unsafe fn find_block(uia: &IUIAutomation, window: HWND) -> Option<IUIAutomationElement> {
     let root = uia.ElementFromHandle(window).ok()?;
-    let id = VARIANT::from(BSTR::from("CaptionsTextBlock"));
+    let mut id = VARIANT::default();
+    let inner = &mut *id.Anonymous.Anonymous;
+    inner.vt = VT_BSTR;
+    inner.Anonymous.bstrVal = std::mem::ManuallyDrop::new(BSTR::from("CaptionsTextBlock"));
     let only = uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &id).ok()?;
     root.FindFirst(TreeScope_Descendants, &only).ok()
 }
@@ -115,7 +123,33 @@ pub fn tail(text: &str, wide: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::tail;
+    use super::{tail, Captions};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// Starts Live Captions and speaks out loud, so only by hand: `cargo test -- --ignored heard`.
+    #[test]
+    #[ignore]
+    fn heard_through_the_real_live_captions() {
+        let caps = Captions::default();
+        caps.spawn();
+        caps.want(true);
+        std::thread::sleep(Duration::from_secs(5));
+        let say = "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Volume = 60; $s.Speak('Hello, this is a short test of the live captions in the notch. The quick brown fox jumps over the lazy dog.')";
+        let mut voice = Command::new("powershell").args(["-NoProfile", "-Command", say]).spawn().unwrap();
+        let start = Instant::now();
+        let mut heard = None;
+        while start.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(300));
+            if let Some(line) = caps.line() {
+                println!("{:.1}s {line}", start.elapsed().as_secs_f32());
+                heard = Some(line);
+            }
+        }
+        let _ = voice.wait();
+        caps.stop();
+        assert!(heard.is_some(), "nothing was read from the captions window");
+    }
 
     #[test]
     fn the_end_of_what_is_said_is_kept_at_a_word() {
