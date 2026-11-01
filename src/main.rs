@@ -91,7 +91,7 @@ pub const WIN_H: f32 = 300.0;
 /// Notch sizes measured from the reference app (layout units).
 pub const COMPACT: [f32; 2] = [150.0, 30.0];
 pub const PEEK: [f32; 2] = [208.0, 52.0];
-pub const EXPANDED: [f32; 2] = [420.0, 124.0];
+pub const EXPANDED: [f32; 2] = [420.0, 140.0];
 pub const LYRICS: [f32; 2] = [522.0, 140.0];
 pub const CALENDAR: [f32; 2] = [420.0, 280.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
@@ -536,6 +536,7 @@ pub struct App {
     /// The answer a card just got (true for done) and when: the eyes react before it leaves.
     pub reaction: Option<(Instant, bool)>,
     reaction_hops: u8,
+    sample_mood: Option<eyes::Look>,
     pub swipe_last: String,
     pub swipe_mix: Spring,
     swipe_until: Instant,
@@ -800,6 +801,7 @@ impl App {
             swiped: None,
             reaction: None,
             reaction_hops: 0,
+            sample_mood: None,
             swipe_last: String::new(),
             swipe_mix: Spring::new(0.0, 260.0, 28.0),
             swipe_until: Instant::now(),
@@ -1251,21 +1253,31 @@ impl App {
         let t = start.elapsed().as_secs_f32();
         // The tour plays every effect in turn until it is stopped.
         let (what, t) = if what == "tour" {
-            match t % 62.0 {
+            match t % 71.0 {
                 c if c < 17.5 => ("eyes".to_string(), c),
                 c if c < 23.0 => ("battery".to_string(), c - 17.5),
-                c if c < 53.0 => ((((c - 23.0) / 6.0) as u8).to_string(), c),
-                c => ((5 + ((c - 53.0) / 3.0) as u8).to_string(), c),
+                c if c < 28.5 => ("bell".to_string(), c - 23.0),
+                c if c < 32.0 => ("volume".to_string(), c - 28.5),
+                c if c < 62.0 => ((((c - 32.0) / 6.0) as u8).to_string(), c - 32.0),
+                c => ((5 + ((c - 62.0) / 3.0) as u8).to_string(), c),
             }
         } else {
             (what, t)
         };
         let (eyes_at, card) = match what.as_str() {
             "eyes" => (Some(t % 17.5), None),
-            "battery" => {
+            "volume" => {
+                if !matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Volume(_))) && t < 0.2 {
+                    self.toast(ToastKind::Volume(false), "Volume", "100%", Some(1.0));
+                    self.bar_bump = Some(Instant::now());
+                    self.vol_stretch.v += 7.0;
+                }
+                return;
+            }
+            "battery" | "bell" => {
                 let now = self.eye_time();
                 if self.eye_feel.battery == false && t % 6.0 < 0.1 {
-                    self.nudging_bell = false;
+                    self.nudging_bell = what == "bell";
                     self.eyes.mind.ask(eyes::Peek::Battery, now);
                 }
                 let sense = eyes::Sense { t: now, x: 0.0, y: 0.0, scale: 1.0, follow: 0.0, lift: 0.0, near: false, around: false, blocked: false, acted: false };
@@ -1312,10 +1324,27 @@ impl App {
             _ => (Look::Closed, 0.0),
         };
         let blink = eyes_at.is_some_and(|e| e < 3.6 && e > 0.8 && e % 1.9 < 0.1);
-        self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
+        // A card's own act drives the eyes; stepping them here too left them half shut.
+        if !matches!(card, Some(0..=4)) {
+            self.eyes.step(eyes::Feel { show: eyes_at.is_some_and(|e| e < 16.7), look, blink, gaze, ..eyes::Feel::ASLEEP }, dt);
+        }
         let now = self.eye_time();
         if self.mini.feed(now, if card == Some(6) && (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) && card == Some(6) {
             self.jam.beat(now);
+        }
+        // A card's moods as the pointer would bring them out, then its answer.
+        let beat = t % 6.0;
+        self.sample_mood = match card {
+            Some(0..=4) if (3.5..4.2).contains(&beat) => Some(eyes::Look::Sad),
+            Some(0..=4) if (4.2..4.8).contains(&beat) => Some(eyes::Look::Happy),
+            _ => None,
+        };
+        if matches!(card, Some(0..=4)) && beat >= 4.8 && self.reaction.is_none() {
+            self.reaction = Some((Instant::now(), true));
+            self.reaction_hops = 0;
+        }
+        if !matches!(card, Some(0..=4)) || beat < 1.0 {
+            self.reaction = None;
         }
         let shown = self.toast.as_ref().and_then(|t| if let ToastKind::Sample(i) = t.kind { Some(i) } else { None });
         if shown != card {
@@ -1386,6 +1415,9 @@ impl App {
     /// way to "Done", and show what they think of the answer before the card leaves.
     fn card_mood(&mut self, f: &eyes::ActFrame) -> (eyes::Look, f32) {
         use eyes::Look;
+        if let Some(look) = self.sample_mood {
+            return (look, 0.0);
+        }
         if let Some((at, done)) = self.reaction {
             let age = at.elapsed().as_secs_f32();
             let hops = (age / 0.42) as u8 + 1;
@@ -1420,8 +1452,9 @@ impl App {
             self.eyes.step(self.eye_feel, dt);
         }
         // Pages set without go_page (startup, demo) are simply there.
-        if self.swipe.is_none() && self.strip_to.round() as usize != self.page.index() {
-            self.strip_to = self.page.index() as f32;
+        let n = Page::ALL.len() as i32;
+        if self.swipe.is_none() && (self.strip_to as i32).rem_euclid(n) as usize != self.page.index() {
+            self.strip_to += ((self.page.index() as i32 - self.strip_to as i32).rem_euclid(n)) as f32;
             self.strip.x = self.strip_to;
             self.strip.v = 0.0;
         }
@@ -2552,7 +2585,10 @@ impl App {
         if p == self.page {
             return;
         }
-        self.strip_to = p.index() as f32;
+        // The short way round.
+        let n = Page::ALL.len() as i32;
+        let ahead = (p.index() as i32 - self.page.index() as i32).rem_euclid(n);
+        self.strip_to += if ahead <= n / 2 { ahead } else { ahead - n } as f32;
         self.page = p;
         self.view = ui::View::Page;
         self.view_mix.x = 0.0;
@@ -2567,16 +2603,13 @@ impl App {
         if !self.expanded() || self.view != ui::View::Page || self.drag_over {
             return;
         }
-        let last = (Page::ALL.len() - 1) as f32;
         let by = delta / SWIPE_PAGE;
         let now = Instant::now();
         let speed = self.swipe.map_or(0.0, |(t, v)| 0.7 * v + 0.3 * by / now.duration_since(t).as_secs_f32().max(0.004));
-        // Past the ends it gives way reluctantly.
-        let at = self.strip.x;
-        self.strip.x = at + if at < 0.0 || at > last { by * 0.3 } else { by };
+        self.strip.x += by;
         self.strip.v = 0.0;
         self.swipe = Some((now, speed));
-        self.set_strip_page(self.strip.x.round().clamp(0.0, last) as usize);
+        self.set_strip_page(self.strip.x.round());
         self.kick();
     }
 
@@ -2588,19 +2621,18 @@ impl App {
             return;
         }
         self.swipe = None;
-        let to = ui::strip_rest(self.strip.x, speed, Page::ALL.len());
-        self.strip_to = to;
-        self.set_strip_page(to as usize);
+        self.set_strip_page(ui::strip_rest(self.strip.x, speed));
         self.kick();
     }
 
-    fn set_strip_page(&mut self, i: usize) {
-        if self.page != Page::ALL[i] {
-            self.page = Page::ALL[i];
+    fn set_strip_page(&mut self, at: f32) {
+        let p = Page::ALL[(at as i32).rem_euclid(Page::ALL.len() as i32) as usize];
+        if self.page != p {
+            self.page = p;
             self.reminder_top = 0;
             self.list_pos.x = 0.0;
         }
-        self.strip_to = i as f32;
+        self.strip_to = at;
     }
 
     fn set_noactivate(&self, on: bool) {

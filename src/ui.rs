@@ -33,8 +33,8 @@ const BODY: f32 = 14.0;
 const SMALL: f32 = 12.0;
 /// A list's two rows and the gap between their middles, right edge of what is in them.
 const LIST_ROWS: usize = 2;
-const LIST_Y: f32 = 54.0;
-const LIST_GAP: f32 = 34.0;
+const LIST_Y: f32 = 60.0;
+const LIST_GAP: f32 = 38.0;
 const LIST_RIGHT: f32 = 380.0;
 const SWITCH: (f32, f32) = (38.0, 22.0);
 /// Fixed places in the header: nothing there can land on anything else.
@@ -58,10 +58,10 @@ pub fn wash_curve(t: f32, from: f32) -> f32 {
 }
 
 /// Where the strip of pages comes to rest once the fingers lift: the nearest page, or the next
-/// one along if it was moving fast enough.
-pub fn strip_rest(at: f32, speed: f32, pages: usize) -> f32 {
+/// one along if it was moving fast enough. It is a ring, so there is no end to stop at.
+pub fn strip_rest(at: f32, speed: f32) -> f32 {
     let lean = if speed.abs() > 1.5 { 0.4 * speed.signum() } else { 0.0 };
-    (at + lean).round().clamp(0.0, (pages - 1) as f32)
+    (at + lean).round()
 }
 
 /// Every day, weekdays and weekends, as the form's quick choices.
@@ -185,10 +185,10 @@ impl Page {
         Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
     }
     pub fn next(self) -> Page {
-        Self::ALL[(self.index() + 1).min(Self::ALL.len() - 1)]
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
     }
     pub fn prev(self) -> Page {
-        Self::ALL[self.index().saturating_sub(1)]
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -1347,7 +1347,7 @@ fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
         let x = cx + side * spread + lean;
         a.gfx.glow_ellipse(x + side * 120.0 * scale, cy, 16.0, 14.0, crate::CHARACTER, 0.14);
         let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, cy + hop + p.1 * scale)).collect();
-        lens(&a.gfx, &outline, 3.4, 1.0);
+        lens(&a.gfx, &outline, 3.0, 1.0);
     }
 }
 
@@ -1384,11 +1384,13 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
         a.gfx.alpha = base;
     }
     let prop = !matches!(kind, K::Stretch | K::Rest);
-    let scale = 0.18 * (1.0 + 0.14 * f.swell);
+    let scale = 0.13 * (1.0 + 0.14 * f.swell);
     // Rest to contact: the near eye's edge ends exactly on the edge of what it hits.
-    let eyes_at = if prop { centre - 196.0 } else { centre - 178.0 };
+    let eyes_at = if prop { centre - 187.0 } else { centre - 130.0 - if kind == K::Rest { 24.0 } else { 0.0 } };
     let reach = 36.0;
+    a.gfx.push_clip(Rc::new(left + 12.0, 0.0, w - 24.0, h));
     act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 33.0 * f.stretch);
+    a.gfx.pop_clip();
     if let Some(age) = a.reaction.filter(|r| r.1).map(|r| r.0.elapsed().as_secs_f32()) {
         // Little hearts of scan lines drift up from the eyes.
         for i in 0..6 {
@@ -1459,6 +1461,13 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
         ToastKind::Sample(i) if i <= 4 => {
             if let Some((act, e)) = a.act_now() {
                 act_card(a, left, w, h, title, value, act, e);
+                let shown = crate::eyes::act(act, e).buttons;
+                if a.reaction.is_none() {
+                    let base = a.gfx.alpha;
+                    a.gfx.alpha = base * shown;
+                    card_marks(a, left, w, h, t, false, &[(Mark::Later, "Later", Act::None), (Mark::Tick(if i == 0 { WATER } else { WHITE }), "Done", Act::None)]);
+                    a.gfx.alpha = base;
+                }
             }
         }
         ToastKind::Sample(i) => {
@@ -1832,7 +1841,7 @@ fn scrollbar(a: &mut App, lx: f32, top: usize, rows: usize) {
     if rows <= LIST_ROWS {
         return;
     }
-    const TRACK: (f32, f32) = (38.0, 66.0);
+    const TRACK: (f32, f32) = (44.0, 76.0);
     let x = lx + 390.0;
     a.gfx.fill_rrect(Rc::new(x, TRACK.0, 3.0, TRACK.1), 1.5, WHITE, 0.1);
     let h = TRACK.1 * LIST_ROWS as f32 / rows as f32;
@@ -1847,13 +1856,10 @@ fn chevrons(a: &mut App, lx: f32) {
         return;
     }
     for (x, left, act) in [(lx + 14.0, true, Act::PagePrev), (lx + 406.0, false, Act::PageNext)] {
-        if (left && a.page.index() == 0) || (!left && a.page.index() == Page::ALL.len() - 1) {
-            continue;
-        }
-        let r = Rc::new(x - 12.0, 50.0, 24.0, 24.0);
+        let r = Rc::new(x - 12.0, 58.0, 24.0, 24.0);
         let h = btn(a, r, 0.18);
-        a.gfx.fill_circle(x, 62.0, 10.0, 10.0, mix(CHEVRON, 0x8A8A8A, h), show);
-        icon::chevron(&a.gfx, x, 62.0, left, 0x000000, show);
+        a.gfx.fill_circle(x, 70.0, 10.0, 10.0, mix(CHEVRON, 0x8A8A8A, h), show);
+        icon::chevron(&a.gfx, x, 70.0, left, 0x000000, show);
         a.gfx.unzoom();
         hit(a, r, act);
     }
@@ -1863,17 +1869,17 @@ fn dots(a: &mut App, lx: f32) {
     let n = Page::ALL.len();
     // The active pill glides between dots: each dot's width and brightness follow its distance
     // from the eased page position.
-    let pos = a.strip.x.clamp(0.0, (n - 1) as f32);
+    let pos = a.strip.x.rem_euclid(n as f32);
     let (aw, dw, gap) = (14.4, 4.0, 4.0);
     let total = aw + dw * (n - 1) as f32 + gap * (n - 1) as f32;
     let mut x = lx + 210.0 - total / 2.0;
     for i in 0..n {
         let d = (i as f32 - pos).abs();
-        let w8 = (1.0 - d).clamp(0.0, 1.0);
+        let w8 = (1.0 - d.min(n as f32 - d)).clamp(0.0, 1.0);
         let wdt = dw + (aw - dw) * w8;
-        let r = Rc::new(x - 2.0, 110.0, wdt + 4.0, 14.0);
+        let r = Rc::new(x - 2.0, 126.0, wdt + 4.0, 14.0);
         let h = btn(a, r, 0.25);
-        a.gfx.fill_rrect(Rc::new(x, 115.2, wdt, 4.0), 2.0, mix(mix(0x5C5C5C, 0x9A9A9A, h.max(0.0)), WHITE, w8), 1.0);
+        a.gfx.fill_rrect(Rc::new(x, 131.2, wdt, 4.0), 2.0, mix(mix(0x5C5C5C, 0x9A9A9A, h.max(0.0)), WHITE, w8), 1.0);
         a.gfx.unzoom();
         hit(a, r, Act::Page(Page::ALL[i]));
         x += wdt + gap;
@@ -1927,22 +1933,22 @@ fn history(a: &mut App, lx: f32) {
     let pos = a.list_pos.x;
     let first = pos.floor().max(0.0) as usize;
     let rows: Vec<_> = a.history.iter().cloned().enumerate().skip(first).take(LIST_ROWS + 1).collect();
-    a.gfx.push_clip(Rc::new(lx, 36.0, 420.0, 76.0));
+    a.gfx.push_clip(Rc::new(lx, 38.0, 420.0, 92.0));
     for (i, n) in rows {
-        let y = 37.0 + (i as f32 - pos) * 37.0;
-        let r = Rc::new(lx + 20.0, y, 362.0, 35.0);
+        let y = 42.0 + (i as f32 - pos) * 42.0;
+        let r = Rc::new(lx + 20.0, y, 362.0, 38.0);
         let h = btn(a, r, 0.01);
         if h > 0.0 {
             a.gfx.fill_rrect(r, 12.0, 0x222222, h.min(1.0));
         }
-        notice_badge(a, &n, lx + 42.0, y + 17.5, 14.0);
+        notice_badge(a, &n, lx + 42.0, y + 19.0, 14.0);
         let tx = lx + 66.0;
         let secs = n.born.elapsed().as_secs();
         let age = if secs < 60 { "now".to_string() } else if secs < 3600 { format!("{} min", secs / 60) } else { format!("{} h", secs / 3600) };
         a.gfx.ui(&age, Rc::new(lx + 316.0, y + 3.0, 62.0, 16.0), 11.0, 400, 0x8E8E93, 1.0, Align::R);
         a.gfx.ui(&n.title, Rc::new(tx, y + 1.0, 240.0, 18.0), 13.0, 600, WHITE, 1.0, Align::L);
         let sub = if n.body.is_empty() { n.source_name() } else { n.body.clone() };
-        a.gfx.ui(&sub, Rc::new(tx, y + 18.0, 310.0, 16.0), SMALL, 400, 0xA0A0A5, 1.0, Align::L);
+        a.gfx.ui(&sub, Rc::new(tx, y + 19.0, 310.0, 16.0), SMALL, 400, 0xA0A0A5, 1.0, Align::L);
         a.gfx.unzoom();
         hit(a, r, Act::HistoryOpen(i));
     }
@@ -2025,17 +2031,18 @@ fn pages(a: &mut App, lx: f32) {
     let width = a.sw.x.max(1.0);
     let n = Page::ALL.len() as i32;
     let first = at.floor() as i32;
-    let settled = (at - a.page.index() as f32).abs() < 0.04;
+    let settled = (at - at.round()).abs() < 0.04;
     for i in first..=first + 1 {
         let d = i as f32 - at;
-        if !(0..n).contains(&i) || d.abs() >= 1.0 {
+        if d.abs() >= 1.0 {
             continue;
         }
+        let p = Page::ALL[i.rem_euclid(n) as usize];
         let hits = a.hits.len();
         a.gfx.offset(ox + d * width, 0.0);
-        page(a, Page::ALL[i as usize], lx);
+        page(a, p, lx);
         // Buttons are only live on the page at rest in front.
-        if !(settled && Page::ALL[i as usize] == a.page) {
+        if !(settled && p == a.page) {
             a.hits.truncate(hits);
         }
     }
@@ -2121,8 +2128,7 @@ fn music(a: &mut App, lx: f32) {
     let k = a.lyr_mix.x.clamp(0.0, 1.0);
     let l = |x: f32, y: f32| x + (y - x) * k;
     let has = m.has && !m.title.is_empty();
-    let side = l(52.0, 62.4);
-    let ar = Rc::new(lx + l(44.4, 23.6), l(8.0, 12.0), side, side);
+    let ar = Rc::new(lx + l(44.4, 23.6), 12.0, 62.4, 62.4);
     if has {
         art(a, ar);
     } else {
@@ -2134,9 +2140,9 @@ fn music(a: &mut App, lx: f32) {
     }
     let (title, artist) = if has { (m.title.clone(), m.artist.clone()) } else { ("No media".to_string(), String::new()) };
     let tw = l(258.0, 142.0);
-    let ty = if has { l(28.0, 38.0) } else { 28.0 + 7.0 };
-    a.gfx.ui(&title, Rc::new(lx + l(112.0, 101.2), ty, tw, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    a.gfx.ui(&artist, Rc::new(lx + l(112.0, 101.2), l(45.0, 56.0), tw, 16.0), 11.5, 400, 0x8E8E8E, 1.0, Align::L);
+    let ty = if has { l(36.4, 38.0) } else { 36.4 + 7.0 };
+    a.gfx.ui(&title, Rc::new(lx + l(122.0, 101.2), ty, tw, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
+    a.gfx.ui(&artist, Rc::new(lx + l(122.0, 101.2), l(53.6, 56.0), tw, 16.0), 11.5, 400, 0x8E8E8E, 1.0, Align::L);
     // While scrubbing, the lyrics follow the dragged position.
     let pos = match a.scrub {
         Some((_, _, f)) if m.dur > 0.0 => f as f64 * m.dur,
@@ -2146,9 +2152,9 @@ fn music(a: &mut App, lx: f32) {
     if !has {
         a.gfx.alpha = base * 0.4;
     }
-    progress(a, m.position(), m.dur, lx + l(44.4, 26.0), (lx + l(96.4, 77.2), l(222.4, 107.2)), lx + l(376.4, 242.0), l(75.0, 92.4));
-    let tty = l(99.0, 117.6);
-    transport(a, (lx + l(74.8, 53.2), tty), [lx + l(162.4, 92.4), lx + l(210.0, 131.6), lx + l(257.2, 170.8)], tty, m.playing, a.lyrics_on);
+    progress(a, m.position(), m.dur, lx + l(44.4, 26.0), (lx + l(96.4, 77.2), l(222.4, 107.2)), lx + l(376.4, 242.0), l(91.6, 92.4));
+    let tty = l(118.0, 117.6);
+    transport(a, (lx + l(74.8, 53.2), 117.6), [lx + l(162.4, 92.4), lx + l(210.0, 131.6), lx + l(257.2, 170.8)], tty, m.playing, a.lyrics_on);
     if !has {
         // Nothing to control: drop the transport's hit areas.
         a.hits.retain(|(_, act)| !matches!(act, Act::Prev | Act::Toggle | Act::Next | Act::Lyrics | Act::Scrub(..)));
@@ -2334,12 +2340,14 @@ mod layout_tests {
     }
 
     #[test]
-    fn the_strip_settles_on_a_page_and_stops_at_the_ends() {
-        assert_eq!(strip_rest(2.3, 0.0, 6), 2.0);
-        assert_eq!(strip_rest(2.3, 4.0, 6), 3.0);
-        assert_eq!(strip_rest(2.7, -4.0, 6), 2.0);
-        assert_eq!(strip_rest(-0.4, -9.0, 6), 0.0);
-        assert_eq!(strip_rest(5.3, 9.0, 6), 5.0);
+    fn the_strip_settles_on_a_page_and_runs_round() {
+        assert_eq!(strip_rest(2.3, 0.0), 2.0);
+        assert_eq!(strip_rest(2.3, 4.0), 3.0);
+        assert_eq!(strip_rest(2.7, -4.0), 2.0);
+        assert_eq!(strip_rest(5.7, 0.0).rem_euclid(6.0), 0.0);
+        assert_eq!(strip_rest(-0.7, 0.0).rem_euclid(6.0), 5.0);
+        assert_eq!(Page::ALL[5].next(), Page::ALL[0]);
+        assert_eq!(Page::ALL[0].prev(), Page::ALL[5]);
     }
 
     #[test]
@@ -2415,9 +2423,9 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
     let pomodoro = a.settings.pomodoro;
     // Plain focus or Pomodoro: a pill glides to the one in use.
     let mode = flip(a, 1, pomodoro);
-    a.gfx.fill_rrect(Rc::new(lx + 34.0 + mode * 84.0, 36.0, 84.0, 26.0), 13.0, BUTTON, 1.0);
+    a.gfx.fill_rrect(Rc::new(lx + 34.0 + mode * 84.0, 42.0, 84.0, 26.0), 13.0, BUTTON, 1.0);
     for (i, (name, on)) in [("Focus", false), ("Pomodoro", true)].into_iter().enumerate() {
-        let r = Rc::new(lx + 34.0 + i as f32 * 84.0, 36.0, 84.0, 26.0);
+        let r = Rc::new(lx + 34.0 + i as f32 * 84.0, 42.0, 84.0, 26.0);
         let lit = if on { mode } else { 1.0 - mode };
         let h = if live { btn(a, r, 0.03) } else { 0.0 };
         a.gfx.ui(name, r, SMALL, 500, mix(0x8E8E93, WHITE, lit.max(h.clamp(0.0, 1.0))), 1.0, Align::C);
@@ -2428,7 +2436,7 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
     }
     let chosen = a.settings.pomo_work;
     let rest = a.settings.pomo_rest;
-    const CY: f32 = 84.0;
+    const CY: f32 = 98.0;
     let plans: [(u32, u32); 3] = [(25, 5), (50, 10), (90, 15)];
     for (i, (work, pause)) in plans.into_iter().enumerate() {
         let r = Rc::new(lx + 34.0 + i as f32 * 58.0, CY - 15.0, 52.0, 30.0);
@@ -2444,8 +2452,8 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
             hit(a, r, if pomodoro { Act::PomoPlan(work, pause) } else { Act::PomoMinutes(work) });
         }
     }
-    divider(a, lx + 216.0, 42.0, 100.0);
-    let area = Rc::new(lx + 224.0, 34.0, 96.0, 74.0);
+    divider(a, lx + 216.0, 48.0, 112.0);
+    let area = Rc::new(lx + 224.0, 36.0, 96.0, 90.0);
     if pomodoro {
         let rounds: Vec<String> = (1..=8).map(|n| if n == 1 { "1 round".to_string() } else { format!("{n} rounds") }).collect();
         wheel_sized(a, WheelId::Rounds, area, &rounds, 18.0);
@@ -2453,8 +2461,8 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
         let lengths: Vec<String> = (0..FOCUS_STEPS).map(|i| format!("{} min", focus_minutes(i))).collect();
         wheel_sized(a, WheelId::FocusMinutes, area, &lengths, 20.0);
     }
-    divider(a, lx + 328.0, 42.0, 100.0);
-    labelled(a, lx + 368.0, 62.0, "Start", live, Act::PomoToggle, |g, x, y| icon::play(g, x + 1.0, y, 12.0, RED, 1.0));
+    divider(a, lx + 328.0, 48.0, 112.0);
+    labelled(a, lx + 368.0, 72.0, "Start", live, Act::PomoToggle, |g, x, y| icon::play(g, x + 1.0, y, 12.0, RED, 1.0));
 }
 
 fn focus_running(a: &mut App, lx: f32, live: bool) {
@@ -2463,7 +2471,7 @@ fn focus_running(a: &mut App, lx: f32, live: bool) {
     let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
     // A wave of dots flowing slowly, going out from its far end as the time runs down.
     const DOTS: usize = 34;
-    let (x0, x1, cy) = (lx + 28.0, lx + 194.0, 68.0);
+    let (x0, x1, cy) = (lx + 28.0, lx + 194.0, 78.0);
     let flow = a.born.elapsed().as_secs_f32() * if running { 1.6 } else { 0.0 };
     let lit = left * DOTS as f32;
     for i in 0..DOTS {
@@ -2476,24 +2484,24 @@ fn focus_running(a: &mut App, lx: f32, live: bool) {
         }
         a.gfx.fill_circle(x, y, 1.9, 1.9, RED, 0.08 + 0.92 * k * tail);
     }
-    pic(a, "ic_focus", lx + 217.0, 48.0, 15.0, RED, 1.0);
-    a.gfx.ui(&phase, Rc::new(lx + 230.0, 38.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
-    a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 58.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
-    labelled(a, lx + 330.0, 60.0, if running { "Pause" } else { "Resume" }, live, Act::PomoToggle, |g, x, y| {
+    pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
+    a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
+    a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
+    labelled(a, lx + 330.0, 72.0, if running { "Pause" } else { "Resume" }, live, Act::PomoToggle, |g, x, y| {
         if running {
             icon::pause(g, x, y, 11.0, WHITE, 1.0);
         } else {
             icon::play(g, x + 1.0, y, 11.0, WHITE, 1.0);
         }
     });
-    labelled(a, lx + 382.0, 60.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
+    labelled(a, lx + 382.0, 72.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
 }
 
 // ---------------------------------------------------------------- today
 
 /// The red button a swiped row shows, sliding in from the right.
-fn delete_button(a: &mut App, right: f32, cy: f32, k: f32) {
-    let r = Rc::new(right - 70.0 + (1.0 - k) * 40.0, cy - 13.0, 70.0, 26.0);
+fn delete_button(a: &mut App, right: f32, cy: f32, w: f32, k: f32) {
+    let r = Rc::new(right - w + (1.0 - k) * 40.0, cy - 13.0, w, 26.0);
     let h = btn(a, r, 0.05).clamp(0.0, 1.0);
     let base = a.gfx.alpha;
     a.gfx.alpha = base * k;
@@ -2532,8 +2540,8 @@ fn today(a: &mut App, lx: f32) {
     let now = chrono::Local::now().date_naive();
     let monday = now - chrono::TimeDelta::days(now.weekday().num_days_from_monday() as i64);
     let marked: Vec<chrono::NaiveDate> = a.brain.cfg.dates.iter().filter_map(|d| chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()).collect();
-    let strip = Rc::new(lx + 24.0, 36.0, 372.0, 48.0);
-    let line_box = Rc::new(lx + 28.0, 86.0, 200.0, 22.0);
+    let strip = Rc::new(lx + 24.0, 38.0, 372.0, 54.0);
+    let line_box = Rc::new(lx + 28.0, 98.0, 220.0, 24.0);
     let hot = hovering(a, strip) || hovering(a, line_box);
     let h = btn(a, strip, 0.0);
     if h > 0.0 {
@@ -2545,19 +2553,19 @@ fn today(a: &mut App, lx: f32) {
         let cx = strip.x + col * (i as f32 + 0.5);
         let on = day == now;
         if on {
-            a.gfx.fill_rrect(Rc::new(cx - 18.0, 36.0, 36.0, 46.0), 11.0, mix(0xC42A30, 0xD93A40, h.clamp(0.0, 1.0)), 1.0);
+            a.gfx.fill_rrect(Rc::new(cx - 18.0, 40.0, 36.0, 46.0), 11.0, mix(0xC42A30, 0xD93A40, h.clamp(0.0, 1.0)), 1.0);
         }
         let name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i as usize];
-        a.gfx.ui(name, Rc::new(cx - 20.0, 39.0, 40.0, 14.0), 11.0, 400, if on { WHITE } else { 0x9A9A9E }, 1.0, Align::C);
-        a.gfx.ui(&day.day().to_string(), Rc::new(cx - 20.0, 53.0, 40.0, 22.0), 16.0, 600, WHITE, 1.0, Align::C);
+        a.gfx.ui(name, Rc::new(cx - 20.0, 43.0, 40.0, 14.0), 11.0, 400, if on { WHITE } else { 0x9A9A9E }, 1.0, Align::C);
+        a.gfx.ui(&day.day().to_string(), Rc::new(cx - 20.0, 58.0, 40.0, 22.0), 16.0, 600, WHITE, 1.0, Align::C);
         if marked.contains(&day) {
-            a.gfx.fill_circle(cx, if on { 77.0 } else { 80.0 }, 2.2, 2.2, if on { WHITE } else { RED }, 1.0);
+            a.gfx.fill_circle(cx, if on { 82.0 } else { 86.0 }, 2.2, 2.2, if on { WHITE } else { RED }, 1.0);
         }
     }
     a.gfx.unzoom();
     hit(a, strip, Act::View(View::Calendar));
     hit(a, line_box, Act::View(View::Calendar));
-    const CY: f32 = 97.0;
+    const CY: f32 = 110.0;
     let next = a.all_dates().into_iter().find(|d| d.2 >= 0);
     pic(a, "ic_star", lx + 38.0, CY, 13.0, RED, 1.0);
     let line = match &next {
@@ -2646,15 +2654,16 @@ fn calendar(a: &mut App, lx: f32) {
         let key = format!("d:{id}");
         let slid = swipe_of(a, &key);
         let near = slid < 0.05 && hovering(a, Rc::new(lx + 278.0, y, 138.0, 40.0));
-        let tw = if near { 76.0 } else { 104.0 } - 50.0 * slid;
-        pic(a, "ic_star", lx + 293.0, y + 18.0, 13.0, RED, dim);
-        a.gfx.ui(&name, Rc::new(lx + 308.0, y + 2.0, tw, 18.0), 13.0, 500, WHITE, dim, Align::L);
-        a.gfx.ui(&days_left(left), Rc::new(lx + 308.0, y + 20.0, tw, 16.0), SMALL, 400, 0xA0A0A5, dim, Align::L);
+        let tw = if near { 76.0 } else { 104.0 } - 46.0 * slid;
+        let x = lx + 308.0 - 26.0 * slid;
+        pic(a, "ic_star", lx + 293.0, y + 18.0, 13.0, RED, dim * (1.0 - slid));
+        a.gfx.ui(&name, Rc::new(x, y + 2.0, tw, 18.0), 13.0, 500, WHITE, dim, Align::L);
+        a.gfx.ui(&days_left(left), Rc::new(x, y + 20.0, tw, 16.0), SMALL, 400, 0xA0A0A5, dim, Align::L);
         if near {
             head_button(a, Rc::new(lx + 388.0, y + 8.0, 22.0, 22.0), Act::RowTrash(1, i), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
         }
         if slid > 0.01 {
-            delete_button(a, lx + 410.0, y + 19.0, slid);
+            delete_button(a, lx + 410.0, y + 19.0, 58.0, slid);
         }
     }
 }
@@ -2702,8 +2711,8 @@ fn care(a: &mut App, lx: f32) {
     title(a, lx, "Care");
     let cfg = &a.brain.cfg;
     let goal = cfg.water_goal * cfg.cup_ml;
-    let (cx, cy, r) = (lx + 68.0, 71.0, 33.0 + 1.5 * a.water_pulse.x.clamp(-1.0, 2.0));
-    let ring = Rc::new(cx - 37.0, cy - 37.0, 74.0, 74.0);
+    let (cx, cy, r) = (lx + 72.0, 84.0, 40.0 + 1.5 * a.water_pulse.x.clamp(-1.0, 2.0));
+    let ring = Rc::new(cx - 44.0, cy - 44.0, 88.0, 88.0);
     // Pointing at it shows it can be set.
     let hot = btn(a, ring, 0.02).clamp(0.0, 1.0);
     a.gfx.unzoom();
@@ -2716,17 +2725,17 @@ fn care(a: &mut App, lx: f32) {
     } else if done > 0.001 {
         a.gfx.arc_diag(cx, cy, r, -FRAC_PI_2, -FRAC_PI_2 + TAU * done, width, tint, tint);
     }
-    pic(a, "ic_water", cx, cy - 11.0, 19.0, WATER, 1.0);
+    pic(a, "ic_water", cx, cy - 13.0, 22.0, WATER, 1.0);
     let text = format!("{:.1} / {:.1} L", a.ring.x.max(0.0) * goal as f32 / 1000.0, goal as f32 / 1000.0);
-    swap_text(a, Rc::new(cx - 32.0, cy + 1.0, 64.0, 18.0), 11.0, 600, (WHITE, WHITE), Align::C, (&text, "Set goal"), hot);
+    swap_text(a, Rc::new(cx - 38.0, cy + 2.0, 76.0, 18.0), SMALL, 600, (WHITE, WHITE), Align::C, (&text, "Set goal"), hot);
     hit(a, ring, Act::View(View::Goal));
-    head_button(a, Rc::new(lx + 118.0, 40.0, 28.0, 28.0), Act::Drank, |g, x, y| icon::plus(g, x, y, 6.0, 1.9, WHITE, 1.0));
-    head_button(a, Rc::new(lx + 118.0, 74.0, 28.0, 28.0), Act::WaterReset, |g, x, y| icon::reset(g, x, y, 5.6, WHITE, 1.0));
-    divider(a, lx + 158.0, 42.0, 100.0);
+    head_button(a, Rc::new(lx + 124.0, 49.0, 32.0, 32.0), Act::Drank, |g, x, y| icon::plus(g, x, y, 6.0, 1.9, WHITE, 1.0));
+    head_button(a, Rc::new(lx + 124.0, 87.0, 32.0, 32.0), Act::WaterReset, |g, x, y| icon::reset(g, x, y, 5.6, WHITE, 1.0));
+    divider(a, lx + 168.0, 48.0, 124.0);
     let stats = a.brain.stats.clone();
     let sleep = a.brain.cfg.reminders.sleep.clone();
     for (i, tile) in Tile::ALL.into_iter().enumerate() {
-        let r = Rc::new(lx + 170.0 + (i % 2) as f32 * 112.0, 38.0 + (i / 2) as f32 * 35.0, 106.0, 31.0);
+        let r = Rc::new(lx + 178.0 + (i % 2) as f32 * 112.0, 44.0 + (i / 2) as f32 * 42.0, 106.0, 37.0);
         let on = reminder_on(a, tile);
         let value = match tile {
             Tile::Stretch => stats.stretch.to_string(),
@@ -2743,8 +2752,8 @@ fn care(a: &mut App, lx: f32) {
         if on {
             a.gfx.fill_circle(r.x + r.w - 11.0, r.y + 11.0, 3.0, 3.0, tile.colour(), 1.0);
         }
-        a.gfx.ui(tile.name(), Rc::new(r.x + 34.0, r.y + 1.0, r.w - 36.0, 15.0), SMALL, 500, WHITE, dim, Align::L);
-        a.gfx.ui(if on { &value } else { "Off" }, Rc::new(r.x + 34.0, r.y + 15.0, r.w - 36.0, 14.0), 11.0, 400, 0xA0A0A5, dim, Align::L);
+        a.gfx.ui(tile.name(), Rc::new(r.x + 34.0, r.y + 4.0, r.w - 36.0, 15.0), SMALL, 500, WHITE, dim, Align::L);
+        a.gfx.ui(if on { &value } else { "Off" }, Rc::new(r.x + 34.0, r.y + 19.0, r.w - 36.0, 14.0), 11.0, 400, 0xA0A0A5, dim, Align::L);
         a.gfx.unzoom();
         hit(a, r, Act::View(View::Care(tile)));
     }
@@ -2763,12 +2772,12 @@ fn reminder_on(a: &App, tile: Tile) -> bool {
 /// One reminder opened: its switch, when it comes next, and doing it now.
 fn care_detail(a: &mut App, lx: f32, tile: Tile) {
     back_title(a, lx, tile.name(), Act::View(View::Page));
-    pic(a, tile.picture(), lx + 66.0, 70.0, 42.0, WHITE, 1.0);
-    divider(a, lx + 112.0, 44.0, 98.0);
+    pic(a, tile.picture(), lx + 66.0, 80.0, 46.0, WHITE, 1.0);
+    divider(a, lx + 112.0, 50.0, 112.0);
     let on = reminder_on(a, tile);
-    a.gfx.ui(tile.name(), Rc::new(lx + 128.0, 38.0, 170.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
-    a.gfx.ui(tile.about(), Rc::new(lx + 128.0, 57.0, 200.0, 18.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
-    pic(a, "ic_focus", lx + 137.0, 90.0, 14.0, WHITE, 0.85);
+    a.gfx.ui(tile.name(), Rc::new(lx + 128.0, 46.0, 170.0, 22.0), 15.0, 600, WHITE, 1.0, Align::L);
+    a.gfx.ui(tile.about(), Rc::new(lx + 128.0, 66.0, 200.0, 18.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
+    pic(a, "ic_focus", lx + 137.0, 100.0, 14.0, WHITE, 0.85);
     let next = if !on {
         "Off".to_string()
     } else {
@@ -2779,7 +2788,7 @@ fn care_detail(a: &mut App, lx: f32, tile: Tile) {
         }
     };
     let text = if tile == Tile::Sleep { format!("At {}", a.brain.cfg.reminders.sleep.time) } else { next };
-    let line = Rc::new(lx + 150.0, 79.0, 124.0, 22.0);
+    let line = Rc::new(lx + 150.0, 89.0, 124.0, 22.0);
     if tile == Tile::Sleep {
         let h = btn(a, line, 0.03);
         a.gfx.ui(&text, line, SMALL, 500, mix(0xD8D8DA, WHITE, h), 1.0, Align::L);
@@ -2788,8 +2797,8 @@ fn care_detail(a: &mut App, lx: f32, tile: Tile) {
     } else {
         a.gfx.ui(&text, line, SMALL, 400, 0xD8D8DA, 1.0, Align::L);
     }
-    toggle(a, Rc::new(lx + 354.0, 38.0, SWITCH.0, SWITCH.1), (0, tile as i32), on, Act::Set(tile.key()));
-    let now = Rc::new(lx + 284.0, 76.0, 108.0, 28.0);
+    toggle(a, Rc::new(lx + 354.0, 46.0, SWITCH.0, SWITCH.1), (0, tile as i32), on, Act::Set(tile.key()));
+    let now = Rc::new(lx + 284.0, 88.0, 108.0, 28.0);
     let h = btn(a, now, 0.05);
     a.gfx.fill_rrect(now, 14.0, 0xFFFFFF, 0.14 + 0.1 * h);
     icon::play(&a.gfx, now.x + 18.0, now.cy(), 9.0, WHITE, 1.0);
@@ -2805,21 +2814,21 @@ fn goal(a: &mut App, lx: f32) {
     let goals: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
     let (base, k) = (a.gfx.alpha, a.pick_mix.x.clamp(0.0, 1.0));
     a.gfx.alpha = base * (1.0 - 0.72 * k);
-    wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 34.0, 140.0, 76.0), &cups, 20.0);
+    wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 36.0, 140.0, 92.0), &cups, 20.0);
     a.gfx.alpha = base * (0.28 + 0.72 * k);
-    wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 34.0, 130.0, 76.0), &goals, 20.0);
+    wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 36.0, 130.0, 92.0), &goals, 20.0);
     a.gfx.alpha = base;
-    form_button(a, lx + 376.0, 72.0, FormButton::Done, Act::SaveWheels);
+    form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
 
 fn bed(a: &mut App, lx: f32) {
     back_title(a, lx, "Bedtime", Act::View(View::Care(Tile::Sleep)));
     let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
     let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
-    wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 34.0, 76.0, 76.0), &hours, 28.0);
-    a.gfx.ui(":", Rc::new(lx + 198.0, 50.0, 24.0, 40.0), 26.0, 600, WHITE, 1.0, Align::C);
-    wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 34.0, 76.0, 76.0), &quarters, 28.0);
-    form_button(a, lx + 376.0, 72.0, FormButton::Done, Act::SaveWheels);
+    wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 36.0, 76.0, 92.0), &hours, 28.0);
+    a.gfx.ui(":", Rc::new(lx + 198.0, 60.0, 24.0, 40.0), 26.0, 600, WHITE, 1.0, Align::C);
+    wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 36.0, 76.0, 92.0), &quarters, 28.0);
+    form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2889,7 +2898,7 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
 
 fn shelf(a: &mut App, lx: f32) {
     title(a, lx, "Shelf");
-    let area = Rc::new(lx + 43.6, 32.0, 336.8, 76.0);
+    let area = Rc::new(lx + 43.6, 32.0, 336.8, 91.2);
     let drag = a.drag_over;
     let items = a.shelf.items.clone();
     if drag && !items.is_empty() {
@@ -2930,9 +2939,9 @@ fn shelf(a: &mut App, lx: f32) {
         let tint = if drag { [0xFFFFFF, 0x8A8A8A, 0xFFFFFF] } else { [0x777777, 0x4D4D4D, 0xDADADA] };
         icon::tray(&a.gfx, area.cx(), 58.4, tint, 1.0);
         let t = if drag { "Release to add" } else { "Drop files here" };
-        a.gfx.ui(t, Rc::new(area.x, 79.0, area.w, 18.0), 13.0, 400, WHITE, 1.0, Align::C);
+        a.gfx.ui(t, Rc::new(area.x, 88.0, area.w, 18.0), 13.0, 400, WHITE, 1.0, Align::C);
         if !drag {
-            a.gfx.ui("Drag out anytime · click to open", Rc::new(area.x, 94.0, area.w, 13.0), 9.5, 400, 0x777777, 1.0, Align::C);
+            a.gfx.ui("Drag out anytime · click to open", Rc::new(area.x, 104.4, area.w, 13.0), 9.5, 400, 0x777777, 1.0, Align::C);
         }
         return;
     }
@@ -2944,7 +2953,7 @@ fn shelf(a: &mut App, lx: f32) {
             a.gfx.alpha = base * k;
             a.gfx.stroke_rrect_dashed(area, 12.0, 1.2, 4.0, 3.0, 0xBDBDBD, 0.6);
             icon::tray(&a.gfx, area.cx(), 58.4, [0x777777, 0x4D4D4D, 0xDADADA], 0.6);
-            a.gfx.ui("Drop files here", Rc::new(area.x, 79.0, area.w, 18.0), 13.0, 400, WHITE, 0.5, Align::C);
+            a.gfx.ui("Drop files here", Rc::new(area.x, 88.0, area.w, 18.0), 13.0, 400, WHITE, 0.5, Align::C);
             a.gfx.alpha = base;
         }
     }
@@ -3146,12 +3155,12 @@ fn old_notes(a: &mut App, lx: f32) {
     for (n, note) in notes.iter().enumerate().skip(top).take(LIST_ROWS) {
         let cy = LIST_Y + (n - top) as f32 * LIST_GAP;
         let slid = swipe_of(a, &format!("n:{n}"));
-        a.gfx.ui(note, Rc::new(lx + 30.0 - 78.0 * slid, cy - 12.0, 310.0, 24.0), BODY, 400, 0xD8D8D8, 1.0, Align::L);
+        a.gfx.ui(note, Rc::new(lx + 30.0, cy - 12.0, 270.0, 24.0), BODY, 400, 0xD8D8D8, 1.0, Align::L);
         if slid < 0.5 {
-            head_button(a, Rc::new(lx + LIST_RIGHT - 24.0 - 78.0 * slid, cy - 12.0, 24.0, 24.0), Act::RowTrash(2, n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+            head_button(a, Rc::new(lx + LIST_RIGHT - 24.0, cy - 12.0, 24.0, 24.0), Act::RowTrash(2, n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
         }
         if slid > 0.01 {
-            delete_button(a, lx + LIST_RIGHT, cy, slid);
+            delete_button(a, lx + LIST_RIGHT, cy, 72.0, slid);
         }
     }
     scrollbar(a, lx, top, notes.len());
@@ -3168,7 +3177,7 @@ fn todo(a: &mut App, lx: f32) {
         return;
     }
     let pos = a.list_pos.x;
-    a.gfx.push_clip(Rc::new(lx, 36.0, 420.0, 72.0));
+    a.gfx.push_clip(Rc::new(lx, 38.0, 420.0, 84.0));
     // Old notes come after the last reminder.
     if old > 0 {
         let cy = LIST_Y + (rows.len() as f32 - pos) * LIST_GAP;
@@ -3194,9 +3203,8 @@ fn todo(a: &mut App, lx: f32) {
             continue;
         }
         let slid = swipe_of(a, &format!("r:{}", r.id));
-        let dx = -78.0 * slid;
         let shown = (top..top + LIST_ROWS).contains(&n) && slid < 0.05;
-        let row = Rc::new(lx + 24.0 + dx, cy - 16.0, 276.0, 32.0);
+        let row = Rc::new(lx + 24.0, cy - 16.0, 276.0, 32.0);
         let h = btn(a, row, 0.04);
         a.gfx.fill_rrect(row, 12.0, 0xFFFFFF, 0.05 * h.min(1.0));
         let tone = if r.enabled { WHITE } else { 0x6D6D6D };
@@ -3208,13 +3216,17 @@ fn todo(a: &mut App, lx: f32) {
         }
         let hits = a.hits.len();
         let key = (1, r.id.bytes().fold(7i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32)));
+        let base = a.gfx.alpha;
+        a.gfx.alpha = base * (1.0 - slid);
+        let dx = -36.0 * slid;
         toggle(a, Rc::new(lx + 308.0 + dx, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), key, r.enabled, Act::ReminderSwitch(n));
         head_button(a, Rc::new(lx + LIST_RIGHT - 24.0 + dx, cy - 12.0, 24.0, 24.0), Act::RowTrash(0, n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        a.gfx.alpha = base;
         if !shown {
             a.hits.truncate(hits);
         }
         if slid > 0.01 {
-            delete_button(a, lx + LIST_RIGHT, cy, slid);
+            delete_button(a, lx + LIST_RIGHT, cy, 72.0, slid);
         }
     }
     a.gfx.pop_clip();
@@ -3222,7 +3234,7 @@ fn todo(a: &mut App, lx: f32) {
 }
 
 /// Row height of the big clock in the reminder form.
-pub const CLOCK_ROW: f32 = 26.0;
+pub const CLOCK_ROW: f32 = 30.0;
 
 /// A round button at the side of the reminder form; the last one is a green tick.
 fn form_button(a: &mut App, cx: f32, cy: f32, kind: FormButton, act: Act) {
@@ -3260,7 +3272,7 @@ fn form(a: &mut App, lx: f32) {
     };
     let x = a.form_anim.x.clamp(0.0, 2.0);
     let (to_time, to_days) = (x.min(1.0), (x - 1.0).max(0.0));
-    const CY: f32 = 70.0;
+    const CY: f32 = 78.0;
     let base = a.gfx.alpha;
     // Beside the title once the clock has moved up there.
     a.gfx.alpha = base * (1.0 - to_days);
@@ -3305,9 +3317,9 @@ fn form(a: &mut App, lx: f32) {
             let cx = lx + 210.0 + 50.0 * (1.0 - to_time);
             let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
             let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 34.0, 76.0, 76.0), &hours, big);
+            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 36.0, 76.0, 92.0), &hours, big);
             a.gfx.ui(":", Rc::new(cx - 12.0, CY - 22.0, 24.0, 40.0), big, 600, WHITE, 1.0, Align::C);
-            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 34.0, 76.0, 76.0), &minutes, big);
+            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 36.0, 76.0, 92.0), &minutes, big);
         } else {
             // The same numbers flying up to the corner.
             let k = to_days;
@@ -3323,7 +3335,7 @@ fn form(a: &mut App, lx: f32) {
         let live = step == 2;
         let mut x = lx + 70.0;
         for (i, (name, w)) in [("Every day", 70.0), ("Weekdays", 70.0), ("Weekends", 70.0), ("Custom", 56.0)].into_iter().enumerate() {
-            let r = Rc::new(x, 36.0, w, 26.0);
+            let r = Rc::new(x, 44.0, w, 26.0);
             let on = chosen.map_or(i == 3, |c| c == i);
             let h = if live { btn(a, r, 0.04) } else { 0.0 };
             if on {
@@ -3339,7 +3351,7 @@ fn form(a: &mut App, lx: f32) {
             x += w + 4.0;
         }
         for (i, name) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].into_iter().enumerate() {
-            let r = Rc::new(lx + 74.0 + i as f32 * 39.0, 66.0, 36.0, 44.0);
+            let r = Rc::new(lx + 74.0 + i as f32 * 39.0, 78.0, 36.0, 44.0);
             let on = days[i];
             let h = if live { btn(a, r, 0.06) } else { 0.0 };
             a.gfx.ui(name, Rc::new(r.x, r.y + 2.0, r.w, 22.0), BODY, if on { 600 } else { 400 }, mix(if on { WHITE } else { 0x8A8A8E }, WHITE, h.clamp(0.0, 1.0)), 1.0, Align::C);
