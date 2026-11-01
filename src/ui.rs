@@ -2270,6 +2270,9 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
     let rise = 30.0 * (1.0 - k);
     let (status, idx, lines, times, key) = {
         let l = a.lyrics.lock().unwrap();
+        if l.held {
+            return;
+        }
         let idx = l.lines.iter().rposition(|x| x.0 >= 0.0 && x.0 <= pos + 0.25);
         (l.status, idx, l.lines.iter().map(|x| x.1.clone()).collect::<Vec<_>>(), l.lines.iter().map(|x| x.0).collect::<Vec<_>>(), l.key.clone())
     };

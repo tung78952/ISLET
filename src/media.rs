@@ -161,11 +161,13 @@ pub struct Lyrics {
     pub status: LyrStatus,
     /// (start seconds, text); a negative start marks unsynced plain lyrics.
     pub lines: Vec<(f64, String)>,
+    /// A clip is playing over the song for now: its words are not for that clip.
+    pub held: bool,
 }
 
 impl Lyrics {
     pub fn line_at(&self, t: f64) -> Option<&str> {
-        if self.status != LyrStatus::Ready {
+        if self.status != LyrStatus::Ready || self.held {
             return None;
         }
         if self.lines.first().is_some_and(|l| l.0 < 0.0) {
@@ -302,8 +304,23 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
                 let key = format!("{}\u{1}{}", next.title, next.artist);
                 let clip = same_source && next.playing && key != last_key && next.artist.trim().is_empty() && last_key.split('\u{1}').nth(1).is_some_and(|a| !a.trim().is_empty());
                 clip_since = if clip { clip_since.or(Some(Instant::now())) } else { None };
-                if clip_since.is_some_and(|t| t.elapsed() < TAKE_OVER) {
+                // The song keeps its place for now, but its words don't belong on another clip.
+                let held = clip_since.is_some_and(|t| t.elapsed() < TAKE_OVER);
+                {
+                    let mut l = lyrics.lock().unwrap();
+                    if l.held != held {
+                        l.held = held;
+                        crate::sys::timelog(&format!("lyrics held={held} key={key:?}"));
+                        post(hwnd, WM_LYRICS);
+                    }
+                }
+                if held {
                     continue;
+                }
+                // Nothing to look words up by: the last song's must not stay.
+                if next.title.is_empty() && !last_key.is_empty() {
+                    last_key.clear();
+                    forget_lyrics(hwnd, &lyrics);
                 }
                 if key != last_key && !next.title.is_empty() {
                     last_key = key.clone();
@@ -329,6 +346,9 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
                 next.art = art.clone();
                 next.art_id = art_id;
             } else {
+                if !last_key.is_empty() {
+                    forget_lyrics(hwnd, &lyrics);
+                }
                 last_key.clear();
                 art = None;
             }
@@ -436,10 +456,24 @@ pub fn decode_square(buf: &[u8], size: u32) -> windows::core::Result<Arc<Art>> {
 
 // ---------------------------------------------------------------- lyrics
 
+/// The song has gone: no words, and any lookup still under way finds its key taken.
+fn forget_lyrics(hwnd: isize, lyrics: &Mutex<Lyrics>) {
+    {
+        let mut l = lyrics.lock().unwrap();
+        l.key.clear();
+        l.status = LyrStatus::Missing;
+        l.lines.clear();
+        l.held = false;
+    }
+    post(hwnd, WM_LYRICS);
+}
+
 fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: String, artist: String, dur: f64) {
+    crate::sys::timelog(&format!("media key {key:?}"));
     {
         let mut l = lyrics.lock().unwrap();
         l.key = key.clone();
+        l.held = false;
         l.status = LyrStatus::Loading;
         l.lines.clear();
     }
@@ -650,6 +684,8 @@ mod tests {
     #[test]
     fn an_empty_search_means_no_lyrics_not_a_failure() {
         assert_eq!(best_lyrics(&[], 200.0, false), None);
+        let held = Lyrics { status: LyrStatus::Ready, lines: vec![(0.0, "Hello".to_string())], held: true, ..Default::default() };
+        assert_eq!(held.line_at(1.0), None, "a clip over the song shows none of its words");
         let found = serde_json::json!([{ "duration": 200.0, "syncedLyrics": "[00:01.00] Hello" }]);
         assert_eq!(best_lyrics(found.as_array().unwrap(), 200.0, false), Some(vec![(1.0, "Hello".to_string())]));
     }
