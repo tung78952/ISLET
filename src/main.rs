@@ -1548,6 +1548,15 @@ impl App {
         }
     }
 
+    /// Up or down of a card's eyes, for the pointer over it.
+    fn card_lift(&self) -> f32 {
+        if self.mouse_in {
+            ((self.mouse.1 - self.sh.x / 2.0) / 40.0).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// How the eyes on a card feel: they watch the pointer, sad on the way to "Later", glad on the
     /// way to "Done", and show what they think of the answer before the card leaves.
     fn card_mood(&mut self, rest: eyes::Look, rest_gaze: f32, buttons: f32) -> (eyes::Look, f32) {
@@ -1600,12 +1609,12 @@ impl App {
         } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
-            let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
+            let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lift: self.card_lift(), lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
             self.eyes.step(feel, dt);
         } else if self.toast.as_ref().is_some_and(|t| t.kind.answered()) {
             // Cards without an act of their own still watch the pointer.
             let (look, gaze) = self.card_mood(eyes::Look::Neutral, 0.0, 1.0);
-            self.eyes.step(eyes::Feel { show: true, look, gaze, ..eyes::Feel::ASLEEP }, dt);
+            self.eyes.step(eyes::Feel { show: true, look, gaze, lift: self.card_lift(), ..eyes::Feel::ASLEEP }, dt);
         } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
         }
@@ -2157,7 +2166,7 @@ impl App {
             y: pt.y as f32,
             scale: s,
             follow: (along / (w / 2.0 + 90.0)).clamp(-1.0, 1.0),
-            lift: (dy / eyes::RANGE).clamp(0.0, 1.0) * 0.5,
+            lift: ((uy - 15.0) / (eyes::RANGE * 0.6)).clamp(-1.0, 1.0),
             near: dx.hypot(dy) < eyes::RANGE,
             around: dx.hypot(dy) < eyes::RANGE_OUT,
             blocked,

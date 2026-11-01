@@ -847,6 +847,13 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
     }
 }
 
+/// Looking up or down: how far the pair moves (-0.5 up to 1 down), and how much the lids lower, as
+/// a thin bar has little room to go down in.
+fn look_down(d: f32) -> (f32, f32) {
+    let d = d.clamp(-1.0, 1.0);
+    (if d > 0.0 { d } else { 0.5 * d }, 1.0 - 0.4 * d.max(0.0))
+}
+
 /// How far the pair tips when looking all the way to one side (about 8°).
 const TILT: f32 = 0.14;
 
@@ -879,7 +886,7 @@ fn stripes(g: &Gfx, shape: &[(f32, f32)], gap: f32, a: f32) {
 fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     a.eye_draws.0 += 1;
     /// Notch units per pixel of the design sheet.
-    const SCALE: f32 = 0.175;
+    const SCALE: f32 = 0.165;
     const GAP: f32 = 3.4;
     let e = &a.eyes;
     // In the battery scene the eyes stay on their side and lunge at it.
@@ -892,13 +899,17 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
     let breath = 0.35 * (t * 1.7).sin();
     let g = &a.gfx;
     // Looking moves the whole pair, tipped a little as a head would be; the eyes keep their size.
-    let (px, py) = (cx + lean * reach, cy + breath + e.hop.x + 7.0 * e.drop.x);
+    let (lower, squash) = look_down(e.drop.x);
+    let (px, py) = (cx + lean * reach, cy + breath + e.hop.x + 6.0 * lower);
     g.rotate(px, py, TILT * lean);
+    // They look all round inside the notch, never past its edge.
+    let half = a.sw.x / 2.0;
+    g.push_clip(Rc::new(centre - half + 6.0, 1.0, half * 2.0 - 12.0, a.sh.x - 2.0));
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
-        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (px + p.0 * SCALE, py + p.1 * SCALE)).collect();
-        g.glow_ellipse(px + side * 21.0, py, 18.0, 15.0, crate::CHARACTER, 0.16 * show);
+        let outline: Vec<(f32, f32)> = e.pair[i].points.iter().map(|p| (px + p.0 * SCALE, py + p.1 * SCALE * squash)).collect();
+        g.glow_ellipse(px + side * 20.0, py, 18.0, 15.0, crate::CHARACTER, 0.16 * show);
         lens(g, &outline, GAP, show * (1.0 - e.dizzy.x.clamp(0.0, 1.0)));
-        let (ex, ey) = (px + side * 21.0, py);
+        let (ex, ey) = (px + side * 20.0, py);
         let dizzy = e.dizzy.x.clamp(0.0, 1.0);
         if dizzy > 0.01 {
             let turn = t * 7.0 * side;
@@ -913,9 +924,9 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
             stripes(g, &spiral, GAP, show * dizzy);
         }
     }
+    g.pop_clip();
     g.unzoom();
     // The battery never leaves the notch as it narrows again.
-    let half = a.sw.x / 2.0;
     g.push_clip(Rc::new(centre - half, 0.0, half * 2.0, a.sh.x));
     if scene > 0.01 {
         // What they are after slides in from the right and takes the blows.
@@ -1409,12 +1420,13 @@ fn act_eyes(a: &mut App, cx: f32, cy: f32, scale: f32, spread: f32) {
     a.eye_draws.1 += 1;
     let hop = a.eyes.hop.x;
     let lean = a.eyes.lean.x;
-    let (px, py) = (cx + lean * 7.0, cy + hop);
+    let (lower, squash) = look_down(a.eyes.drop.x);
+    let (px, py) = (cx + lean * 7.0, cy + hop + 9.0 * lower);
     a.gfx.rotate(px, py, TILT * lean);
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
         let x = px + side * spread;
         a.gfx.glow_ellipse(x + side * 120.0 * scale, py, 16.0, 14.0, crate::CHARACTER, 0.14);
-        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, py + p.1 * scale)).collect();
+        let outline: Vec<(f32, f32)> = a.eyes.pair[i].points.iter().map(|p| (x + p.0 * scale, py + p.1 * scale * squash)).collect();
         lens(&a.gfx, &outline, 3.0, 1.0);
     }
     a.gfx.unzoom();

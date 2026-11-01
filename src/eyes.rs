@@ -39,7 +39,7 @@ const fn oval(a: f32, b: f32) -> Lens {
     ((C - a, 0.0), (C + a, 0.0), [(C - a, -4.0 * b / 3.0), (C + a, -4.0 * b / 3.0)], [(C - a, 4.0 * b / 3.0), (C + a, 4.0 * b / 3.0)])
 }
 
-const NEUTRAL: Lens = oval(46.0, 68.0);
+const NEUTRAL: Lens = oval(46.0, 56.0);
 const SURPRISED: Lens = oval(52.0, 82.0);
 const SLIT: Lens = ((-186.0, 0.0), (-54.0, 0.0), [(-186.0, -9.0), (-54.0, -9.0)], [(-186.0, 9.0), (-54.0, 9.0)]);
 const HAPPY: Lens = ((-188.0, 26.0), (-52.0, 26.0), [(-176.0, -88.0), (-64.0, -88.0)], [(-150.0, -20.0), (-90.0, -20.0)]);
@@ -195,6 +195,7 @@ pub struct Sense {
     pub scale: f32,
     /// Where the pointer is along the notch (-1..1), and how far below it (0..1).
     pub follow: f32,
+    /// Where the pointer is up or down of the eyes (-1..1).
     pub lift: f32,
     pub near: bool,
     /// Still within `RANGE_OUT`.
