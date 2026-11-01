@@ -77,7 +77,11 @@ const T_CAPS: usize = 11;
 const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
-const UNDO_TIME: Duration = Duration::from_secs(4);
+const SWIPE_TIME: Duration = Duration::from_secs(4);
+/// No more movement for this long means the fingers have lifted.
+const SWIPE_REST_MS: u128 = 120;
+/// Sideways wheel units that move one page.
+const SWIPE_PAGE: f32 = 520.0;
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
@@ -224,12 +228,6 @@ pub struct Toast {
 
 /// Where a to-do lives: a Luma reminder (has a time) or an untimed to-do of Islet's.
 /// One row of the To-do page.
-enum Deleted {
-    Reminder(luma::config::CustomReminder),
-    Date(luma::config::ImportantDate),
-    Note(usize, model::Task),
-}
-
 pub struct Form {
     /// The reminder being edited; None for a new one.
     pub id: Option<String>,
@@ -424,9 +422,6 @@ pub struct App {
     /// Expanded-content visibility 0..1.
     pub fade: Spring,
     /// Page transition progress: 1 at the start of a change, 0 when settled.
-    pub slide: Spring,
-    pub slide_dir: f32,
-    pub prev_page: Page,
     /// Crossfade weights for the compact content: toast and lyric pill.
     pub toast_mix: Spring,
     pub pill_mix: Spring,
@@ -498,7 +493,11 @@ pub struct App {
     intro: Spring,
     intro_grow: Spring,
     /// Page-dot position, unwrapped so a wrap from last to first moves one step.
-    pub dot_target: f32,
+    /// Where the strip of pages stands (in pages), where it is headed, and the last sideways
+    /// swipe with its speed.
+    pub strip: Spring,
+    strip_to: f32,
+    swipe: Option<(Instant, f32)>,
     pub mode: Mode,
     last_frame: Instant,
     animating: bool,
@@ -531,8 +530,12 @@ pub struct App {
     /// Which side of the goal screen is being set: 0 the cup, 1 the goal.
     pub pick_mix: Spring,
     pick_goal: bool,
-    /// What was just deleted, until the time to take it back runs out.
-    undo: Option<(Deleted, Instant)>,
+    /// The row whose Delete button is showing, the last one to, how far it has slid (0..1), and
+    /// when it slides back by itself.
+    pub swiped: Option<String>,
+    pub swipe_last: String,
+    pub swipe_mix: Spring,
+    swipe_until: Instant,
     /// The row that just left its list, sliding away (1 → 0), with what it said.
     pub gone: Option<(usize, String, String)>,
     pub gone_mix: Spring,
@@ -602,7 +605,6 @@ pub struct App {
     /// A short, local splash after recording a drink. It only drives drawing
     /// on the Water page and settles without keeping the app awake.
     pub water_pulse: Spring,
-    pub dot_pos: Spring,
     pub hits: Vec<(gfx::Rc, Act)>,
     pub settings: Settings,
     /// Luma's reminders, water, focus/Pomodoro and timed tasks.
@@ -725,9 +727,6 @@ impl App {
             sw: Spring::new(COMPACT[0], 230.0, 19.0),
             sh: Spring::new(COMPACT[1], 230.0, 19.0),
             fade: Spring::new(0.0, 900.0, 60.0),
-            slide: Spring::new(0.0, 230.0, 19.0),
-            slide_dir: 1.0,
-            prev_page: Page::Music,
             toast_mix: Spring::new(0.0, 1600.0, 80.0),
             pill_mix: Spring::new(0.0, 1600.0, 80.0),
             last_toast: None,
@@ -768,7 +767,9 @@ impl App {
             pill_prev: None,
             intro: Spring::new(-44.0, 600.0, 46.0),
             intro_grow: Spring::new(0.82, 420.0, 15.0),
-            dot_target: 0.0,
+            strip: Spring::new(0.0, 190.0, 26.0),
+            strip_to: 0.0,
+            swipe: None,
             mode: Mode::Compact,
             last_frame: Instant::now(),
             animating: false,
@@ -793,7 +794,10 @@ impl App {
             chev_near: false,
             pick_mix: Spring::new(0.0, 170.0, 24.0),
             pick_goal: false,
-            undo: None,
+            swiped: None,
+            swipe_last: String::new(),
+            swipe_mix: Spring::new(0.0, 260.0, 28.0),
+            swipe_until: Instant::now(),
             gone: None,
             gone_mix: Spring::new(0.0, 220.0, 26.0),
             wash_from: None,
@@ -840,7 +844,6 @@ impl App {
             down: None,
             hover: Default::default(),
             water_pulse: Spring::new(0.0, 420.0, 18.0),
-            dot_pos: Spring::new(0.0, 230.0, 26.0),
             hits: Vec::new(),
             settings: Settings::load(),
             brain: if demo.is_none() { luma::Brain::open(chrono::Local::now()) } else { luma::Brain::demo(chrono::Local::now()) },
@@ -1386,12 +1389,13 @@ impl App {
         } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
         }
-        // Pages set without go_page (startup, demo) snap the dots instead of sliding.
-        let pages = Page::ALL.len() as f32;
-        if (self.dot_target.rem_euclid(pages).round() as usize) % Page::ALL.len() != self.page.index() {
-            self.dot_target = self.page.index() as f32;
-            self.dot_pos.x = self.dot_target;
+        // Pages set without go_page (startup, demo) are simply there.
+        if self.swipe.is_none() && self.strip_to.round() as usize != self.page.index() {
+            self.strip_to = self.page.index() as f32;
+            self.strip.x = self.strip_to;
+            self.strip.v = 0.0;
         }
+        self.step_swipe();
         // Overscrolled lyrics bounce back once the wheel stops.
         let (lo, hi) = self.lyr_bounds;
         if self.lyr_user_at.is_some_and(|t| t.elapsed() > Duration::from_millis(140)) {
@@ -1435,7 +1439,9 @@ impl App {
             moving |= self.sw.step(t[0], sub);
             moving |= self.sh.step(t[1], sub);
             moving |= self.fade.step(fade_target, sub);
-            moving |= self.slide.step(0.0, sub);
+            if self.swipe.is_none() {
+                moving |= self.strip.step(self.strip_to, sub);
+            }
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
             moving |= self.form_anim.step(form_target, sub);
@@ -1479,6 +1485,7 @@ impl App {
             moving |= self.view_mix.step(0.0, sub);
             moving |= self.month_mix.step(0.0, sub);
             moving |= self.gone_mix.step(0.0, sub);
+            moving |= self.swipe_mix.step(if self.swiped.is_some() { 1.0 } else { 0.0 }, sub);
             let lit = matches!(self.view, ui::View::Care(_) | ui::View::Calendar | ui::View::Form);
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
@@ -1496,7 +1503,6 @@ impl App {
             let (taken, goal) = (self.brain.stats.water, self.brain.cfg.water_goal.max(1));
             moving |= self.ring.step(taken as f32 / goal as f32, sub);
             moving |= self.water_pulse.step(0.0, sub);
-            moving |= self.dot_pos.step(self.dot_target, sub);
             for (sp, target) in self.hover.values_mut() {
                 moving |= sp.step(*target, sub);
             }
@@ -1708,6 +1714,7 @@ impl App {
     /// Mouse wheel over the lyrics view scrolls them; they glide back to the current line later.
     fn wheel(&mut self, notches: f32, ctrl: bool) {
         if let Some(Act::Wheel(id)) = self.hit(self.mouse.0, self.mouse.1) {
+            self.pick_wheel(id);
             self.wheels[id as usize].turn(notches);
             self.kick();
             return;
@@ -2404,7 +2411,6 @@ impl App {
     /// The user's own reminders, by time of day.
     pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
         let mut v = self.brain.cfg.custom.clone();
-        v.retain(|r| !matches!(&self.undo, Some((Deleted::Reminder(d), _)) if d.id == r.id));
         v.sort_by(|a, b| a.time.cmp(&b.time));
         v
     }
@@ -2507,23 +2513,55 @@ impl App {
         if p == self.page {
             return;
         }
-        let from = self.page.index() as i32;
-        let to = p.index() as i32;
-        let n = Page::ALL.len() as i32;
-        let fwd = (to - from).rem_euclid(n) <= n / 2;
-        self.slide_dir = if fwd { 1.0 } else { -1.0 };
-        let step = if fwd { (to - from).rem_euclid(n) } else { -(from - to).rem_euclid(n) };
-        self.dot_target += step as f32;
-        self.prev_page = self.page;
+        self.strip_to = p.index() as f32;
         self.page = p;
-        self.slide.x = 1.0;
-        self.slide.v = 0.0;
         self.view = ui::View::Page;
         self.view_mix.x = 0.0;
         self.reminder_top = 0;
         self.list_pos.x = 0.0;
         self.form = None;
         self.kick();
+    }
+
+    /// Two fingers sideways on a touchpad: the strip of pages follows them.
+    fn swipe_by(&mut self, delta: f32) {
+        if !self.expanded() || self.view != ui::View::Page || self.drag_over {
+            return;
+        }
+        let last = (Page::ALL.len() - 1) as f32;
+        let by = delta / SWIPE_PAGE;
+        let now = Instant::now();
+        let speed = self.swipe.map_or(0.0, |(t, v)| 0.7 * v + 0.3 * by / now.duration_since(t).as_secs_f32().max(0.004));
+        // Past the ends it gives way reluctantly.
+        let at = self.strip.x;
+        self.strip.x = at + if at < 0.0 || at > last { by * 0.3 } else { by };
+        self.strip.v = 0.0;
+        self.swipe = Some((now, speed));
+        self.set_strip_page(self.strip.x.round().clamp(0.0, last) as usize);
+        self.kick();
+    }
+
+    /// The fingers lifted: settle on a page, leaning the way they were going.
+    fn step_swipe(&mut self) {
+        let Some((at, speed)) = self.swipe else { return };
+        if at.elapsed().as_millis() < SWIPE_REST_MS {
+            self.kick();
+            return;
+        }
+        self.swipe = None;
+        let to = ui::strip_rest(self.strip.x, speed, Page::ALL.len());
+        self.strip_to = to;
+        self.set_strip_page(to as usize);
+        self.kick();
+    }
+
+    fn set_strip_page(&mut self, i: usize) {
+        if self.page != Page::ALL[i] {
+            self.page = Page::ALL[i];
+            self.reminder_top = 0;
+            self.list_pos.x = 0.0;
+        }
+        self.strip_to = i as f32;
     }
 
     fn set_noactivate(&self, on: bool) {
@@ -2599,32 +2637,60 @@ impl App {
         }
     }
 
-    /// Pointed at or clicked open: the song if there is one, else the day. A file being dragged
+    /// Pointed at or clicked open: a running focus first, then the song, else the day. A file being dragged
     /// goes to the shelf by its own path.
     fn open_by_hand(&mut self) {
-        self.page = if self.has_media() { Page::Music } else { Page::Today };
-        self.slide.x = 0.0;
+        self.page = if self.brain.focus.is_some() {
+            Page::Pomo
+        } else if self.has_media() {
+            Page::Music
+        } else {
+            Page::Today
+        };
         self.set_mode(Mode::Expanded);
     }
 
-    /// Takes something out of sight; it only really goes when the time to undo is over.
-    fn delete(&mut self, what: Deleted) {
-        self.commit_delete();
-        self.undo = Some((what, Instant::now() + UNDO_TIME));
+    fn month_turn(&mut self, dir: f32) {
+        self.month_dir = dir;
+        self.month_mix.x = 1.0;
+        self.month_mix.v = 0.0;
         self.kick();
     }
 
-    fn commit_delete(&mut self) {
-        match self.undo.take() {
-            Some((Deleted::Reminder(r), _)) => self.brain.delete_task(&r.id),
-            Some((Deleted::Date(d), _)) => self.brain.delete_date(&d.id),
-            _ => {}
-        }
+    /// Slides a row aside to show its Delete button.
+    fn reveal_delete(&mut self, key: String) {
+        self.swipe_last = key.clone();
+        self.swiped = Some(key);
+        self.swipe_until = Instant::now() + SWIPE_TIME;
+        self.kick();
     }
 
-    /// Whether "Deleted · Undo" is up.
-    pub fn undoing(&self) -> bool {
-        self.undo.is_some()
+    fn confirm_delete(&mut self) {
+        let Some(key) = self.swiped.take() else { return };
+        let Some((kind, id)) = key.split_once(':') else { return };
+        match kind {
+            "r" => {
+                if let Some((i, r)) = self.reminders().into_iter().enumerate().find(|(_, r)| r.id == id) {
+                    self.gone = Some((i, r.title.clone(), r.time.clone()));
+                    self.gone_mix.x = 1.0;
+                    self.gone_mix.v = 0.0;
+                    self.brain.delete_task(id);
+                    let rows = self.reminders().len() + (!self.todo.tasks.is_empty()) as usize;
+                    self.reminder_top = self.reminder_top.min(rows.saturating_sub(2));
+                }
+            }
+            "d" => self.brain.delete_date(id),
+            _ => {
+                if let Some(i) = id.parse::<usize>().ok().filter(|i| *i < self.todo.tasks.len()) {
+                    self.todo.tasks.remove(i);
+                    self.todo.save();
+                }
+                if self.todo.tasks.is_empty() {
+                    self.go_view(ui::View::Page);
+                }
+            }
+        }
+        self.kick();
     }
 
     /// Everything the open notch moves between goes through here, so nothing just pops.
@@ -2662,6 +2728,9 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
+        if !matches!(a, Act::RowTrash(..) | Act::RowDelete) {
+            self.swiped = None;
+        }
         match a {
             Act::PagePrev => self.go_page(self.page.prev()),
             Act::PageNext => self.go_page(self.page.next()),
@@ -2808,25 +2877,22 @@ impl App {
                     ui::Cal::Months => self.month.0 += by,
                     ui::Cal::Years => self.month.0 += 10 * by,
                 }
-                self.month_dir = by as f32;
-                self.month_mix.x = 1.0;
-                self.month_mix.v = 0.0;
+                self.month_turn(by as f32);
             }
             Act::Day(y, m, d) => self.open_date(format!("{y:04}-{m:02}-{d:02}")),
-            Act::DateDelete(i) => {
-                let id = self.all_dates().into_iter().nth(i).map(|d| d.0);
-                if let Some(d) = id.and_then(|id| self.brain.cfg.dates.iter().find(|d| d.id == id).cloned()) {
-                    self.delete(Deleted::Date(d));
-                }
+            Act::CalMode(mode) => {
+                self.cal = mode;
+                self.month_turn(0.0);
             }
-            Act::CalMode(mode) => self.cal = mode,
             Act::PickMonth(m) => {
                 self.month.1 = m;
                 self.cal = ui::Cal::Days;
+                self.month_turn(0.0);
             }
             Act::PickYear(y) => {
                 self.month.0 = y;
                 self.cal = ui::Cal::Months;
+                self.month_turn(0.0);
             }
             Act::FocusMode(on) => {
                 self.settings.pomodoro = on;
@@ -2863,40 +2929,22 @@ impl App {
                     self.brain.set_reminder_on(&r.id, !r.enabled, chrono::Local::now());
                 }
             }
-            Act::ReminderDelete(i) => {
-                if let Some(r) = self.reminders().into_iter().nth(i) {
-                    self.gone = Some((i, r.title.clone(), r.time.clone()));
-                    self.gone_mix.x = 1.0;
-                    self.gone_mix.v = 0.0;
-                    self.delete(Deleted::Reminder(r));
-                    let rows = self.reminders().len() + (!self.todo.tasks.is_empty()) as usize;
-                    self.reminder_top = self.reminder_top.min(rows.saturating_sub(2));
+            Act::RowTrash(list, i) => {
+                let key = match list {
+                    0 => self.reminders().into_iter().nth(i).map(|r| format!("r:{}", r.id)),
+                    1 => self.all_dates().into_iter().nth(i).map(|d| format!("d:{}", d.0)),
+                    _ => Some(format!("n:{i}")),
+                };
+                if let Some(key) = key {
+                    self.reveal_delete(key);
                 }
             }
-            Act::Undo => {
-                if let Some((what, _)) = self.undo.take() {
-                    if let Deleted::Note(i, t) = what {
-                        self.todo.tasks.insert(i.min(self.todo.tasks.len()), t);
-                        self.todo.save();
-                    }
-                }
-                self.gone = None;
-                self.kick();
-            }
+            Act::RowDelete => self.confirm_delete(),
+            Act::SaveWheels => self.save_wheels(),
             Act::WaterReset => self.brain.reset_water(),
             Act::OldNotes(on) => {
                 self.go_view(if on { ui::View::OldNotes } else { ui::View::Page });
                 self.reminder_top = 0;
-            }
-            Act::OldDelete(i) => {
-                if i < self.todo.tasks.len() {
-                    let t = self.todo.tasks.remove(i);
-                    self.todo.save();
-                    self.delete(Deleted::Note(i, t));
-                }
-                if self.todo.tasks.is_empty() {
-                    self.go_view(ui::View::Page);
-                }
             }
             Act::FormNext => {
                 match self.form.as_mut() {
@@ -2922,14 +2970,11 @@ impl App {
                 }
             }
             Act::FormDelete => {
-                let (id, date) = self.form.as_ref().map_or((None, false), |f| (f.id.clone(), f.date.is_some()));
-                let what = id.and_then(|id| match date {
-                    true => self.brain.cfg.dates.iter().find(|d| d.id == id).cloned().map(Deleted::Date),
-                    false => self.brain.cfg.custom.iter().find(|r| r.id == id).cloned().map(Deleted::Reminder),
-                });
+                // Back to the list, with the row open for the same confirmation.
+                let key = self.form.as_ref().and_then(|f| f.id.clone().map(|id| format!("{}:{id}", if f.date.is_some() { "d" } else { "r" })));
                 self.close_form(false);
-                if let Some(what) = what {
-                    self.delete(what);
+                if let Some(key) = key {
+                    self.reveal_delete(key);
                 }
             }
             Act::ShelfOpen(i) => {
@@ -2990,8 +3035,8 @@ impl App {
                 t.until = t.until.max(Instant::now() + Duration::from_secs(2));
             }
         }
-        if self.undo.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
-            self.commit_delete();
+        if self.swiped.is_some() && Instant::now() >= self.swipe_until {
+            self.swiped = None;
             self.kick();
         }
         // Waiting device cards play once the current card is done (or the widgets closed).
@@ -3095,11 +3140,6 @@ impl App {
         let near = self.expanded() && (x - (cx - w / 2.0) < 46.0 || (cx + w / 2.0) - x < 46.0);
         if near != self.chev_near {
             self.chev_near = near;
-            self.kick();
-        }
-        let goal = x > cx;
-        if self.view == ui::View::Goal && goal != self.pick_goal {
-            self.pick_goal = goal;
             self.kick();
         }
         if let Some(id) = self.wheel_held {
@@ -3288,7 +3328,7 @@ impl App {
     /// then what has passed, latest first.
     pub fn all_dates(&self) -> Vec<(String, String, i64)> {
         let today = chrono::Local::now().date_naive();
-        let mut v: Vec<_> = self.brain.cfg.dates.iter().filter(|d| !matches!(&self.undo, Some((Deleted::Date(u), _)) if u.id == d.id)).filter_map(|d| {
+        let mut v: Vec<_> = self.brain.cfg.dates.iter().filter_map(|d| {
             let on = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()?;
             Some((d.id.clone(), d.title.clone(), (on - today).num_days()))
         }).collect();
@@ -3311,9 +3351,18 @@ impl App {
                 self.set_focus_minutes(ui::focus_minutes(self.wheels[ui::WheelId::FocusMinutes as usize].index()));
             }
         }
-        if !matches!(self.view, ui::View::Goal | ui::View::Bed) {
-            return;
+    }
+
+    /// On the goal screen the column last touched is the lit one.
+    fn pick_wheel(&mut self, id: ui::WheelId) {
+        if matches!(id, ui::WheelId::Cup | ui::WheelId::Goal) {
+            self.pick_goal = id == ui::WheelId::Goal;
+            self.kick();
         }
+    }
+
+    /// The tick on the goal and bedtime screens: only now do the wheels count.
+    fn save_wheels(&mut self) {
         let index = |a: &App, id: ui::WheelId| a.wheels[id as usize].index();
         let (cup, goal) = (model::CUPS[index(self, ui::WheelId::Cup)], model::GOALS[index(self, ui::WheelId::Goal)]);
         let bed = format!("{:02}:{:02}", index(self, ui::WheelId::BedHour), index(self, ui::WheelId::BedMinute) * 15);
@@ -3325,11 +3374,18 @@ impl App {
             cfg.reminders.sleep.time = bed;
             self.brain.save_config();
         }
+        let back = if self.view == ui::View::Bed { ui::View::Care(ui::Tile::Sleep) } else { ui::View::Page };
+        self.drink_splash();
+        self.go_view(back);
     }
 
     fn on_down(&mut self, x: f32, y: f32) {
         let act = self.hit(x, y);
+        if act.is_none() && self.swiped.take().is_some() {
+            self.kick();
+        }
         if let Some(Act::Wheel(id)) = act {
+            self.pick_wheel(id);
             let t = self.eye_time();
             self.wheels[id as usize].press(y, t);
             self.wheel_held = Some(id);
@@ -3717,6 +3773,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let ctrl = wp.0 & 0x0008 != 0 || GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
             a.wheel(delta, ctrl);
         }
+        WM_MOUSEHWHEEL => a.swipe_by((wp.0 >> 16) as u16 as i16 as f32),
         WM_NOTICE => {
             let n = Box::from_raw(lp.0 as *mut notify::Notice);
             // Title row: sender (or app); second row: the message, else the app name.

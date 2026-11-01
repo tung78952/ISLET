@@ -38,8 +38,9 @@ pub struct Storm {
 }
 
 /// One event of each feature for the pair table (see `storm_event`): volume, brightness, Caps
-/// Lock, charger, Bluetooth, notice, message, pointer, widgets, stepping aside, reminder, focus.
-const PAIRED: [u64; 12] = [0, 1, 2, 4, 5, 7, 10, 12, 16, 17, 19, 21];
+/// Lock, charger, Bluetooth, notice, message, pointer, widgets, stepping aside, reminder, focus,
+/// a sideways swipe.
+const PAIRED: [u64; 13] = [0, 1, 2, 4, 5, 7, 10, 12, 16, 17, 19, 21, 24];
 const PAIR_GAP_MS: u64 = 250;
 const PAIR_WATCH_MS: u64 = 1600;
 const PAIR_REST_MS: u64 = 700;
@@ -188,7 +189,7 @@ impl App {
         let (cx, w) = self.notch_geometry();
         let ev = match s.forced.take() {
             Some(e) => e,
-            None => s.pick(24),
+            None => s.pick(25),
         };
         match ev {
             0 => {
@@ -358,6 +359,12 @@ impl App {
                 self.render();
                 "hide and show"
             }
+            24 => {
+                self.set_mode(Mode::Expanded);
+                let delta = [300isize, -300, 700, -700][s.pick(4) as usize];
+                post(windows::Win32::UI::WindowsAndMessaging::WM_MOUSEHWHEEL, (delta as i16 as u16 as usize) << 16, 0);
+                "swipe"
+            }
             23 => {
                 let open = self.view != crate::ui::View::History && self.mode == Mode::Expanded;
                 self.act(crate::ui::Act::History(open));
@@ -462,11 +469,11 @@ impl App {
         }
         if self.animating && !self.continuous() {
             let springs = [
-                ("sw", &self.sw), ("sh", &self.sh), ("fade", &self.fade), ("slide", &self.slide), ("toast_mix", &self.toast_mix),
+                ("sw", &self.sw), ("sh", &self.sh), ("fade", &self.fade), ("strip", &self.strip), ("toast_mix", &self.toast_mix),
                 ("pill_mix", &self.pill_mix), ("intro", &self.intro), ("intro_grow", &self.intro_grow), ("vol_stretch", &self.vol_stretch),
                 ("sun_rot", &self.sun_rot), ("lyr_user", &self.lyr_user), ("lyr_zoom", &self.lyr_zoom), ("caps_mix", &self.caps_mix),
                 ("tl_frac", &self.tl_frac), ("toast_swap", &self.toast_swap), ("roll_t", &self.roll_t), ("vol_level", &self.vol_level),
-                ("lyr_mix", &self.lyr_mix), ("water_pulse", &self.water_pulse), ("dot_pos", &self.dot_pos),
+                ("lyr_mix", &self.lyr_mix), ("water_pulse", &self.water_pulse),
                 ("aurora_lvl", &self.aurora_lvl),
             ];
             let moving: Vec<String> = springs.iter().filter(|(_, sp)| sp.v.abs() >= 0.05 || !sp.x.is_finite()).map(|(n, sp)| format!("{n} x={:.3} v={:.3}", sp.x, sp.v)).collect();

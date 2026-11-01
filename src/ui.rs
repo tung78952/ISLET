@@ -13,7 +13,6 @@ use crate::Gfx;
 const WHITE: u32 = 0xFFFFFF;
 const GREEN: u32 = 0x21FF54;
 const RED: u32 = 0xFF4F4F;
-const RED_PIE: u32 = 0xE8454D;
 const CHEVRON: u32 = 0x474747;
 const GREY: u32 = 0x8C8C8C;
 const BLUE: u32 = 0x4DBDFF;
@@ -26,6 +25,7 @@ pub const CALM: u32 = 0x3E7BFF;
 /// On: switches, chosen days.
 const ON: u32 = 0x6FE3A5;
 const BUTTON: u32 = 0x2A2A2C;
+const CORAL: u32 = 0xFF8A65;
 const LINE: u32 = 0x2C2C2E;
 /// Header text, list text and the line under it.
 const HEAD: f32 = 14.0;
@@ -55,6 +55,13 @@ pub fn wash_curve(t: f32, from: f32) -> f32 {
     } else {
         1.0 - smooth(((t - WASH_RISE) / (WASH_SECS - WASH_RISE)).min(1.0))
     }
+}
+
+/// Where the strip of pages comes to rest once the fingers lift: the nearest page, or the next
+/// one along if it was moving fast enough.
+pub fn strip_rest(at: f32, speed: f32, pages: usize) -> f32 {
+    let lean = if speed.abs() > 1.5 { 0.4 * speed.signum() } else { 0.0 };
+    (at + lean).round().clamp(0.0, (pages - 1) as f32)
 }
 
 /// Every day, weekdays and weekends, as the form's quick choices.
@@ -178,10 +185,10 @@ impl Page {
         Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
     }
     pub fn next(self) -> Page {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+        Self::ALL[(self.index() + 1).min(Self::ALL.len() - 1)]
     }
     pub fn prev(self) -> Page {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+        Self::ALL[self.index().saturating_sub(1)]
     }
 }
 
@@ -215,11 +222,12 @@ pub enum Act {
     View(View),
     Month(i32),
     Day(i32, u32, u32),
-    DateDelete(usize),
     CalMode(Cal),
     PickMonth(u32),
     PickYear(i32),
-    Undo,
+    SaveWheels,
+    RowTrash(u8, usize),
+    RowDelete,
     FocusMode(bool),
     PomoPlan(u32, u32),
     FormPreset(u8),
@@ -232,8 +240,6 @@ pub enum Act {
     ReminderEdit(usize),
     ReminderSwitch(usize),
     OldNotes(bool),
-    OldDelete(usize),
-    ReminderDelete(usize),
     WaterReset,
     FormDay(u8),
     FormDelete,
@@ -433,36 +439,6 @@ mod icon {
     }
     /// Pomodoro bubble: a dark glass with red liquid whose level is the time left and whose
     /// surface slowly tilts and ripples (Nusa's compact timer).
-    pub fn liquid(g: &Gfx, cx: f32, cy: f32, r: f32, level: f32, t: f32, a: f32) {
-        // Dark glass, darker at the top.
-        g.fill_circle(cx, cy, r, r, 0x1E0306, a);
-        g.glow(cx, cy + r * 0.4, r * 1.1, 0x3A070C, 0.8 * a);
-        // Surface height: 0.10 empty … 0.58 full (a full timer reads as a half glass, as in Nusa),
-        // slowly tilting with a gentle travelling wave.
-        let h = cy + r - (0.1 + 0.48 * level.clamp(0.0, 1.0)) * 2.0 * r;
-        let tilt = 0.5 * (t * 0.7).sin() + 0.12 * (t * 1.9).sin();
-        let mut surf = Vec::with_capacity(34);
-        for i in 0..=32 {
-            let u = i as f32 / 32.0;
-            let x = cx - r + 2.0 * r * u;
-            let wave = 0.7 * (u * 5.5 + t * 2.0).sin() + 0.35 * (u * 9.0 - t * 2.7).sin();
-            surf.push((x, h + (x - cx) * tilt.tan() + wave));
-        }
-        let mut body = surf.clone();
-        body.push((cx + r, cy + r + 2.0));
-        body.push((cx - r, cy + r + 2.0));
-        g.clip_circle(cx, cy, r - 0.5, || {
-            g.polygon(&body, super::RED_PIE, a);
-            // Light from the upper left inside the liquid, deeper red at the bottom right.
-            g.glow(cx - r * 0.4, h + r * 0.35, r * 0.95, 0xFF7C80, 0.45 * a);
-            g.glow(cx + r * 0.5, cy + r * 0.8, r * 0.9, 0xB81F2C, 0.5 * a);
-            // A bright meniscus along the surface.
-            g.polyline(&surf, 1.1, 0xFFB0B3, 0.55 * a);
-        });
-        // Glass rim and a small specular highlight.
-        g.stroke_circle(cx, cy, r - 0.6, 1.4, 0xF4A3A7, 0.8 * a);
-        g.arc_between(cx, cy, r - 2.6, 3.6, 4.4, 1.2, 0xFFFFFF, 0.35 * a);
-    }
     /// Messenger-style chat icon (drawn, not the trademark artwork): a blue-to-violet bubble with
     /// a white zig-zag bolt.
     pub fn messenger(g: &Gfx, cx: f32, cy: f32, r: f32, a: f32) {
@@ -759,11 +735,16 @@ fn compact(a: &mut App, left: f32, w: f32) {
     if charging {
         icon::charging(&a.gfx, left + 20.0, cy, 8.2, a.charge_level(), rest);
     }
-    let time = a.clock().time_label();
+    // A running focus shows what is left of it instead of the time of day.
+    let time = match &a.brain.focus {
+        Some(_) => clock_text(a.pomo_view().0),
+        None => a.clock().time_label(),
+    };
     a.gfx.ui(&time, Rc::new(left, 5.0, w, 20.0), 16.0, 700, WHITE, rest, Align::C);
-    a.gfx.alpha = rest;
+    let base = a.gfx.alpha;
+    a.gfx.alpha = base * rest;
     right_indicator(a, left + w - 28.0, cy);
-    a.gfx.alpha = 1.0;
+    a.gfx.alpha = base;
     if show > 0.3 {
         eyes(a, left + w / 2.0, cy, (show - 0.3) / 0.7, (w / 2.0 - 61.0).max(14.0));
     }
@@ -775,15 +756,27 @@ fn compact(a: &mut App, left: f32, w: f32) {
     }
 }
 
-/// Equalizer bars while music plays, or the focus-timer pie while it runs.
+fn clock_text(left_s: f64) -> String {
+    let secs = left_s.ceil() as u64;
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// Equalizer bars while music plays, or the focus dots while it runs.
 fn right_indicator(a: &mut App, x: f32, cy: f32) {
     // The only part that moves when nothing else does: frames can redraw just this box.
     a.loop_rect = Some(Rc::new(x - 3.0, cy - 12.0, 27.0, 24.0));
     if a.brain.focus.is_some() {
+        // Six dots going out one by one from the right.
         let (left, total, _, _) = a.pomo_view();
-        let frac = (left / total) as f32;
-        let t = a.born.elapsed().as_secs_f32();
-        icon::liquid(&a.gfx, x + 9.2, cy, 9.2, frac, t, 1.0);
+        let lit = (left / total) as f32 * 6.0;
+        for i in 0..6 {
+            let k = (lit - i as f32).clamp(0.0, 1.0);
+            let dx = x + 1.6 + i as f32 * 3.9;
+            if k > 0.02 {
+                a.gfx.fill_circle(dx, cy, 2.9, 2.9, RED, 0.16 * k);
+            }
+            a.gfx.fill_circle(dx, cy, 1.5, 1.5, RED, 0.2 + 0.8 * k);
+        }
         return;
     }
     let mix = a.eq_mix.x.clamp(0.0, 1.0);
@@ -976,10 +969,12 @@ fn toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
                 let fade = 1.0 - ((age - 0.55) / 0.25).clamp(0.0, 1.0);
                 a.gfx.fill_rrect(Rc::new(x - 16.0, cy - 8.0, 32.0, 16.0), 8.0, 0x000000, fade);
                 for dx in [-6.5, 6.5] {
-                    let oval: Vec<(f32, f32)> = (0..24).map(|i| {
-                        let t = i as f32 / 24.0 * std::f32::consts::TAU;
-                        (x + dx + 3.8 * t.cos(), cy + 5.4 * t.sin())
-                    }).collect();
+                    let oval: Vec<(f32, f32)> = (0..24)
+                        .map(|i| {
+                            let t = i as f32 / 24.0 * std::f32::consts::TAU;
+                            (x + dx + 3.8 * t.cos(), cy + 5.4 * t.sin())
+                        })
+                        .collect();
                     lens(&a.gfx, &oval, 2.4, fade);
                 }
             }
@@ -1832,6 +1827,9 @@ fn chevrons(a: &mut App, lx: f32) {
         return;
     }
     for (x, left, act) in [(lx + 14.0, true, Act::PagePrev), (lx + 406.0, false, Act::PageNext)] {
+        if (left && a.page.index() == 0) || (!left && a.page.index() == Page::ALL.len() - 1) {
+            continue;
+        }
         let r = Rc::new(x - 12.0, 58.0, 24.0, 24.0);
         let h = btn(a, r, 0.18);
         a.gfx.fill_circle(x, 70.0, 10.0, 10.0, mix(CHEVRON, 0x8A8A8A, h), show);
@@ -1845,13 +1843,13 @@ fn dots(a: &mut App, lx: f32) {
     let n = Page::ALL.len();
     // The active pill glides between dots: each dot's width and brightness follow its distance
     // from the eased page position.
-    let pos = a.dot_pos.x.rem_euclid(n as f32);
+    let pos = a.strip.x.clamp(0.0, (n - 1) as f32);
     let (aw, dw, gap) = (14.4, 4.0, 4.0);
     let total = aw + dw * (n - 1) as f32 + gap * (n - 1) as f32;
     let mut x = lx + 210.0 - total / 2.0;
     for i in 0..n {
         let d = (i as f32 - pos).abs();
-        let w8 = (1.0 - d.min(n as f32 - d)).clamp(0.0, 1.0);
+        let w8 = (1.0 - d).clamp(0.0, 1.0);
         let wdt = dw + (aw - dw) * w8;
         let r = Rc::new(x - 2.0, 126.0, wdt + 4.0, 14.0);
         let h = btn(a, r, 0.25);
@@ -1863,15 +1861,38 @@ fn dots(a: &mut App, lx: f32) {
 }
 
 fn title(a: &mut App, lx: f32, text: &str) {
-    let name = match text {
-        "Today" => "t_today",
-        "Focus" => "t_focus",
-        "Care" => "t_care",
-        "Reminders" => "t_todo",
-        _ => "t_shelf",
+    let (name, tint) = match text {
+        "Today" => ("t_today", RED),
+        "Focus" => ("t_focus", CORAL),
+        "Care" => ("t_care", WATER),
+        "Reminders" => ("t_todo", WHITE),
+        _ => ("t_shelf", WHITE),
     };
-    pic(a, name, lx + 33.0, 19.0, 18.0, WHITE, 1.0);
+    pic(a, name, lx + 33.0, 19.0, 18.0, tint, 1.0);
     a.gfx.ui(text, Rc::new(lx + 49.0, 8.0, 100.0, 22.0), HEAD, 600, WHITE, 1.0, Align::L);
+}
+
+/// Eases towards `on`, each `key` keeping its own motion.
+fn flip(a: &mut App, key: i32, on: bool) -> f32 {
+    let entry = a.switches.entry((2, key)).or_insert((crate::Spring::new(if on { 1.0 } else { 0.0 }, 220.0, 26.0), on));
+    let changed = entry.1 != on;
+    entry.1 = on;
+    let k = entry.0.x.clamp(0.0, 1.0);
+    if changed {
+        a.kick();
+    }
+    k
+}
+
+/// Two words in one place: as `k` goes from 0 to 1 the first drifts up and out, the second comes in.
+#[allow(clippy::too_many_arguments)]
+fn swap_text(a: &mut App, r: Rc, size: f32, weight: u32, hex: (u32, u32), align: Align, words: (&str, &str), k: f32) {
+    if k < 0.99 {
+        a.gfx.ui(words.0, Rc::new(r.x, r.y - 5.0 * k, r.w, r.h), size, weight, hex.0, 1.0 - k, align);
+    }
+    if k > 0.01 {
+        a.gfx.ui(words.1, Rc::new(r.x, r.y + 5.0 * (1.0 - k), r.w, r.h), size, weight, hex.1, k, align);
+    }
 }
 
 /// Notification history: newest first, three rows at a time, the wheel scrolls.
@@ -1955,26 +1976,9 @@ fn expanded(a: &mut App, lx: f32) {
     if view == View::Page && lyr < 0.99 {
         a.gfx.alpha = base * (1.0 - lyr) * (1.0 - s);
         chevrons(a, lx);
-        if !a.undoing() {
-            dots(a, lx);
-        }
+        dots(a, lx);
         a.gfx.alpha = base;
     }
-    if a.undoing() {
-        undo_pill(a, lx);
-    }
-}
-
-/// The way back after deleting something.
-fn undo_pill(a: &mut App, lx: f32) {
-    let y = if a.view == View::Calendar { 254.0 } else { 116.0 };
-    let r = Rc::new(lx + 150.0, y, 120.0, 22.0);
-    let h = btn(a, r, 0.03);
-    a.gfx.fill_rrect(r, 11.0, mix(0x2A2A2C, 0x3C3C40, h), 1.0);
-    a.gfx.ui("Deleted", Rc::new(r.x + 14.0, r.y, 56.0, r.h), SMALL, 400, 0xC8C8CC, 1.0, Align::L);
-    a.gfx.ui("Undo", Rc::new(r.x + 68.0, r.y, 42.0, r.h), SMALL, 600, ON, 1.0, Align::R);
-    a.gfx.unzoom();
-    hit(a, r, Act::Undo);
 }
 
 fn body(a: &mut App, lx: f32, view: View) {
@@ -1994,25 +1998,28 @@ fn body(a: &mut App, lx: f32, view: View) {
     }
 }
 
+/// The pages lie side by side like one long picture; the notch looks at where the strip stands.
 fn pages(a: &mut App, lx: f32) {
-    let s = a.slide.x.clamp(0.0, 1.2);
-    let dir = a.slide_dir;
-    let base = a.gfx.alpha;
+    let at = a.strip.x;
     let (ox, _) = a.gfx.off;
-    if s > 0.01 {
-        let n = a.hits.len();
-        let prev = a.prev_page;
-        a.gfx.alpha = base * s.min(1.0);
-        a.gfx.offset(ox - dir * 30.0 * (1.0 - s), 0.0);
-        page(a, prev, lx);
-        a.hits.truncate(n);
+    let width = a.sw.x.max(1.0);
+    let n = Page::ALL.len() as i32;
+    let first = at.floor() as i32;
+    let settled = (at - a.page.index() as f32).abs() < 0.04;
+    for i in first..=first + 1 {
+        let d = i as f32 - at;
+        if !(0..n).contains(&i) || d.abs() >= 1.0 {
+            continue;
+        }
+        let hits = a.hits.len();
+        a.gfx.offset(ox + d * width, 0.0);
+        page(a, Page::ALL[i as usize], lx);
+        // Buttons are only live on the page at rest in front.
+        if !(settled && Page::ALL[i as usize] == a.page) {
+            a.hits.truncate(hits);
+        }
     }
-    a.gfx.alpha = base * (1.0 - s).clamp(0.0, 1.0);
-    a.gfx.offset(ox + dir * 30.0 * s, 0.0);
-    let p = a.page;
-    page(a, p, lx);
     a.gfx.offset(ox, 0.0);
-    a.gfx.alpha = base;
 }
 
 fn page(a: &mut App, p: Page, lx: f32) {
@@ -2306,6 +2313,15 @@ mod layout_tests {
     }
 
     #[test]
+    fn the_strip_settles_on_a_page_and_stops_at_the_ends() {
+        assert_eq!(strip_rest(2.3, 0.0, 6), 2.0);
+        assert_eq!(strip_rest(2.3, 4.0, 6), 3.0);
+        assert_eq!(strip_rest(2.7, -4.0, 6), 2.0);
+        assert_eq!(strip_rest(-0.4, -9.0, 6), 0.0);
+        assert_eq!(strip_rest(5.3, 9.0, 6), 5.0);
+    }
+
+    #[test]
     fn days_passed_read_as_past() {
         assert_eq!(days_left(-3), "3 days ago");
         assert_eq!(days_left(-1), "yesterday");
@@ -2376,15 +2392,14 @@ fn labelled_hot(a: &mut App, cx: f32, cy: f32, label: &str, live: bool, hot: u32
 
 fn focus_idle(a: &mut App, lx: f32, live: bool) {
     let pomodoro = a.settings.pomodoro;
-    // Plain focus or Pomodoro, the one in use lit.
+    // Plain focus or Pomodoro: a pill glides to the one in use.
+    let mode = flip(a, 1, pomodoro);
+    a.gfx.fill_rrect(Rc::new(lx + 34.0 + mode * 84.0, 42.0, 84.0, 26.0), 13.0, BUTTON, 1.0);
     for (i, (name, on)) in [("Focus", false), ("Pomodoro", true)].into_iter().enumerate() {
         let r = Rc::new(lx + 34.0 + i as f32 * 84.0, 42.0, 84.0, 26.0);
-        let chosen = on == pomodoro;
+        let lit = if on { mode } else { 1.0 - mode };
         let h = if live { btn(a, r, 0.03) } else { 0.0 };
-        if chosen {
-            a.gfx.fill_rrect(r, 13.0, BUTTON, 1.0);
-        }
-        a.gfx.ui(name, r, SMALL, if chosen { 600 } else { 400 }, mix(if chosen { WHITE } else { 0x8E8E93 }, WHITE, h.clamp(0.0, 1.0)), 1.0, Align::C);
+        a.gfx.ui(name, r, SMALL, 500, mix(0x8E8E93, WHITE, lit.max(h.clamp(0.0, 1.0))), 1.0, Align::C);
         a.gfx.unzoom();
         if live {
             hit(a, r, Act::FocusMode(on));
@@ -2397,14 +2412,12 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
     for (i, (work, pause)) in plans.into_iter().enumerate() {
         let r = Rc::new(lx + 34.0 + i as f32 * 58.0, CY - 15.0, 52.0, 30.0);
         let on = work == chosen && (!pomodoro || pause == rest);
+        let k = flip(a, 10 + i as i32, on);
         let h = if live { btn(a, r, 0.06) } else { 0.0 };
-        if on {
-            a.gfx.stroke_rrect(r, 15.0, 1.5, RED, 1.0);
-        } else {
-            a.gfx.fill_rrect(r, 15.0, mix(BUTTON, 0x48484C, h), 1.0);
-        }
-        let text = if pomodoro { format!("{work}/{pause}") } else { work.to_string() };
-        a.gfx.ui(&text, r, if pomodoro { 13.0 } else { BODY }, 600, if on { RED } else { 0xE0E0E2 }, 1.0, Align::C);
+        a.gfx.fill_rrect(r, 15.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
+        a.gfx.stroke_rrect(r, 15.0, 1.5, RED, k);
+        let tone = (mix(0xE0E0E2, RED, k), mix(0xE0E0E2, RED, k));
+        swap_text(a, r, 13.5, 600, tone, Align::C, (&work.to_string(), &format!("{work}/{pause}")), mode);
         a.gfx.unzoom();
         if live {
             hit(a, r, if pomodoro { Act::PomoPlan(work, pause) } else { Act::PomoMinutes(work) });
@@ -2423,57 +2436,63 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
     labelled(a, lx + 368.0, 72.0, "Start", live, Act::PomoToggle, |g, x, y| icon::play(g, x + 1.0, y, 12.0, RED, 1.0));
 }
 
-/// Two small eyes of scan lines.
-fn little_eyes(a: &mut App, cx: f32, cy: f32, apart: f32, rx: f32, ry: f32, alpha: f32) {
-    for side in [-1.0, 1.0] {
-        let oval: Vec<(f32, f32)> = (0..24)
-            .map(|i| {
-                let t = i as f32 / 24.0 * std::f32::consts::TAU;
-                (cx + side * apart + rx * t.cos(), cy + ry * t.sin())
-            })
-            .collect();
-        lens(&a.gfx, &oval, 2.4, alpha);
-    }
-}
-
 fn focus_running(a: &mut App, lx: f32, live: bool) {
-    use std::f32::consts::{FRAC_PI_2, TAU};
-    let (cx, cy, r) = (lx + 84.0, 82.0, 38.0);
+    use std::f32::consts::TAU;
     let (left_s, total_s, running, phase) = a.pomo_view();
     let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
-    // A ring of dots going out one by one, clockwise from 12 o'clock.
-    const DOTS: usize = 36;
-    let gone = (1.0 - left) * DOTS as f32;
+    // A wave of dots flowing slowly, going out from its far end as the time runs down.
+    const DOTS: usize = 34;
+    let (x0, x1, cy) = (lx + 28.0, lx + 194.0, 78.0);
+    let flow = a.born.elapsed().as_secs_f32() * if running { 0.5 } else { 0.0 };
+    let lit = left * DOTS as f32;
     for i in 0..DOTS {
-        let k = (i as f32 + 1.0 - gone).clamp(0.0, 1.0);
-        let t = -FRAC_PI_2 + TAU * i as f32 / DOTS as f32;
-        let (x, y) = (cx + r * t.cos(), cy + r * t.sin());
+        let u = i as f32 / (DOTS - 1) as f32;
+        let k = (lit - i as f32).clamp(0.0, 1.0);
+        let tail = (1.0 - (i as f32 - (lit - 8.0)).max(0.0) / 8.0).clamp(0.3, 1.0);
+        let (x, y) = (x0 + (x1 - x0) * u, cy + 13.0 * (u * 1.5 * TAU - flow).sin());
         if k > 0.02 {
-            a.gfx.fill_circle(x, y, 4.2, 4.2, RED, 0.14 * k);
+            a.gfx.fill_circle(x, y, 4.0, 4.0, RED, 0.14 * k * tail);
         }
-        a.gfx.fill_circle(x, y, 2.1, 2.1, RED, 0.14 + 0.86 * k);
+        a.gfx.fill_circle(x, y, 1.9, 1.9, RED, 0.08 + 0.92 * k * tail);
     }
-    // The robot keeps you company: a slow blink at work, lids down on a break or a pause.
-    let time = a.born.elapsed().as_secs_f32();
-    let resting = !running || a.brain.focus.as_ref().is_some_and(|f| f.resting());
-    let blink = time % 4.2 < 0.14;
-    little_eyes(a, cx, cy, 10.0, 6.5, if resting || blink { 1.6 } else { 11.0 }, 1.0);
-    divider(a, lx + 142.0, 50.0, 114.0);
-    pic(a, "ic_focus", lx + 165.0, 60.0, 15.0, WHITE, 0.8);
-    a.gfx.ui(&phase, Rc::new(lx + 178.0, 50.0, 84.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
-    let secs = left_s.ceil() as u64;
-    a.gfx.ui(&format!("{:02}:{:02}", secs / 60, secs % 60), Rc::new(lx + 156.0, 70.0, 110.0, 40.0), 30.0, 600, WHITE, 1.0, Align::L);
-    labelled(a, lx + 296.0, 72.0, if running { "Pause" } else { "Resume" }, live, Act::PomoToggle, |g, x, y| {
+    pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
+    a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
+    a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
+    labelled(a, lx + 330.0, 72.0, if running { "Pause" } else { "Resume" }, live, Act::PomoToggle, |g, x, y| {
         if running {
             icon::pause(g, x, y, 11.0, WHITE, 1.0);
         } else {
             icon::play(g, x + 1.0, y, 11.0, WHITE, 1.0);
         }
     });
-    labelled(a, lx + 356.0, 72.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
+    labelled(a, lx + 382.0, 72.0, "Stop", live, Act::PomoReset, |g, x, y| g.fill_rrect(Rc::new(x - 5.5, y - 5.5, 11.0, 11.0), 2.0, WHITE, 1.0));
 }
 
 // ---------------------------------------------------------------- today
+
+/// The red button a swiped row shows, sliding in from the right.
+fn delete_button(a: &mut App, right: f32, cy: f32, k: f32) {
+    let r = Rc::new(right - 70.0 + (1.0 - k) * 40.0, cy - 13.0, 70.0, 26.0);
+    let h = btn(a, r, 0.05).clamp(0.0, 1.0);
+    let base = a.gfx.alpha;
+    a.gfx.alpha = base * k;
+    a.gfx.fill_rrect(r, 13.0, mix(0xD93A40, 0xF0525A, h), 1.0);
+    a.gfx.ui("Delete", r, SMALL, 600, WHITE, 1.0, Align::C);
+    a.gfx.alpha = base;
+    a.gfx.unzoom();
+    if k > 0.5 {
+        hit(a, r, Act::RowDelete);
+    }
+}
+
+/// How far this row has slid aside.
+fn swipe_of(a: &App, key: &str) -> f32 {
+    if a.swipe_last == key {
+        a.swipe_mix.x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 
 fn days_left(left: i64) -> String {
     match left {
@@ -2519,13 +2538,13 @@ fn today(a: &mut App, lx: f32) {
     hit(a, line_box, Act::View(View::Calendar));
     const CY: f32 = 110.0;
     let next = a.all_dates().into_iter().find(|d| d.2 >= 0);
-    pic(a, "t_today", lx + 38.0, CY, 15.0, WHITE, 1.0);
-    let line = match (&next, hot) {
-        (_, true) => "Open calendar".to_string(),
-        (Some((_, name, left)), _) => format!("{name} {}", days_left(*left)),
+    pic(a, "t_today", lx + 38.0, CY, 15.0, RED, 1.0);
+    let line = match &next {
+        Some((_, name, left)) => format!("{name} {}", days_left(*left)),
         _ => "Add a day that matters".to_string(),
     };
-    a.gfx.ui(&line, Rc::new(lx + 54.0, CY - 11.0, 176.0, 22.0), 13.0, 400, if hot { WHITE } else { 0xD8D8DA }, 1.0, Align::L);
+    let k = flip(a, 2, hot);
+    swap_text(a, Rc::new(lx + 54.0, CY - 11.0, 176.0, 22.0), 13.0, 400, (0xD8D8DA, WHITE), Align::L, (&line, "Open calendar"), k);
     divider(a, lx + 236.0, CY - 8.0, CY + 8.0);
     let cfg = &a.brain.cfg;
     let litres = (a.brain.stats.water * cfg.cup_ml) as f32 / 1000.0;
@@ -2600,17 +2619,22 @@ fn calendar(a: &mut App, lx: f32) {
     if dates.is_empty() {
         a.gfx.ui("Press a day to add one", Rc::new(lx + 282.0, 70.0, 124.0, 34.0), SMALL, 400, 0x8E8E93, 1.0, Align::LW);
     }
-    for (i, (_, name, left)) in dates.into_iter().take(4).enumerate() {
+    for (i, (id, name, left)) in dates.into_iter().take(4).enumerate() {
         let y = 68.0 + i as f32 * 46.0;
         let dim = if left < 0 { 0.5 } else { 1.0 };
         // The trash waits until the row is pointed at, so the name has the room.
-        let near = hovering(a, Rc::new(lx + 278.0, y, 138.0, 40.0));
-        let tw = if near { 76.0 } else { 104.0 };
-        pic(a, "t_today", lx + 293.0, y + 18.0, 15.0, WHITE, dim);
+        let key = format!("d:{id}");
+        let slid = swipe_of(a, &key);
+        let near = slid < 0.05 && hovering(a, Rc::new(lx + 278.0, y, 138.0, 40.0));
+        let tw = if near { 76.0 } else { 104.0 } - 50.0 * slid;
+        pic(a, "t_today", lx + 293.0, y + 18.0, 15.0, RED, dim);
         a.gfx.ui(&name, Rc::new(lx + 308.0, y + 2.0, tw, 18.0), 13.0, 500, WHITE, dim, Align::L);
         a.gfx.ui(&days_left(left), Rc::new(lx + 308.0, y + 20.0, tw, 16.0), SMALL, 400, 0xA0A0A5, dim, Align::L);
         if near {
-            head_button(a, Rc::new(lx + 388.0, y + 8.0, 22.0, 22.0), Act::DateDelete(i), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+            head_button(a, Rc::new(lx + 388.0, y + 8.0, 22.0, 22.0), Act::RowTrash(1, i), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        }
+        if slid > 0.01 {
+            delete_button(a, lx + 410.0, y + 19.0, slid);
         }
     }
 }
@@ -2657,7 +2681,7 @@ fn care(a: &mut App, lx: f32) {
     use std::f32::consts::{FRAC_PI_2, TAU};
     title(a, lx, "Care");
     let cfg = &a.brain.cfg;
-    let (taken, goal) = (a.brain.stats.water * cfg.cup_ml, cfg.water_goal * cfg.cup_ml);
+    let goal = cfg.water_goal * cfg.cup_ml;
     let (cx, cy, r) = (lx + 72.0, 84.0, 40.0 + 1.5 * a.water_pulse.x.clamp(-1.0, 2.0));
     let ring = Rc::new(cx - 44.0, cy - 44.0, 88.0, 88.0);
     // Pointing at it shows it can be set.
@@ -2673,8 +2697,8 @@ fn care(a: &mut App, lx: f32) {
         a.gfx.arc_diag(cx, cy, r, -FRAC_PI_2, -FRAC_PI_2 + TAU * done, width, tint, tint);
     }
     pic(a, "ic_water", cx, cy - 13.0, 22.0, WATER, 1.0);
-    let text = if hot > 0.5 { "Set goal".to_string() } else { format!("{:.1} / {:.1} L", taken as f32 / 1000.0, goal as f32 / 1000.0) };
-    a.gfx.ui(&text, Rc::new(cx - 38.0, cy + 2.0, 76.0, 18.0), SMALL, 600, WHITE, 1.0, Align::C);
+    let text = format!("{:.1} / {:.1} L", a.ring.x.max(0.0) * goal as f32 / 1000.0, goal as f32 / 1000.0);
+    swap_text(a, Rc::new(cx - 38.0, cy + 2.0, 76.0, 18.0), SMALL, 600, (WHITE, WHITE), Align::C, (&text, "Set goal"), hot);
     hit(a, ring, Act::View(View::Goal));
     head_button(a, Rc::new(lx + 124.0, 49.0, 32.0, 32.0), Act::Drank, |g, x, y| icon::plus(g, x, y, 6.0, 1.9, WHITE, 1.0));
     head_button(a, Rc::new(lx + 124.0, 87.0, 32.0, 32.0), Act::WaterReset, |g, x, y| icon::reset(g, x, y, 5.6, WHITE, 1.0));
@@ -2763,8 +2787,9 @@ fn goal(a: &mut App, lx: f32) {
     a.gfx.alpha = base * (1.0 - 0.72 * k);
     wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 36.0, 140.0, 92.0), &cups, 20.0);
     a.gfx.alpha = base * (0.28 + 0.72 * k);
-    wheel_sized(a, WheelId::Goal, Rc::new(lx + 220.0, 36.0, 140.0, 92.0), &goals, 20.0);
+    wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 36.0, 130.0, 92.0), &goals, 20.0);
     a.gfx.alpha = base;
+    form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
 
 fn bed(a: &mut App, lx: f32) {
@@ -2774,6 +2799,7 @@ fn bed(a: &mut App, lx: f32) {
     wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 36.0, 76.0, 92.0), &hours, 28.0);
     a.gfx.ui(":", Rc::new(lx + 198.0, 60.0, 24.0, 40.0), 26.0, 600, WHITE, 1.0, Align::C);
     wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 36.0, 76.0, 92.0), &quarters, 28.0);
+    form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3099,8 +3125,14 @@ fn old_notes(a: &mut App, lx: f32) {
     let notes: Vec<String> = a.todo.tasks.iter().map(|t| t.title.clone()).collect();
     for (n, note) in notes.iter().enumerate().skip(top).take(LIST_ROWS) {
         let cy = LIST_Y + (n - top) as f32 * LIST_GAP;
-        a.gfx.ui(note, Rc::new(lx + 30.0, cy - 12.0, 310.0, 24.0), BODY, 400, 0xD8D8D8, 1.0, Align::L);
-        head_button(a, Rc::new(lx + LIST_RIGHT - 24.0, cy - 12.0, 24.0, 24.0), Act::OldDelete(n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        let slid = swipe_of(a, &format!("n:{n}"));
+        a.gfx.ui(note, Rc::new(lx + 30.0 - 78.0 * slid, cy - 12.0, 310.0, 24.0), BODY, 400, 0xD8D8D8, 1.0, Align::L);
+        if slid < 0.5 {
+            head_button(a, Rc::new(lx + LIST_RIGHT - 24.0 - 78.0 * slid, cy - 12.0, 24.0, 24.0), Act::RowTrash(2, n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        }
+        if slid > 0.01 {
+            delete_button(a, lx + LIST_RIGHT, cy, slid);
+        }
     }
     scrollbar(a, lx, top, notes.len());
 }
@@ -3141,8 +3173,10 @@ fn todo(a: &mut App, lx: f32) {
         if !(20.0..150.0).contains(&cy) {
             continue;
         }
-        let shown = (top..top + LIST_ROWS).contains(&n);
-        let row = Rc::new(lx + 24.0, cy - 16.0, 276.0, 32.0);
+        let slid = swipe_of(a, &format!("r:{}", r.id));
+        let dx = -78.0 * slid;
+        let shown = (top..top + LIST_ROWS).contains(&n) && slid < 0.05;
+        let row = Rc::new(lx + 24.0 + dx, cy - 16.0, 276.0, 32.0);
         let h = btn(a, row, 0.04);
         a.gfx.fill_rrect(row, 12.0, 0xFFFFFF, 0.05 * h.min(1.0));
         let tone = if r.enabled { WHITE } else { 0x6D6D6D };
@@ -3154,10 +3188,13 @@ fn todo(a: &mut App, lx: f32) {
         }
         let hits = a.hits.len();
         let key = (1, r.id.bytes().fold(7i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32)));
-        toggle(a, Rc::new(lx + 308.0, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), key, r.enabled, Act::ReminderSwitch(n));
-        head_button(a, Rc::new(lx + LIST_RIGHT - 24.0, cy - 12.0, 24.0, 24.0), Act::ReminderDelete(n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        toggle(a, Rc::new(lx + 308.0 + dx, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), key, r.enabled, Act::ReminderSwitch(n));
+        head_button(a, Rc::new(lx + LIST_RIGHT - 24.0 + dx, cy - 12.0, 24.0, 24.0), Act::RowTrash(0, n), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
         if !shown {
             a.hits.truncate(hits);
+        }
+        if slid > 0.01 {
+            delete_button(a, lx + LIST_RIGHT, cy, slid);
         }
     }
     a.gfx.pop_clip();
