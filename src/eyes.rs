@@ -545,6 +545,8 @@ const MINI_NOD: Lens = ((-140.0, -45.0), (-10.0, 15.0), [(-95.0, -25.0), (-45.0,
 /// and timing, so any character with the same set of looks can perform it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ActKind {
+    /// The shutdown countdown: dozing off, not a reminder to push at.
+    Nod,
     Water,
     Sleep,
     Breathe,
@@ -566,6 +568,8 @@ pub struct ActFrame {
     pub buttons: f32,
     /// The eyes pulling the notch apart (0..1).
     pub stretch: f32,
+    /// How far the head has sunk, for the eyes to follow.
+    pub dip: f32,
     /// In and out of a breath (-1..1).
     pub swell: f32,
     /// How far along the act's own business is (0..1).
@@ -591,6 +595,9 @@ fn smooth(k: f32) -> f32 {
 
 /// The act at `e` seconds: the wind-up and the blow are shared, then each reminder does its own.
 pub fn act(kind: ActKind, e: f32) -> ActFrame {
+    if kind == ActKind::Nod {
+        return nod(e);
+    }
     let waiting = (e - ACT_END).max(0.0) % ACT_NUDGE;
     let nudge = e >= ACT_END + ACT_NUDGE;
     let lunge = match e {
@@ -606,6 +613,7 @@ pub fn act(kind: ActKind, e: f32) -> ActFrame {
     let (mut stretch, mut swell) = (0.0, 0.0);
     if e >= 1.2 && e < ACT_END {
         match kind {
+            ActKind::Nod => {}
             ActKind::Water => gaze = if play < 0.7 { 0.8 } else { -0.25 },
             ActKind::Sleep => {
                 gaze = 0.0;
@@ -652,6 +660,39 @@ pub fn act(kind: ActKind, e: f32) -> ActFrame {
         stretch,
         swell,
         play,
+        dip: 0.0,
+    }
+}
+
+/// One nod: the head sinks, the eyes shut, and it jerks back up.
+pub const NOD: f32 = 5.0;
+/// From here to the end of the countdown they stay shut.
+const NOD_ASLEEP: f32 = 54.0;
+
+/// Dozing off through the 60 s countdown, the eyes shut for longer with every nod.
+fn nod(e: f32) -> ActFrame {
+    let p = e % NOD / NOD;
+    let tired = (e / NOD_ASLEEP).clamp(0.0, 1.0);
+    let sinking = p < 0.8;
+    let (look, dip) = if e >= NOD_ASLEEP {
+        (Look::Closed, 0.8)
+    } else if sinking {
+        (if p > 0.65 - 0.5 * tired { Look::Closed } else { Look::Sleepy }, 0.8 * smooth(p / 0.8))
+    } else {
+        (Look::Sleepy, 0.0)
+    };
+    ActFrame {
+        look,
+        gaze: 0.0,
+        blink: false,
+        lunge: 0.0,
+        title: overshoot(e / 0.36),
+        subtitle: overshoot((e - 0.14) / 0.34),
+        buttons: 1.0,
+        stretch: 0.0,
+        swell: 0.0,
+        play: 3.0 / 7.0,
+        dip,
     }
 }
 
@@ -1075,6 +1116,13 @@ mod tests {
 
     #[test]
     fn an_act_winds_up_hits_and_lets_the_words_out_in_turn() {
+        // The countdown has no wind-up and no blow: it only dozes.
+        for i in 0..6000 {
+            assert_eq!(act(ActKind::Nod, i as f32 * 0.01).lunge, 0.0);
+        }
+        assert_eq!(act(ActKind::Nod, 58.0).look, Look::Closed);
+        assert!(act(ActKind::Nod, 3.0).dip > act(ActKind::Nod, 0.5).dip);
+        assert_eq!(act(ActKind::Nod, 4.5).dip, 0.0, "jerks back up");
         for kind in [ActKind::Water, ActKind::Sleep, ActKind::Breathe, ActKind::Stretch, ActKind::Rest] {
             assert_eq!(act(kind, 0.3).title, 0.0);
             assert!(act(kind, 0.7).lunge < 0.0);

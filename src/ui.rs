@@ -1537,7 +1537,7 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
                 pic(a, "ic_water", px, cy + 0.6 * (e * 3.4).sin(), S, WATER, 1.0);
                 a.gfx.unzoom();
             }
-            K::Sleep => {
+            K::Sleep | K::Nod => {
                 a.gfx.rotate(px, cy, 0.1 * rock);
                 pic(a, "ic_sleep", px, cy + 3.0 - 7.0 * f.play, S, WHITE, 1.0);
                 a.gfx.unzoom();
@@ -1557,6 +1557,17 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
     a.gfx.push_clip(Rc::new(left + 12.0, 0.0, w - 24.0, h));
     act_eyes(a, eyes_at + reach * a.eyes.lunge.x, cy, scale, 33.0 * f.stretch);
     a.gfx.pop_clip();
+    if kind == K::Nod {
+        // Each nod lets out a few soft z's over the eyes.
+        let beat = e % crate::eyes::NOD;
+        for (i, size) in [9.0, 11.0, 13.0].into_iter().enumerate() {
+            let k = (beat - 0.9 - 0.5 * i as f32) / 2.4;
+            if (0.0..1.0).contains(&k) {
+                let at = Rc::new(eyes_at + 20.0 + 9.0 * i as f32, cy - 26.0 - 22.0 * k, 16.0, 16.0);
+                a.gfx.ui("z", at, size, 600, 0xB8B8BC, (1.0 - k) * (k * 6.0).min(1.0), Align::C);
+            }
+        }
+    }
     let drink = a.drink_time();
     if let Some(age) = a.reaction.filter(|r| r.1).map(|r| r.0.elapsed().as_secs_f32() - drink).filter(|age| *age > 0.0) {
         // Little hearts of scan lines drift up from the eyes.

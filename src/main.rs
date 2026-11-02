@@ -1258,7 +1258,12 @@ impl App {
         let t = self.toast.as_ref()?;
         let kind = match t.kind {
             ToastKind::Water | ToastKind::Sample(0) => A::Water,
-            ToastKind::Sample(1) | ToastKind::Remind(K::Sleep | K::Water) | ToastKind::Shutdown => A::Sleep,
+            ToastKind::Sample(1) | ToastKind::Remind(K::Sleep | K::Water) => A::Sleep,
+            // Counted from the countdown itself, so coming back from under a toast keeps its place.
+            ToastKind::Shutdown => {
+                let left = self.shutdown_at.map_or(SHUTDOWN_WAIT, |at| at.saturating_duration_since(Instant::now()));
+                return Some((A::Nod, (SHUTDOWN_WAIT.saturating_sub(left)).as_secs_f32()));
+            }
             ToastKind::Sample(2) | ToastKind::Remind(K::Breathe) => A::Breathe,
             ToastKind::Sample(3) | ToastKind::Remind(K::Stretch) => A::Stretch,
             ToastKind::Sample(4) | ToastKind::Remind(K::Eyes) => A::Rest,
@@ -1665,6 +1670,10 @@ impl App {
         if !self.mouse_in || buttons < 0.6 {
             return (rest, rest_gaze);
         }
+        // Dozing, they only stir when the pointer is on Cancel.
+        if self.act_now().is_some_and(|a| a.0 == eyes::ActKind::Nod) && self.hit(self.mouse.0, self.mouse.1).is_none() {
+            return (rest, rest_gaze);
+        }
         // Towards the pointer from where the eyes stand, which on an act's card is far left.
         let from = if self.act_now().is_some() { self.card_eyes_x } else { WIN_W / 2.0 };
         let gaze = ((self.mouse.0 - from) / CARD_GAZE).clamp(-1.0, 1.0);
@@ -1698,7 +1707,7 @@ impl App {
         } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
-            let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lift: self.card_lift(), lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
+            let feel = eyes::Feel { show: true, look, blink: f.blink && look == f.look, gaze, lift: if kind == eyes::ActKind::Nod { f.dip } else { self.card_lift() }, lunge: if self.reaction.is_some() { 0.0 } else { f.lunge }, ..eyes::Feel::ASLEEP };
             self.eyes.lean.tune(CARD_LEAN.0, CARD_LEAN.1);
             self.eyes.step(feel, dt);
         } else if self.toast.as_ref().is_some_and(|t| t.kind.answered()) {
@@ -1858,7 +1867,7 @@ impl App {
             || self.eye_feel.show
             // A card's eyes stay out while it waits, and need frames only when the act says so.
             || self.eyes.show.x > 0.01 && self.act_now().is_none()
-            || !self.hidden && self.act_now().is_some_and(|(_, e)| eyes::act_moving(e))
+            || !self.hidden && self.act_now().is_some_and(|(k, e)| k == eyes::ActKind::Nod || eyes::act_moving(e))
             || !self.hidden && self.interactive_toast() && (self.eyes.lean.v.abs() > 0.02 || self.eyes.drop.v.abs() > 0.02)
             || !self.hidden && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Task)
             || !self.hidden && self.brain.focus.as_ref().is_some_and(|f| !f.paused())
@@ -4481,6 +4490,11 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     if kv.get("history_open") == Some(&"1") {
         a.view = ui::View::History;
+    }
+    // "shutdown=47": the countdown card with that many seconds left.
+    if let Some(left) = kv.get("shutdown").and_then(|v| v.parse::<u64>().ok()) {
+        a.shutdown_at = Some(Instant::now() + Duration::from_secs(left));
+        a.show_shutdown();
     }
     // "luma=water|stretch|eyes|breathe|sleep|task|headsup|focusend|app": Luma's cards.
     if let Some(v) = kv.get("luma") {
