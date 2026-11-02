@@ -552,6 +552,28 @@ fn held(vk: VIRTUAL_KEY) -> bool {
 static LAST_KEY: AtomicIsize = AtomicIsize::new(0);
 
 /// Milliseconds since the last key press.
+/// Whether the window in front belongs to a process that outranks this one (run as administrator,
+/// or shielded by anti-cheat). The keyboard hook sees nothing pressed in such a window.
+pub fn front_outranks_us() -> bool {
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+        if pid == 0 {
+            return false;
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return true };
+        let mut token = HANDLE::default();
+        let readable = OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok();
+        if readable {
+            let _ = CloseHandle(token);
+        }
+        let _ = CloseHandle(process);
+        !readable
+    }
+}
+
 pub fn key_idle_ms() -> u32 {
     let last = LAST_KEY.load(Ordering::Relaxed) as u32;
     unsafe { windows::Win32::System::SystemInformation::GetTickCount() }.wrapping_sub(last)

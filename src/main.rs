@@ -629,6 +629,7 @@ pub struct App {
     drawn_minute: u32,
     /// Current period of the pointer/yield poll (ms).
     zone_every: u32,
+    hook_blind: bool,
     /// Capture exclusion stays on until this moment after the last message card.
     private_until: Option<Instant>,
     pub eyes: eyes::Eyes,
@@ -893,6 +894,7 @@ impl App {
             held_notice: None,
             drawn_minute: u32::MAX,
             zone_every: 50,
+            hook_blind: false,
             private_until: None,
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
@@ -2311,7 +2313,13 @@ impl App {
         let near = (pt.y as f32) < self.pos.1 as f32 + (WIN_H + 160.0) * s
             && (pt.x as f32 - (self.pos.0 as f32 + WIN_W * s / 2.0)).abs() < (WIN_W / 2.0 + 160.0) * s;
         let busy = near || down || self.yielded || self.drag_over || sys::key_idle_ms() < 1500 || self.eye_feel.show || self.card_after.is_some() || self.meter_on;
-        let every = if busy { 50 } else { 250 };
+        // In a window the hook cannot see into, this poll is all Caps Lock has.
+        let blind = sys::front_outranks_us();
+        if blind != self.hook_blind {
+            self.hook_blind = blind;
+            sys::timelog(&format!("hook blind {blind}"));
+        }
+        let every = if busy || blind { 50 } else { 250 };
         if every != self.zone_every {
             self.zone_every = every;
             unsafe { SetTimer(Some(self.hwnd), T_DRAGZONE, every, None) };
