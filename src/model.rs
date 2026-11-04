@@ -246,3 +246,81 @@ impl Shelf {
         self.save();
     }
 }
+
+// ---------------------------------------------------------------- lyric offsets
+
+const LYRIC_OFFSETS: &str = "lyric_offsets.txt";
+/// How far the words of one song may be moved, either way, in seconds.
+pub const LYRIC_OFFSET_MAX: f64 = 30.0;
+
+/// Songs whose words run early or late in the lyrics found for them: seconds to add to the
+/// playing position, per song (title and artist).
+#[derive(Default)]
+pub struct LyricOffsets {
+    by_song: HashMap<String, f64>,
+}
+
+impl LyricOffsets {
+    pub fn load() -> Self {
+        Self::parse(&fs::read_to_string(data_dir().join(LYRIC_OFFSETS)).unwrap_or_default())
+    }
+
+    fn parse(text: &str) -> Self {
+        let by_song = text
+            .lines()
+            .filter_map(|l| l.rsplit_once('\t'))
+            .filter_map(|(k, v)| Some((k.to_string(), v.trim().parse::<f64>().ok()?.clamp(-LYRIC_OFFSET_MAX, LYRIC_OFFSET_MAX))))
+            .filter(|(_, v)| *v != 0.0)
+            .collect();
+        Self { by_song }
+    }
+
+    fn text(&self) -> String {
+        let mut rows: Vec<_> = self.by_song.iter().collect();
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+        rows.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect()
+    }
+
+    pub fn get(&self, song: &str) -> f64 {
+        self.by_song.get(song).copied().unwrap_or(0.0)
+    }
+
+    /// Moves a song's words by `by` seconds and returns where they now stand.
+    pub fn shift(&mut self, song: &str, by: f64) -> f64 {
+        let v = ((self.get(song) + by) * 2.0).round() / 2.0;
+        let v = v.clamp(-LYRIC_OFFSET_MAX, LYRIC_OFFSET_MAX);
+        if v == 0.0 {
+            self.by_song.remove(song);
+        } else {
+            self.by_song.insert(song.to_string(), v);
+        }
+        v
+    }
+
+    pub fn save(&self) {
+        let path = data_dir().join(LYRIC_OFFSETS);
+        let tmp = path.with_extension("tmp");
+        if fs::write(&tmp, self.text()).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lyric_offset_tests {
+    use super::*;
+
+    #[test]
+    fn offsets_round_trip_and_stay_in_range() {
+        let mut o = LyricOffsets::default();
+        assert_eq!(o.get("a\u{1}b"), 0.0);
+        assert_eq!(o.shift("a\u{1}b", 0.5), 0.5);
+        assert_eq!(o.shift("a\u{1}b", 100.0), LYRIC_OFFSET_MAX);
+        assert_eq!(o.shift("c\u{1}d", -1.0), -1.0);
+        let back = LyricOffsets::parse(&o.text());
+        assert_eq!(back.get("a\u{1}b"), LYRIC_OFFSET_MAX);
+        assert_eq!(back.get("c\u{1}d"), -1.0);
+        assert_eq!(o.shift("c\u{1}d", 1.0), 0.0);
+        assert!(!o.text().contains("c\u{1}d"), "a song back in sync is not kept");
+    }
+}

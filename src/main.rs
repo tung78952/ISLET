@@ -603,6 +603,9 @@ pub struct App {
     pub lyr_idx: Option<usize>,
     pub lyr_anim: Option<(Instant, f32, f32, Option<usize>)>,
     pub lyr_heights: (String, Vec<f32>),
+    /// Per-song shift of the words (Shift + wheel), and when it was last changed (for its label).
+    pub lyr_offsets: model::LyricOffsets,
+    pub lyr_offset_at: Option<Instant>,
     /// Lyric pill: line shown and the one rolling out (since when).
     pub pill_cur: String,
     pub pill_prev: Option<(Instant, String)>,
@@ -909,6 +912,8 @@ impl App {
             lyr_idx: None,
             lyr_anim: None,
             lyr_heights: (String::new(), Vec::new()),
+            lyr_offsets: model::LyricOffsets::load(),
+            lyr_offset_at: None,
             pill_cur: String::new(),
             pill_prev: None,
             intro: Spring::new(-44.0, 600.0, 46.0),
@@ -1167,12 +1172,20 @@ impl App {
         m.has && !m.title.is_empty()
     }
 
+    /// Seconds the playing song's words are moved by (0 unless the user moved them).
+    pub fn lyric_offset(&self) -> f64 {
+        let l = self.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.lyr_offsets.get(&l.key)
+    }
+
     /// Current synced lyric line, if lyrics are on and available.
     pub fn lyric_line(&self) -> Option<String> {
         if !self.lyrics_on || !self.has_media() {
             return None;
         }
-        let pos = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).position();
+        // One lock at a time: the offset first, then the position.
+        let off = self.lyric_offset();
+        let pos = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).position() + off;
         let l = self.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if l.status == media::LyrStatus::Loading {
             return Some("Loading lyrics...".into());
@@ -2163,7 +2176,7 @@ impl App {
     }
 
     /// Mouse wheel over the lyrics view scrolls them; they glide back to the current line later.
-    fn wheel(&mut self, notches: f32, ctrl: bool) {
+    fn wheel(&mut self, notches: f32, ctrl: bool, shift: bool) {
         // A long notification, opened, reads on with the wheel.
         if self.toast_open && self.notice_toast() && self.notice_scroll_max > 0.0 {
             self.notice_scroll_to = (self.notice_scroll_to - notches * 26.0).clamp(0.0, self.notice_scroll_max);
@@ -2189,6 +2202,21 @@ impl App {
             return;
         }
         if !(self.expanded() && self.page == Page::Music && self.lyr_mix.x > 0.5) {
+            return;
+        }
+        if shift {
+            // Shift + wheel: the words come half a second sooner (up) or later (down), kept for
+            // this song.
+            let key = self.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).key.clone();
+            if key.is_empty() {
+                return;
+            }
+            self.lyr_offsets.shift(&key, notches.signum() as f64 * 0.5);
+            self.lyr_offset_at = Some(Instant::now());
+            if self.demo.is_none() {
+                self.lyr_offsets.save();
+            }
+            self.kick();
             return;
         }
         if ctrl {
@@ -4398,7 +4426,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let delta = (wp.0 >> 16) as u16 as i16 as f32 / 120.0;
             // The key-state flag can be missing for an unfocused window; ask the keyboard directly.
             let ctrl = wp.0 & 0x0008 != 0 || GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
-            a.wheel(delta, ctrl);
+            let shift = wp.0 & 0x0004 != 0 || GetAsyncKeyState(VK_SHIFT.0 as i32) < 0;
+            a.wheel(delta, ctrl, shift);
         }
         WM_MOUSEHWHEEL => a.swipe_by((wp.0 >> 16) as u16 as i16 as f32),
         WM_NOTICE => {

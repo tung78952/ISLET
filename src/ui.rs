@@ -2467,6 +2467,9 @@ fn settle(t: f32) -> f32 {
 }
 
 fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
+    // Words that run early or late for this song are moved by what the user set.
+    let off = a.lyric_offset();
+    let pos = pos + off;
     a.gfx.line(lx + 253.2, 22.0, lx + 253.2, 124.0, 1.0, 0x5A5A5A, 0.5);
     // Laid out at the final lyrics width so wrapping never changes while the notch resizes.
     let col = Rc::new(lx + 265.2, 10.0, crate::LYRICS[0] - 265.2 - 22.0, 124.0);
@@ -2488,6 +2491,10 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
             if a.lyr_heights.0 != hkey || a.lyr_heights.1.len() != lines.len() {
                 // New metrics: any running scroll was measured in the old ones.
                 a.lyr_anim = None;
+                // Another song: the line it was on means nothing here.
+                if !a.lyr_heights.0.starts_with(&format!("{key}\u{1}")) {
+                    a.lyr_idx = None;
+                }
                 let hs = lines.iter().map(|l| a.gfx.measure_wrapped(l, size, 700, col.w).max(size * 1.2)).collect();
                 a.lyr_heights = (hkey, hs);
             }
@@ -2512,7 +2519,7 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
                 None => 0.0,
             };
             if a.lyr_idx != Some(i) {
-                let from = if a.lyr_anim.is_some() { shown(a.lyr_anim, 0.0) } else { a.lyr_idx.map(scroll_for).unwrap_or(scroll_for(i)) };
+                let from = if a.lyr_anim.is_some() { shown(a.lyr_anim, 0.0) } else { a.lyr_idx.filter(|&o| o < tops.len()).map(scroll_for).unwrap_or(scroll_for(i)) };
                 a.lyr_anim = Some((now, from, scroll_for(i), a.lyr_idx));
                 a.lyr_idx = Some(i);
                 a.kick();
@@ -2559,8 +2566,15 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
                 let top = y.max(col.y);
                 let bottom = (y + hh + 4.0).min(col.y + col.h);
                 if bottom > top && times[j] >= 0.0 {
-                    hit(a, Rc::new(col.x, top, col.w, bottom - top), Act::Seek((times[j] * 1000.0) as u32));
+                    hit(a, Rc::new(col.x, top, col.w, bottom - top), Act::Seek(((times[j] - off).max(0.0) * 1000.0) as u32));
                 }
+            }
+            // Just moved: how far, for a moment, then it fades.
+            if let Some(age) = a.lyr_offset_at.map(|t| t.elapsed().as_secs_f32()).filter(|age| *age < 1.9) {
+                let fade = (1.0 - (age - 1.5) / 0.4).clamp(0.0, 1.0);
+                let label = if off == 0.0 { "Lyrics in sync".to_string() } else { format!("Lyrics {}{:.1}s", if off > 0.0 { "+" } else { "\u{2212}" }, off.abs()) };
+                a.gfx.ui(&label, Rc::new(col.x, col.y + col.h - 16.0, col.w, 16.0), 11.0, 600, WHITE, 0.6 * fade, Align::R);
+                a.kick();
             }
         }
         LyrStatus::Missing | LyrStatus::Ready => {
