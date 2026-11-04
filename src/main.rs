@@ -82,6 +82,11 @@ const SWIPE_TIME: Duration = Duration::from_secs(4);
 /// moment, then just follow it (seconds since it came over the window).
 pub const CURIOUS_FROM: f32 = 0.45;
 pub const CURIOUS_UNTIL: f32 = 2.4;
+/// How long a face may wait for the eyes to be free before it no longer fits the moment.
+const MOOD_WAIT: Duration = Duration::from_secs(30);
+/// At the PC this long without a five-minute break: sleepy, and again this often after.
+const TIRED_AFTER: Duration = Duration::from_secs(60 * 60);
+const TIRED_EVERY: Duration = Duration::from_secs(15 * 60);
 /// How close to the notch a dragged file must come before the Shelf opens.
 const DRAG_REACH: f32 = 30.0;
 const EYES_AFTER_CLOSE: f32 = 1.5;
@@ -771,6 +776,14 @@ pub struct App {
     pub drag_near: Option<Instant>,
     /// A Shelf file is being dragged out to another app.
     dragging_out: bool,
+    /// A face to pull as soon as the eyes can come out (the notch was open or busy), with how
+    /// many hops, and since when it waits.
+    queued_mood: Option<(eyes::Look, u8, Instant)>,
+    /// Hops still to do on the face that is out, and when the last one was.
+    mood_hops: (u8, Instant),
+    /// Using the PC without a real break since then, and when the eyes last got sleepy over it.
+    active_since: Instant,
+    sleepy_at: Option<Instant>,
     /// Drag position in layout units and the glow that trails it.
     pub drag_pt: (f32, f32),
     pub blob: (Spring, Spring),
@@ -1029,6 +1042,10 @@ impl App {
             drag_over: false,
             drag_near: None,
             dragging_out: false,
+            queued_mood: None,
+            mood_hops: (0, Instant::now()),
+            active_since: Instant::now(),
+            sleepy_at: None,
             drag_pt: (0.0, 0.0),
             blob: (Spring::new(0.0, 120.0, 18.0), Spring::new(0.0, 120.0, 18.0)),
             drag_energy: 0.3,
@@ -2482,6 +2499,7 @@ impl App {
                 ..eyes::Feel::ASLEEP
             };
         }
+        self.play_mood();
         if self.eye_feel.show {
             self.kick();
         }
@@ -2767,6 +2785,7 @@ impl App {
         let busy = self.demo.is_none() && (sys::busy() || sys::foreground_covers(self.monitor, self.hwnd) == Some(true));
         let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
         let watching = busy || self.playing();
+        self.watch_tired(idle);
         let events = self.brain.tick(now, idle, window, busy, watching);
         if !events.is_empty() {
             self.kick();
@@ -2778,7 +2797,7 @@ impl App {
                 luma::Event::Phase { resting, round, rounds, minutes } => {
                     sound::play(sound::Chime::Soft);
                     if resting {
-                        self.feel(eyes::Look::Love);
+                        self.react(eyes::Look::Love, 2);
                         let sub = if minutes >= luma::focus::LONG_REST_MINUTES { "15 min, you earned it".to_string() } else { format!("{minutes} minute short break") };
                         self.toast(ToastKind::Break, if minutes >= luma::focus::LONG_REST_MINUTES { "Long Break!" } else { "Break Time!" }, &sub, None);
                     } else {
@@ -2823,6 +2842,43 @@ impl App {
     fn feel(&mut self, look: eyes::Look) {
         let t = self.eye_time();
         self.eyes.mind.ask(eyes::Peek::Mood(look), t);
+    }
+
+    /// A face for something that happened, shown once the eyes can come out (soon, or never).
+    fn react(&mut self, look: eyes::Look, hops: u8) {
+        self.queued_mood = Some((look, hops, Instant::now()));
+    }
+
+    /// Hands a waiting face to the eyes when they are free, and does its hops once it is out.
+    fn play_mood(&mut self) {
+        if let Some((look, hops, since)) = self.queued_mood {
+            if since.elapsed() > MOOD_WAIT {
+                self.queued_mood = None;
+            } else if !self.eyes_blocked() {
+                self.queued_mood = None;
+                self.feel(look);
+                self.mood_hops = (hops, Instant::now());
+            }
+        }
+        if self.mood_hops.0 > 0 && self.eye_feel.show && self.mood_hops.1.elapsed() > Duration::from_millis(420) {
+            self.mood_hops = (self.mood_hops.0 - 1, Instant::now());
+            self.eyes.hop.v -= 90.0;
+            self.kick();
+        }
+    }
+
+    /// A long stretch at the PC without a break: now and then the eyes come out sleepy.
+    fn watch_tired(&mut self, idle: u64) {
+        if idle >= 300 {
+            self.active_since = Instant::now();
+            return;
+        }
+        let working = self.brain.focus.as_ref().is_some_and(|f| !f.resting());
+        let long = self.active_since.elapsed() >= TIRED_AFTER;
+        if long && !working && self.sleepy_at.is_none_or(|t| t.elapsed() >= TIRED_EVERY) {
+            self.sleepy_at = Some(Instant::now());
+            self.react(eyes::Look::Sleepy, 0);
+        }
     }
 
     /// The eyes look down at a reminder before it appears; if they can't, it appears at once.
@@ -3457,6 +3513,7 @@ impl App {
                 let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
                 self.brain.drink(chrono::Local::now());
                 self.drink_splash();
+                self.react(eyes::Look::Happy, 1);
                 if matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Water)) {
                     self.dismiss_toast();
                 }
@@ -3784,6 +3841,7 @@ impl App {
                         self.toast(ToastKind::Charging(true), "Charging", "Charger connected", lv);
                     } else {
                         self.toast(ToastKind::Charging(false), "Charger unplugged", &format!("{}% remaining", p.pct), lv);
+                        self.react(eyes::Look::Surprised, 0);
                     }
                 } else if !p.ac && old.pct > 20 && p.pct <= 20 && p.pct > 10 {
                     sound::play(sound::Chime::Alert);
