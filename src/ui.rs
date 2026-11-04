@@ -2126,8 +2126,14 @@ fn title(a: &mut App, lx: f32, text: &str) {
         "Reminders" => ("t_todo", WHITE),
         _ => ("t_shelf", WHITE),
     };
+    // The header row holds still while pages change: the two names fade into each other there.
+    let (keep, alpha) = (a.gfx.off, a.gfx.alpha);
+    a.gfx.offset(a.title_at.0, keep.1);
+    a.gfx.alpha = a.title_at.1;
     pic(a, name, lx + 33.0, 19.0, 18.0, tint, 1.0);
     a.gfx.ui(text, Rc::new(lx + 49.0, 8.0, 100.0, 22.0), HEAD, 600, WHITE, 1.0, Align::L);
+    a.gfx.offset(keep.0, keep.1);
+    a.gfx.alpha = alpha;
 }
 
 /// Eases towards `on`, each `key` keeping its own motion.
@@ -2264,26 +2270,36 @@ fn body(a: &mut App, lx: f32, view: View) {
 fn pages(a: &mut App, lx: f32) {
     let at = a.strip.x;
     let (ox, _) = a.gfx.off;
-    let width = a.sw.x.max(1.0);
+    let base = a.gfx.alpha;
     let n = Page::ALL.len() as i32;
     let first = at.floor() as i32;
     let settled = (at - at.round()).abs() < 0.04;
     for i in first..=first + 1 {
         let d = i as f32 - at;
-        if d.abs() >= 1.0 {
+        // Each page slides a short way and fades, the one leaving gone before the next is clear.
+        let shown = (1.0 - d.abs() * PAGE_FADE).max(0.0);
+        if d.abs() >= 1.0 || shown < 0.01 {
             continue;
         }
         let p = Page::ALL[i.rem_euclid(n) as usize];
         let hits = a.hits.len();
-        a.gfx.offset(ox + d * width, 0.0);
+        a.gfx.offset(ox + d * PAGE_SLIDE, 0.0);
+        a.gfx.alpha = base * shown;
+        a.title_at = (ox, base * (1.0 - d.abs()));
         page(a, p, lx);
         // Buttons are only live on the page at rest in front.
         if !(settled && p == a.page) {
             a.hits.truncate(hits);
         }
     }
+    a.gfx.alpha = base;
     a.gfx.offset(ox, 0.0);
+    a.title_at = (ox, base);
 }
+
+/// How far a page slides as it changes, and how quickly it fades.
+const PAGE_SLIDE: f32 = 56.0;
+const PAGE_FADE: f32 = 1.7;
 
 fn page(a: &mut App, p: Page, lx: f32) {
     match p {

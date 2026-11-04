@@ -86,21 +86,60 @@ fn allow_shutdown(demo: bool, storm: bool, sample: bool) -> bool {
     !demo && !storm && !sample
 }
 /// No more movement for this long means the fingers have lifted.
-const SWIPE_REST_MS: u128 = 200;
-/// Sideways wheel units that make a swipe: about one notch of a touchpad.
-const SWIPE_STEP: f32 = 120.0;
+const SWIPE_REST_MS: u128 = 90;
+/// Sideways wheel units that carry the strip one whole page.
+const SWIPE_PAGE: f32 = 900.0;
+/// Let go past this part of a page, the strip goes on to the next one.
+const SWIPE_COMMIT: f32 = 0.2;
 /// Closed for less than this, the notch opens where it was left.
-const REOPEN_LAST: Duration = Duration::from_secs(5 * 60);
+const REOPEN_LAST: Duration = Duration::from_secs(2 * 60);
 
-/// One swipe moves one page: what has been swiped so far in this gesture, whether it has already
-/// turned the page, and the page to turn to now (+1 or -1), if any.
-fn swipe_step(swiped: f32, turned: bool, delta: f32) -> (f32, bool, Option<i32>) {
-    let swiped = swiped + delta;
-    if !turned && swiped.abs() >= SWIPE_STEP {
-        return (swiped, true, Some(swiped.signum() as i32));
-    }
-    (swiped, turned, None)
+/// A two-finger swipe in progress: how far it went, and whether it already turned the page
+/// (what is still coming then is the touchpad coasting). `ema` is how strong the last reports were.
+#[derive(Clone, Copy, Default, Debug)]
+struct Swipe {
+    moved: f32,
+    turned: bool,
+    ema: f32,
 }
+
+impl Swipe {
+    /// One report from the touchpad. Returns the swipe and, when it reaches a whole page, the
+    /// way to turn. A coasting tail is ignored unless it changes way or a fresh push comes in.
+    fn step(self, delta: f32) -> (Swipe, Option<f32>) {
+        let mut s = self;
+        if s.turned {
+            let fresh = delta.signum() != s.moved.signum() || delta.abs() > 2.0 * s.ema + 4.0;
+            s.ema = 0.7 * s.ema + 0.3 * delta.abs();
+            if !fresh {
+                return (s, None);
+            }
+            s = Swipe::default();
+        }
+        s.moved += delta;
+        s.ema = 0.7 * s.ema + 0.3 * delta.abs();
+        if s.moved.abs() >= SWIPE_PAGE {
+            s.turned = true;
+            return (s, Some(s.moved.signum()));
+        }
+        (s, None)
+    }
+
+    /// Where the strip stands while the fingers are on it, from -1 to 1 page.
+    fn follow(self) -> f32 {
+        if self.turned {
+            0.0
+        } else {
+            (self.moved / SWIPE_PAGE).clamp(-1.0, 1.0)
+        }
+    }
+
+    /// The fingers lifted: the way to turn, if it went far enough.
+    fn release(self) -> Option<f32> {
+        (!self.turned && self.follow().abs() > SWIPE_COMMIT).then(|| self.moved.signum())
+    }
+}
+
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
@@ -575,7 +614,7 @@ pub struct App {
     pub strip: Spring,
     strip_to: f32,
     /// The gesture under way: when it last moved, how far it went, and whether it turned the page.
-    swipe: Option<(Instant, f32, bool)>,
+    swipe: Option<(Instant, Swipe, f32)>,
     /// The page the notch was closed on, and when.
     last_page: Option<(Page, Instant)>,
     pub mode: Mode,
@@ -627,6 +666,8 @@ pub struct App {
     pub reaction: Option<(Instant, bool)>,
     /// Where the eyes stand on an act's card, as last drawn.
     pub card_eyes_x: f32,
+    /// Where page titles sit and how visible, so they stay put while the pages slide.
+    pub title_at: (f32, f32),
     reaction_hops: u8,
     brief_hops: u8,
     sample_mood: Option<eyes::Look>,
@@ -905,6 +946,7 @@ impl App {
             live_alpha: 0.0,
             reaction: None,
             card_eyes_x: WIN_W / 2.0,
+            title_at: (0.0, 1.0),
             reaction_hops: 0,
             brief_hops: 0,
             sample_mood: None,
@@ -1772,7 +1814,7 @@ impl App {
         }
         // Pages set without go_page (startup, demo) are simply there.
         let n = Page::ALL.len() as i32;
-        if (self.strip_to as i32).rem_euclid(n) as usize != self.page.index() {
+        if self.swipe.is_none() && (self.strip_to as i32).rem_euclid(n) as usize != self.page.index() {
             self.strip_to += ((self.page.index() as i32 - self.strip_to as i32).rem_euclid(n)) as f32;
             self.strip.x = self.strip_to;
             self.strip.v = 0.0;
@@ -1821,6 +1863,9 @@ impl App {
             moving |= self.sw.step(t[0], sub);
             moving |= self.sh.step(t[1], sub);
             moving |= self.fade.step(fade_target, sub);
+            // Quick to follow the fingers, calm when it settles on its own.
+            let (k, c) = if self.swipe.is_some() { (700.0, 52.0) } else { (320.0, 36.0) };
+            self.strip.tune(k, c);
             moving |= self.strip.step(self.strip_to, sub);
             moving |= self.notice_scroll.step(self.notice_scroll_to, sub);
             moving |= self.toast_mix.step(toast_target, sub);
@@ -3007,20 +3052,36 @@ impl App {
             return;
         }
         self.step_swipe();
-        let (swiped, turned) = self.swipe.map_or((0.0, false), |s| (s.1, s.2));
-        let (swiped, turned, turn) = swipe_step(swiped, turned, delta);
-        self.swipe = Some((Instant::now(), swiped, turned));
-        if let Some(by) = turn {
-            let n = Page::ALL.len() as i32;
-            self.go_page(Page::ALL[(self.page.index() as i32 + by).rem_euclid(n) as usize]);
+        let (s, base) = self.swipe.map_or((Swipe::default(), self.strip_to.round()), |s| (s.1, s.2));
+        let (s, turn) = s.step(delta);
+        match turn {
+            Some(way) => self.turn_page(base, way),
+            None => self.strip_to = base + s.follow(),
         }
+        let base = if turn.is_some() { self.strip_to } else { base };
+        self.swipe = Some((Instant::now(), s, base));
+        self.kick();
     }
 
-    /// The fingers lifted: the next swipe can turn the page again.
+    /// The fingers lifted: on to the next page if they went far enough, else back.
     fn step_swipe(&mut self) {
-        if self.swipe.is_some_and(|s| s.0.elapsed().as_millis() >= SWIPE_REST_MS) {
-            self.swipe = None;
+        let Some((at, s, base)) = self.swipe else { return };
+        if at.elapsed().as_millis() < SWIPE_REST_MS {
+            return;
         }
+        self.swipe = None;
+        match s.release() {
+            Some(way) => self.turn_page(base, way),
+            None => self.strip_to = base,
+        }
+        self.kick();
+    }
+
+    /// One page on from the page at `base`, the way the fingers went.
+    fn turn_page(&mut self, base: f32, way: f32) {
+        let n = Page::ALL.len() as i32;
+        self.strip_to = base;
+        self.go_page(Page::ALL[(self.page.index() as i32 + way as i32).rem_euclid(n) as usize]);
     }
 
     fn set_noactivate(&self, on: bool) {
@@ -3099,8 +3160,9 @@ impl App {
     /// Pointed at or clicked open: a running focus first, then the song, else the day. A file being dragged
     /// goes to the shelf by its own path.
     fn open_by_hand(&mut self) {
-        // Back soon, it opens where it was left.
-        if let Some((p, _)) = self.last_page.filter(|l| l.1.elapsed() < REOPEN_LAST) {
+        // Focus and music playing come first; otherwise, back soon, it opens where it was left.
+        let first = self.brain.focus.is_some() || self.playing();
+        if let Some((p, _)) = self.last_page.filter(|l| !first && l.1.elapsed() < REOPEN_LAST) {
             self.page = p;
             self.set_mode(Mode::Expanded);
             return;
@@ -4851,19 +4913,42 @@ mod zone_tests {
 
 #[cfg(test)]
 mod swipe_tests {
-    use super::{swipe_step, SWIPE_STEP};
+    use super::{Swipe, SWIPE_PAGE};
+
+    fn run(s: Swipe, deltas: &[f32]) -> (Swipe, Vec<f32>) {
+        deltas.iter().fold((s, Vec::new()), |(s, mut turns), d| {
+            let (s, turn) = s.step(*d);
+            turns.extend(turn);
+            (s, turns)
+        })
+    }
 
     #[test]
-    fn one_swipe_turns_one_page_however_long_it_goes() {
-        let (mut swiped, mut turned, mut turns) = (0.0, false, Vec::new());
-        for _ in 0..40 {
-            let (s, t, turn) = swipe_step(swiped, turned, 30.0);
-            (swiped, turned) = (s, t);
-            turns.extend(turn);
-        }
-        assert_eq!(turns, [1], "a long swipe still turns just one page");
-        assert_eq!(swipe_step(0.0, false, -SWIPE_STEP).2, Some(-1), "the other way goes back");
-        assert_eq!(swipe_step(0.0, false, SWIPE_STEP / 2.0).2, None, "a touch does nothing");
+    fn the_strip_follows_the_fingers_and_turns_one_page_at_most() {
+        let (s, turns) = run(Swipe::default(), &[30.0; 3]);
+        assert!(turns.is_empty() && (s.follow() - 90.0 / SWIPE_PAGE).abs() < 1e-4, "it moves with the fingers");
+        assert_eq!(s.release(), None, "a touch springs back");
+        let (s, _) = run(Swipe::default(), &[60.0; 4]);
+        assert_eq!(s.release(), Some(1.0), "a fifth of a page and more goes on");
+        // A long swipe and the touchpad coasting after it: one page.
+        let mut long = vec![40.0; 30];
+        long.extend((0..30).map(|i| 30.0 * 0.9f32.powi(i)));
+        let (_, turns) = run(Swipe::default(), &long);
+        assert_eq!(turns, [1.0]);
+    }
+
+    #[test]
+    fn a_new_swipe_while_it_coasts_still_turns_the_page() {
+        let mut deltas = vec![60.0; 16];
+        deltas.extend([8.0, 6.0, 5.0]);
+        deltas.extend([-40.0; 24]);
+        let (_, turns) = run(Swipe::default(), &deltas);
+        assert_eq!(turns, [1.0, -1.0], "the other way, mid-coast");
+        let mut again = vec![60.0; 16];
+        again.extend([8.0, 6.0, 5.0, 60.0]);
+        again.extend([60.0; 15]);
+        let (_, turns) = run(Swipe::default(), &again);
+        assert_eq!(turns, [1.0, 1.0], "a fresh push the same way");
     }
 }
 
