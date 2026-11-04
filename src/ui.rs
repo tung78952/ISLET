@@ -2522,10 +2522,8 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
             let anim = a.lyr_anim.unwrap_or((settled, scroll_for(i), scroll_for(i), None));
             let prev = anim.3;
             let since = now.duration_since(anim.0).as_secs_f32();
-            // Small text: the current line sits a third of the way down with context above;
-            // large text centres it.
-            let big = ((size - 15.0) / 11.0).clamp(0.0, 1.0);
-            let anchor = col.y + 30.0 + ((col.h - hs[i]) / 2.0 - 30.0).max(0.0) * big + rise;
+            // The current line sits in the middle of the notch at any text size.
+            let anchor = (crate::LYRICS[1] - hs[i]) / 2.0 + rise;
             a.lyr_bounds = (-tops[i], tops[tops.len() - 1] - tops[i]);
             let dim = 0.36;
             a.gfx.push_clip(col);
