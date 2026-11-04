@@ -78,6 +78,8 @@ const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
 const SWIPE_TIME: Duration = Duration::from_secs(4);
+/// How close to the notch a dragged file must come before the Shelf opens.
+const DRAG_REACH: f32 = 30.0;
 const EYES_AFTER_CLOSE: f32 = 1.5;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(60);
 
@@ -760,6 +762,11 @@ pub struct App {
     brain_ticks: u32,
     pub shelf: Shelf,
     pub drag_over: bool,
+    /// A file is being dragged over the notch's window but not onto the notch yet: since when.
+    /// The eyes come out and follow it.
+    pub drag_near: Option<Instant>,
+    /// A Shelf file is being dragged out to another app.
+    dragging_out: bool,
     /// Drag position in layout units and the glow that trails it.
     pub drag_pt: (f32, f32),
     pub blob: (Spring, Spring),
@@ -1016,6 +1023,8 @@ impl App {
             brain_ticks: 0,
             shelf: Shelf::load(),
             drag_over: false,
+            drag_near: None,
+            dragging_out: false,
             drag_pt: (0.0, 0.0),
             blob: (Spring::new(0.0, 120.0, 18.0), Spring::new(0.0, 120.0, 18.0)),
             drag_energy: 0.3,
@@ -2161,6 +2170,30 @@ impl App {
         self.kick();
     }
 
+    /// A file came over the window. The Shelf opens once it reaches the notch.
+    pub fn drag_seen(&mut self) {
+        self.drag_near = Some(Instant::now());
+        self.drag_reach();
+    }
+
+    /// Opens the Shelf when the dragged file is on (or right by) the notch.
+    fn drag_reach(&mut self) {
+        if self.drag_near.is_none() || self.drag_over {
+            return;
+        }
+        let (cx, w) = self.notch_geometry();
+        let (x, y) = self.drag_pt;
+        if (x - cx).abs() <= w / 2.0 + DRAG_REACH && y <= self.sh.x + DRAG_REACH {
+            self.drag_hover(true);
+        }
+    }
+
+    /// The drag went away or was dropped.
+    pub fn drag_gone(&mut self) {
+        self.drag_near = None;
+        self.drag_hover(false);
+    }
+
     pub fn drag_hover(&mut self, on: bool) {
         self.drag_over = on;
         if on {
@@ -2431,6 +2464,19 @@ impl App {
         if self.sample.is_none() {
             self.eye_feel = self.eyes.mind.tick(&sense);
         }
+        // A file on its way to the notch: a start, then they follow it.
+        if let Some(since) = self.drag_near.filter(|_| !self.drag_over && self.settings.pet && !self.hidden && !self.minimal() && self.mode == Mode::Compact && self.toast.is_none()) {
+            let (cx, w) = self.notch_geometry();
+            let (x, y) = self.drag_pt;
+            let look = if since.elapsed() < Duration::from_millis(450) { eyes::Look::Surprised } else { eyes::Look::Neutral };
+            self.eye_feel = eyes::Feel {
+                show: true,
+                look,
+                gaze: ((x - cx) / (w / 2.0 + 90.0)).clamp(-1.0, 1.0),
+                lift: ((y - 15.0) / (eyes::RANGE * 0.6)).clamp(-1.0, 1.0),
+                ..eyes::Feel::ASLEEP
+            };
+        }
         if self.eye_feel.show {
             self.kick();
         }
@@ -2514,7 +2560,7 @@ impl App {
         } else if !down {
             self.press_known = false;
         }
-        let want = down && inside && self.press_outside;
+        let want = down && inside && (self.press_outside || self.dragging_out);
         if want != self.catch_all {
             self.catch_all = want;
             self.render();
@@ -3064,6 +3110,7 @@ impl App {
             self.drag_energy = (self.drag_energy + moved / 260.0).min(1.0);
         }
         self.drag_pt = pt;
+        self.drag_reach();
         self.kick();
     }
 
@@ -3843,7 +3890,10 @@ impl App {
             if (x - dx).abs() + (y - dy).abs() > 8.0 {
                 self.down = None;
                 if let Some(p) = self.shelf.items.get(i).cloned() {
+                    // While it is out, coming back over the window counts like any other file.
+                    self.dragging_out = true;
                     let _ = drop::drag_out(self.hwnd, &p);
+                    self.dragging_out = false;
                 }
             }
         }

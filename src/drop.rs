@@ -239,7 +239,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         unsafe { *effect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
         if ok {
             app().drag_move(pt.x, pt.y, true);
-            app().drag_hover(true);
+            app().drag_seen();
         }
         Ok(())
     }
@@ -251,14 +251,15 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 
     fn DragLeave(&self) -> Result<()> {
-        app().drag_hover(false);
+        app().drag_gone();
         Ok(())
     }
 
     fn Drop(&self, obj: Ref<IDataObject>, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         app().drag_move(pt.x, pt.y, false);
         let mut paths = Vec::new();
-        if let Some(obj) = obj.as_ref() {
+        // Only a file let go on the notch (the Shelf open) is taken.
+        if let Some(obj) = obj.as_ref().filter(|_| app().drag_over) {
             paths = read_files(obj);
             if paths.is_empty() {
                 paths = read_virtual(obj);
@@ -274,7 +275,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if !paths.is_empty() {
             app().drop_burst();
         }
-        app().drag_hover(false);
+        app().drag_gone();
         app().shelf_add(paths);
         Ok(())
     }

@@ -96,7 +96,9 @@ struct Source<'a> {
 /// follows at once, songs first.
 fn choose(shown: Option<&str>, sources: &[Source]) -> Option<usize> {
     let cur = shown.and_then(|id| sources.iter().position(|s| s.id == id));
-    let rival = |c: &Source, s: &Source| s.id != c.id && s.playing && s.played >= TAKE_OVER && s.song >= c.song;
+    // Only one started after the shown one can take over: two playing at once would otherwise
+    // keep taking it from each other.
+    let rival = |c: &Source, s: &Source| s.id != c.id && s.playing && s.played >= TAKE_OVER && s.played < c.played && s.song >= c.song;
     if let Some(i) = cur.filter(|i| sources[*i].playing) {
         return Some(sources.iter().position(|s| rival(&sources[i], s)).unwrap_or(i));
     }
@@ -792,6 +794,10 @@ mod tests {
     fn another_song_takes_over_after_a_while() {
         assert_eq!(choose(Some("a"), &[src("a", true, true, 99), src("b", true, true, 5)]), Some(0));
         assert_eq!(choose(Some("a"), &[src("a", true, true, 99), src("b", true, true, 15)]), Some(1));
+        // Two playing together: the newer one keeps it, it does not go back and forth.
+        let both = [src("a", true, true, 99), src("b", true, true, 40)];
+        assert_eq!(choose(Some("b"), &both), Some(1));
+        assert_eq!(choose(Some("a"), &both), Some(1));
     }
 
     #[test]
