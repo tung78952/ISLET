@@ -88,9 +88,10 @@ fn allow_shutdown(demo: bool, storm: bool, sample: bool) -> bool {
 /// No more movement for this long means the fingers have lifted.
 const SWIPE_REST_MS: u128 = 90;
 /// Sideways wheel units that carry the strip one whole page.
-const SWIPE_PAGE: f32 = 900.0;
-/// Let go past this part of a page, the strip goes on to the next one.
-const SWIPE_COMMIT: f32 = 0.2;
+const SWIPE_PAGE: f32 = 1300.0;
+/// Let go past this part of a page, the strip goes on to the next one. With `SWIPE_PAGE`, how
+/// sensitive a swipe is.
+const SWIPE_COMMIT: f32 = 0.3;
 /// Closed for less than this, the notch opens where it was left.
 const REOPEN_LAST: Duration = Duration::from_secs(2 * 60);
 
@@ -4928,10 +4929,12 @@ mod swipe_tests {
         let (s, turns) = run(Swipe::default(), &[30.0; 3]);
         assert!(turns.is_empty() && (s.follow() - 90.0 / SWIPE_PAGE).abs() < 1e-4, "it moves with the fingers");
         assert_eq!(s.release(), None, "a touch springs back");
-        let (s, _) = run(Swipe::default(), &[60.0; 4]);
-        assert_eq!(s.release(), Some(1.0), "a fifth of a page and more goes on");
+        let (s, _) = run(Swipe::default(), &[SWIPE_PAGE * 0.1; 2]);
+        assert_eq!(s.release(), None, "a fifth of a page is not enough");
+        let (s, _) = run(Swipe::default(), &[SWIPE_PAGE * 0.1; 4]);
+        assert_eq!(s.release(), Some(1.0), "a third of a page and more goes on");
         // A long swipe and the touchpad coasting after it: one page.
-        let mut long = vec![40.0; 30];
+        let mut long = vec![SWIPE_PAGE / 30.0; 30];
         long.extend((0..30).map(|i| 30.0 * 0.9f32.powi(i)));
         let (_, turns) = run(Swipe::default(), &long);
         assert_eq!(turns, [1.0]);
@@ -4939,14 +4942,15 @@ mod swipe_tests {
 
     #[test]
     fn a_new_swipe_while_it_coasts_still_turns_the_page() {
-        let mut deltas = vec![60.0; 16];
+        let push = SWIPE_PAGE / 15.0;
+        let mut deltas = vec![push; 16];
         deltas.extend([8.0, 6.0, 5.0]);
-        deltas.extend([-40.0; 24]);
+        deltas.extend([-push; 16]);
         let (_, turns) = run(Swipe::default(), &deltas);
         assert_eq!(turns, [1.0, -1.0], "the other way, mid-coast");
-        let mut again = vec![60.0; 16];
-        again.extend([8.0, 6.0, 5.0, 60.0]);
-        again.extend([60.0; 15]);
+        let mut again = vec![push; 16];
+        again.extend([8.0, 6.0, 5.0, push]);
+        again.extend([push; 15]);
         let (_, turns) = run(Swipe::default(), &again);
         assert_eq!(turns, [1.0, 1.0], "a fresh push the same way");
     }
