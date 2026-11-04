@@ -386,7 +386,8 @@ impl Gfx {
         let wide: Vec<u16> = s.encode_utf16().collect();
         self.set(hex, a);
         unsafe {
-            self.rt.DrawText(&wide, &f, &r.d2d(), &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            // Not snapped to whole pixels: text that slides or grows would step a pixel at a time.
+            self.rt.DrawText(&wide, &f, &r.d2d(), &self.brush, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, DWRITE_MEASURING_MODE_NATURAL);
         }
     }
 
