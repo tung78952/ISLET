@@ -104,7 +104,6 @@ pub const CALENDAR: [f32; 2] = [420.0, 280.0];
 pub const LYRIC_PILL: [f32; 2] = [296.0, 34.0];
 pub const ACT_TOAST: [f32; 2] = [470.0, 84.0];
 /// How far the lyric bar grows for the eyes.
-pub const JAM_ROOM: f32 = 90.0;
 /// The accent of the character in use.
 pub const CHARACTER: u32 = 0x4CC2FF;
 /// A pause shorter than this leaves the equalizer running.
@@ -270,6 +269,12 @@ pub struct Brief {
     pub date: Option<(String, i64)>,
     pub bedtime: Option<String>,
     opened: Instant,
+}
+
+impl Brief {
+    pub fn opened_s(&self) -> f32 {
+        self.opened.elapsed().as_secs_f32()
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +613,7 @@ pub struct App {
     /// Where the eyes stand on an act's card, as last drawn.
     pub card_eyes_x: f32,
     reaction_hops: u8,
+    brief_hops: u8,
     sample_mood: Option<eyes::Look>,
     pub swipe_last: String,
     pub swipe_mix: Spring,
@@ -883,6 +889,7 @@ impl App {
             reaction: None,
             card_eyes_x: WIN_W / 2.0,
             reaction_hops: 0,
+            brief_hops: 0,
             sample_mood: None,
             swipe_last: String::new(),
             swipe_mix: Spring::new(0.0, 260.0, 28.0),
@@ -1201,12 +1208,6 @@ impl App {
             let f = eyes::act(kind, e);
             w += 76.0 * f.stretch + 16.0 * f.swell.max(0.0);
         }
-        // The lyric bar grows to one side for the eyes; the lyrics stay where they are.
-        if self.mode == Mode::Compact {
-            let grow = JAM_ROOM * self.jam_x.x.max(0.0);
-            w += grow;
-            cx += self.jam.side * grow / 2.0;
-        }
         (cx, w)
     }
 
@@ -1262,6 +1263,11 @@ impl App {
         let acted = |k: ToastKind| k.answered() || matches!(k, ToastKind::Sample(_));
         let fading = self.toast_mix.x > 0.01 && self.last_toast.as_ref().is_some_and(|t| acted(t.kind));
         stage::seat(stage::Scene { toast: self.toast.is_some() || fading, yielded: self.yielded, lyrics: self.pill_mix.x > 0.01 && self.lyric_line().is_some() })
+    }
+
+    /// Where the swaying eyes on the lyric bar are, from one side (-1) to the other (1).
+    pub fn jam_sway(&self) -> f32 {
+        (self.born.elapsed().as_secs_f32() * 3.4).sin()
     }
 
     /// The reminder being acted out on the card, and how long it has been going.
@@ -1415,7 +1421,7 @@ impl App {
                 let now = self.eye_time();
                 self.jam.force(now);
                 self.jam_show = true;
-                self.mini.pose = eyes::JAM_POSES[self.jam.style];
+                self.mini.pose = eyes::Pose::Round;
                 if self.mini.feed(now, if (t * 2.0).fract() < 0.12 { 0.6 } else { 0.1 }) {
                     self.jam.beat(now);
                 }
@@ -1588,6 +1594,7 @@ impl App {
         self.brief = Some(Brief { hello, missed, coming: self.upcoming(), date, bedtime, opened: Instant::now() });
         self.glow = ui::EVENING;
         self.set_mode(Mode::Expanded);
+        self.brief_hops = 0;
         self.go_view(ui::View::Brief);
         self.glow = ui::EVENING;
     }
@@ -1716,7 +1723,20 @@ impl App {
         if self.guide.is_some() {
             self.step_guide(dt);
         } else if self.view == ui::View::Brief {
-            self.eyes.step(eyes::Feel { show: true, look: eyes::Look::Happy, ..eyes::Feel::ASLEEP }, dt);
+            // Hello: a look round, they notice you, and a happy hop or two.
+            let age = self.brief.as_ref().map_or(9.0, |b| b.opened.elapsed().as_secs_f32());
+            let (look, gaze) = match age {
+                a if a < 0.45 => (eyes::Look::Neutral, -0.8),
+                a if a < 0.9 => (eyes::Look::Neutral, 0.8),
+                a if a < 1.3 => (eyes::Look::Surprised, 0.0),
+                _ => (eyes::Look::Happy, 0.0),
+            };
+            let hops = if age >= 1.3 { (((age - 1.3) / 0.32) as u8 + 1).min(2) } else { 0 };
+            if self.brief_hops < hops {
+                self.brief_hops += 1;
+                self.eyes.hop.v -= 90.0;
+            }
+            self.eyes.step(eyes::Feel { show: true, look, gaze, ..eyes::Feel::ASLEEP }, dt);
         } else if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
             let (look, gaze) = self.card_mood(f.look, f.gaze, f.buttons);
@@ -1878,6 +1898,7 @@ impl App {
             || self.jam_show
             || self.reaction.is_some()
             || self.guide.is_some()
+            || self.view == ui::View::Brief && self.brief.as_ref().is_some_and(|b| b.opened.elapsed() < Duration::from_secs(3))
             || !self.hidden && self.eq_mix.x > 0.01
             || self.eye_feel.show
             // A card's eyes stay out while it waits, and need frames only when the act says so.
@@ -2260,7 +2281,7 @@ impl App {
         let free = self.settings.jam_mode != 0 && playing && self.pill_mix.x > 0.5 && self.toast.is_none() && self.mode == Mode::Compact && !self.yielded && !self.hidden && !self.minimal() && sys::key_idle_ms() >= 1000;
         self.jam_show = self.jam.tick(t, free);
         if self.jam_show {
-            self.mini.pose = eyes::JAM_POSES[self.jam.style];
+            self.mini.pose = eyes::Pose::Round;
             if !self.meter_on {
                 sys::open_meter();
                 self.meter_on = true;
@@ -2420,6 +2441,7 @@ impl App {
                 self.sun_target += (v as f32 - o as f32) * 1.15;
             }
             let fresh = !matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Brightness));
+            sys::timelog(&format!("brightness card {old:?} -> {v}"));
             self.toast(ToastKind::Brightness, "Brightness", &format!("{v}%"), Some(v as f32 / 100.0));
             if fresh {
                 // Slide from where it was, like the volume bar does.

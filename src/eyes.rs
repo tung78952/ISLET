@@ -133,7 +133,7 @@ const ARRIVED: f32 = 1.0;
 const WATCH_LEAVE: f32 = 0.95;
 const DROP_LIDS: f32 = 0.3;
 /// Seconds of a resting pointer before they lose interest.
-const BORED: f32 = 3.0;
+const BORED: f32 = 7.0;
 /// The longest they stay out in one go; a pointer still moving around here is someone working.
 const LONGEST: f32 = 12.0;
 /// Seconds they stay away after leaving: bored, worked around, or told to move.
@@ -704,6 +704,8 @@ pub fn act_moving(e: f32) -> bool {
 /// How the small eyes hold themselves when nothing else is going on.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Pose {
+    /// Both open and round: swaying on the lyric bar.
+    Round,
     Right,
     Left,
     Smile,
@@ -841,6 +843,7 @@ impl Mini {
             _ if t < self.blink_until => MINI_BLINK,
             Some(f) => f,
             None => match pose {
+                Pose::Round => MINI_AHEAD,
                 Pose::Smile => MINI_HAPPY,
                 Pose::Dreamy => MINI_BLINK,
                 Pose::Wink if right => MINI_BLINK,
@@ -1019,14 +1022,17 @@ mod tests {
         let mut m = Mind::new();
         let t = awake(&mut m, 0.5);
         let x = t * 200.0;
-        for i in 0..80 {
-            m.tick(&sense(t + i as f32 * 0.05, x));
+        let bored = t + BORED + 1.0;
+        let mut at = t;
+        while at < bored {
+            m.tick(&sense(at, x));
+            at += 0.05;
         }
-        assert!(!m.tick(&sense(t + 4.0, x)).show);
-        m.tick(&sense(t + 4.5, x));
-        assert!(!m.tick(&sense(t + 4.55, x + 50.0)).show, "still resting");
-        m.tick(&sense(t + 15.0, x));
-        assert!(m.tick(&sense(t + 15.05, x + 100.0)).show);
+        assert!(!m.tick(&sense(bored, x)).show);
+        m.tick(&sense(bored + 0.5, x));
+        assert!(!m.tick(&sense(bored + 0.55, x + 50.0)).show, "still resting");
+        m.tick(&sense(bored + REST_BORED + 8.0, x));
+        assert!(m.tick(&sense(bored + REST_BORED + 8.05, x + 100.0)).show);
     }
 
     #[test]

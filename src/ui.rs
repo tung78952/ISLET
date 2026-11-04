@@ -639,8 +639,8 @@ pub fn draw(a: &mut App) {
     let tall = a.toast.as_ref().or(a.last_toast.as_ref()).is_some_and(|t| t.kind.tall()) && a.toast_mix.x > 0.5;
     let fade_from = if tall { 84.0 } else { 36.0 };
     let mut small_alpha = (1.0 - (h - fade_from) / 14.0).clamp(0.0, 1.0) * (1.0 - a.fade.x).clamp(0.0, 1.0);
-    // A notification grows into its detail view: the card leaves in the first half of the way, the
-    // detail comes in the second, so the two are never on screen together.
+    // A notification grows into its detail view: the card leaves early and the detail comes in
+    // while it is still going, so the notch is never empty on the way.
     let notice = a.notice_toast() && a.fade.x < 0.01 && !a.hidden;
     let grown = if notice {
         let card_h = a.notice_card_height();
@@ -649,7 +649,7 @@ pub fn draw(a: &mut App) {
         0.0
     };
     if notice {
-        small_alpha = (1.0 - 2.0 * grown).clamp(0.0, 1.0);
+        small_alpha = (1.0 - grown / 0.35).clamp(0.0, 1.0);
     }
     if a.hidden {
         small_alpha = 0.0;
@@ -715,7 +715,7 @@ pub fn draw(a: &mut App) {
     }
     focus_sun(a, left, w, h);
     if notice {
-        let d = (2.0 * grown - 1.0).clamp(0.0, 1.0);
+        let d = ((grown - 0.25) / 0.45).clamp(0.0, 1.0);
         if d > 0.01 {
             // The colour of the app that wrote rises behind it.
             if let Some(tint) = a.notice.clone().map(|n| a.notice_accent(&n)) {
@@ -800,8 +800,7 @@ fn sunset(a: &mut App, cx: f32, cy: f32, r: f32, left: f32) {
 
 /// The sun on the Focus page is cut into this many slices.
 const SLICES: usize = 8;
-/// Seconds a slice takes to reach the water, and its rings to fade there.
-const SLICE_FALL: f32 = 1.2;
+/// Seconds the rings of a slice that went under take to fade.
 const RING_LIFE: f32 = 3.5;
 
 /// How far the sun has come apart: slices gone, how loose the next one is (0 to 1), and how many
@@ -831,7 +830,7 @@ fn water_rings(a: &App, cx: f32, y: f32, age: f32, reach: f32, strength: f32) {
     }
 }
 
-/// The focus timer: a sun cut into slices that loosen and fall into the sea one by one, each
+/// The focus timer: a sun cut into slices that sinks into the sea, each slice that goes under
 /// leaving rings on the water. `left` is how much of the time remains.
 fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
     const R: f32 = 30.0;
@@ -846,36 +845,26 @@ fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
         let (r, g, b) = (0xFF, mix(0x78, 0x2C), mix(0x48, 0x28));
         r << 16 | g << 8 | b
     };
-    let slice = |g: &Gfx, k: usize, drop: f32, thin: f32, alpha: f32| {
+    // The whole sun sinks as time runs out, one slice's height per slice; the lowest one goes
+    // under the horizon and leaves rings on the water.
+    let used = gone as f32 + part;
+    let sink = 2.0 + used * band;
+    let slice = |g: &Gfx, k: usize| {
         let y1 = CY + R - k as f32 * band - GAP / 2.0;
-        let high = (band - GAP) * thin;
         let side = |n: i32| {
-            let y = y1 - high * n as f32 / 6.0;
-            ((R * R - (y - CY) * (y - CY)).max(0.0).sqrt(), y + drop)
+            let y = y1 - (band - GAP) * n as f32 / 6.0;
+            ((R * R - (y - CY) * (y - CY)).max(0.0).sqrt(), y + sink)
         };
         let mut shape: Vec<(f32, f32)> = (0..=6).map(side).map(|(half, y)| (cx + half, y)).collect();
         shape.extend((0..=6).rev().map(side).map(|(half, y)| (cx - half, y)));
-        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), alpha);
+        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), 1.0);
     };
-    a.gfx.glow_ellipse(cx, CY, R * 1.5, R * 1.4, RED, 0.2 * (1.0 - gone as f32 / SLICES as f32) + 0.04);
+    a.gfx.glow_ellipse(cx, CY + sink, R * 1.5, R * 1.4, RED, 0.2 * (1.0 - used / SLICES as f32) + 0.04);
+    a.gfx.push_clip(Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0));
     for k in gone..SLICES {
-        // The one about to go comes loose slowly, and the one above follows a little.
-        let (drop, thin) = match k - gone {
-            0 => (7.0 * part, 1.0 - 0.45 * part),
-            1 => (2.0 * part, 1.0),
-            _ => (0.0, 1.0),
-        };
-        slice(&a.gfx, k, drop, thin, 1.0);
+        slice(&a.gfx, k);
     }
-    if gone > 0 && since < SLICE_FALL {
-        let k = gone - 1;
-        let start = 7.0;
-        let reach = HORIZON + 3.0 - (CY + R - k as f32 * band) - start;
-        let q = since / SLICE_FALL;
-        a.gfx.push_clip(Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0));
-        slice(&a.gfx, k, start + reach * q * q, 0.55, 1.0);
-        a.gfx.pop_clip();
-    }
+    a.gfx.pop_clip();
     // The water: light under the sun that goes with it, a line, and rings where slices landed.
     let sun_left = 1.0 - gone as f32 / SLICES as f32;
     for i in 0..4 {
@@ -888,8 +877,8 @@ fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
     a.gfx.fill_rrect_hgrad(Rc::new(cx - 62.0, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.0), (RED, 0.95));
     a.gfx.fill_rrect_hgrad(Rc::new(cx, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.95), (RED, 0.0));
     a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
-    if gone > 0 && since >= SLICE_FALL {
-        water_rings(a, cx, HORIZON + 9.0, since - SLICE_FALL, 50.0, 0.95);
+    if gone > 0 {
+        water_rings(a, cx, HORIZON + 9.0, since, 50.0, 0.95);
     }
     if running {
         // Now and then the sea moves by itself.
@@ -1073,18 +1062,31 @@ fn lyric_pill(a: &mut App, left: f32, w: f32) {
     // The lyrics keep their place when the bar grows to one side for the eyes.
     let (bar, bar_w) = (crate::WIN_W / 2.0 - a.sw.x / 2.0, a.sw.x);
     icon::note(&a.gfx, bar + 22.0, 16.0, 0xBDBDBD, 1.0);
+    // Now and then the eyes take the bar's place and sway to the music, notes rising round them.
     let out = a.jam_x.x.clamp(0.0, 1.0);
     if out > 0.02 {
-        let room = crate::JAM_ROOM;
-        let x = if a.jam.side < 0.0 { bar - room / 2.0 + 6.0 } else { bar + bar_w + room / 2.0 - 6.0 };
+        let x = bar + bar_w / 2.0;
+        let sway = a.jam_sway();
         let base = a.gfx.alpha;
         a.gfx.alpha = base * out;
         a.gfx.push_clip(Rc::new(left, 0.0, w, h));
-        mini_eyes(a, x, h / 2.0, 0.085);
-        jam_notes(a, x, 31.0, h);
+        let (px, py) = (x + 5.0 * sway, h / 2.0 + a.mini.hop.x);
+        a.gfx.rotate(px, py, 0.2 * sway);
+        for side in [-1.0f32, 1.0] {
+            let oval: Vec<(f32, f32)> = (0..24)
+                .map(|n| {
+                    let k = n as f32 / 24.0 * std::f32::consts::TAU;
+                    (px + side * 9.0 + 5.2 * k.cos(), py + 7.0 * k.sin())
+                })
+                .collect();
+            lens(&a.gfx, &oval, 2.4, 1.0);
+        }
+        a.gfx.unzoom();
+        jam_notes(a, x, 34.0, h);
         a.gfx.pop_clip();
         a.gfx.alpha = base;
     }
+    let lyric = 1.0 - out;
     if line != a.pill_cur {
         let old = std::mem::replace(&mut a.pill_cur, line.clone());
         a.pill_prev = if old.is_empty() { None } else { Some((std::time::Instant::now(), old)) };
@@ -1093,7 +1095,7 @@ fn lyric_pill(a: &mut App, left: f32, w: f32) {
     // The outgoing line lifts away as the new one rises into place.
     let text = |a: &mut App, s: &str, dy: f32, al: f32| {
         let base = a.gfx.alpha;
-        a.gfx.alpha = base * al;
+        a.gfx.alpha = base * al * lyric;
         a.gfx.push_clip(Rc::new(left, 0.0, w, h));
         a.gfx.ui(s, Rc::new(bar + 44.0, 6.0 + dy, bar_w - 88.0, 22.0), 13.0, 600, WHITE, 1.0, Align::C);
         a.gfx.pop_clip();
@@ -1696,7 +1698,16 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
                     a.gfx.glow(ix, h / 2.0, 30.0, accent, 0.28);
                     notice_badge(a, n, ix, h / 2.0, 19.0);
                 }
-                None => icon::messenger(&a.gfx, ix, h / 2.0, 19.0, 1.0),
+                // Only a Facebook chat gets the chat bubble; anything else shows its own app.
+                None if info.as_ref().is_some_and(|n| n.kind == crate::NoticeKind::Chat) => icon::messenger(&a.gfx, ix, h / 2.0, 19.0, 1.0),
+                None => {
+                    let aumid = info.as_ref().map(|n| n.aumid.clone()).unwrap_or_default();
+                    let bmp = (!aumid.is_empty()).then(|| std::path::PathBuf::from(format!("shell:AppsFolder\\{aumid}"))).and_then(|p| a.shelf_icon(&p).0);
+                    match bmp {
+                        Some(b) => a.gfx.image_fit(&b, Rc::new(ix - 19.0, h / 2.0 - 19.0, 38.0, 38.0), 9.0, 1.0, false),
+                        None => icon::bell(&a.gfx, ix, h / 2.0, WHITE, 1.0),
+                    }
+                }
             }
             let tx = left + 64.0;
             let tw = w - 64.0 - 22.0;
@@ -2702,6 +2713,12 @@ enum BriefRow {
 
 fn brief(a: &mut App, lx: f32) {
     let Some(b) = a.brief.as_ref() else { return };
+    // The words come in once the eyes have noticed you.
+    let age = b.opened_s();
+    let come = |at: f32| {
+        let k = ((age - at) / 0.4).clamp(0.0, 1.0);
+        1.0 - (1.0 - k) * (1.0 - k)
+    };
     let lines = brief_lines(b);
     let (hello, today) = (b.hello, b.date.clone().filter(|d| d.1 == 0));
     title(a, lx, "Today");
@@ -2722,7 +2739,8 @@ fn brief(a: &mut App, lx: f32) {
             11..=17 => "Good afternoon",
             _ => "Good evening",
         };
-        a.gfx.ui(hello_at, Rc::new(lx + 24.0, 100.0, 136.0, 24.0), 16.0, 500, WHITE, 1.0, Align::C);
+        let k = come(1.0);
+        a.gfx.ui(hello_at, Rc::new(lx + 24.0 - 24.0 * (1.0 - k), 100.0, 136.0, 24.0), 16.0, 500, WHITE, k, Align::C);
     } else {
         a.gfx.ui("While you were away", Rc::new(lx + 202.0, 50.0, 190.0, 22.0), BODY, 500, WHITE, 1.0, Align::L);
     }
@@ -2737,8 +2755,10 @@ fn brief(a: &mut App, lx: f32) {
             BriefRow::Bed => pic(a, "ic_sleep", lx + 210.0, y, 14.0, 0xFFD9A0, 1.0),
         }
         let w = if time.is_empty() { 172.0 } else { 124.0 };
-        a.gfx.ui(&text, Rc::new(lx + 226.0, y - 11.0, w, 22.0), 13.0, 400, WHITE, dim, Align::L);
-        a.gfx.ui(&time, Rc::new(lx + 340.0, y - 11.0, 56.0, 22.0), 12.0, 400, 0xC8C8CC, dim, Align::R);
+        let k = come(1.2 + 0.12 * i as f32);
+        let dx = 16.0 * (1.0 - k);
+        a.gfx.ui(&text, Rc::new(lx + 226.0 + dx, y - 11.0, w, 22.0), 13.0, 400, WHITE, dim * k, Align::L);
+        a.gfx.ui(&time, Rc::new(lx + 340.0 + dx, y - 11.0, 56.0, 22.0), 12.0, 400, 0xC8C8CC, dim * k, Align::R);
     }
 }
 
