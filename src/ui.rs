@@ -1043,6 +1043,9 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
             stripes(g, &spiral, GAP, show * dizzy);
         }
     }
+    // A file on its way: a "?" of the same lit lines comes up by the inner eye, then fades.
+    let curious = a.drag_near.filter(|_| !a.drag_over).map(|t| t.elapsed().as_secs_f32());
+    let question = (px + 37.0, py - 9.0);
     g.pop_clip();
     g.unzoom();
     // The battery never leaves the notch as it narrows again.
@@ -1067,6 +1070,19 @@ fn eyes(a: &mut App, cx: f32, cy: f32, show: f32, reach: f32) {
         let label = format!("{pct}%");
         let at = Rc::new(bx + 28.0 + e.shove.x * 0.4, cy - 10.0 - rise, 44.0, 20.0);
         a.gfx.ui(&label, at, 15.0, 700, 0xFF3B30, scene * show, Align::L);
+    }
+    if let Some(age) = curious {
+        let from = crate::CURIOUS_FROM + 0.4;
+        let k = ((age - from) / 0.2).clamp(0.0, 1.0) * (1.0 - (age - crate::CURIOUS_UNTIL + 0.6) / 0.6).clamp(0.0, 1.0);
+        if k > 0.01 {
+            let r = Rc::new(question.0 - 8.0, question.1 - 9.0 - 2.0 * k, 16.0, 18.0);
+            a.gfx.ui("?", r, 17.0, 800, crate::CHARACTER, show * k, Align::C);
+            let rect = [(r.x, r.y), (r.x + r.w, r.y), (r.x + r.w, r.y + r.h), (r.x, r.y + r.h)];
+            stripes(&a.gfx, &rect, GAP, show * k);
+        }
+        if age < crate::CURIOUS_UNTIL + 0.2 {
+            a.kick();
+        }
     }
     a.gfx.pop_clip();
 }

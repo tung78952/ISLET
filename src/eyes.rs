@@ -26,6 +26,8 @@ pub enum Look {
     Down,
     /// The left eye narrows, the right one arches.
     Smug,
+    /// "What's that?": the outer eye a little taller, the inner one smaller and lower.
+    Curious,
 }
 
 type P = (f32, f32);
@@ -40,6 +42,8 @@ const fn oval(a: f32, b: f32) -> Lens {
 }
 
 const NEUTRAL: Lens = oval(46.0, 56.0);
+const CURIOUS_BIG: Lens = oval(46.0, 62.0);
+const CURIOUS_SMALL: Lens = lower(oval(38.0, 44.0), 14.0);
 const SURPRISED: Lens = oval(52.0, 82.0);
 const SLIT: Lens = ((-186.0, 0.0), (-54.0, 0.0), [(-186.0, -9.0), (-54.0, -9.0)], [(-186.0, 9.0), (-54.0, 9.0)]);
 const HAPPY: Lens = ((-188.0, 26.0), (-52.0, 26.0), [(-176.0, -88.0), (-64.0, -88.0)], [(-150.0, -20.0), (-90.0, -20.0)]);
@@ -73,6 +77,11 @@ fn walk(shape: &[P], right: bool) -> Vec<P> {
             (side * (a.0 + (b.0 - a.0) * t), a.1 + (b.1 - a.1) * t)
         })
         .collect()
+}
+
+/// `l` moved down by `dy`.
+const fn lower((a, b, [c, d], [e, f]): Lens, dy: f32) -> Lens {
+    ((a.0, a.1 + dy), (b.0, b.1 + dy), [(c.0, c.1 + dy), (d.0, d.1 + dy)], [(e.0, e.1 + dy), (f.0, f.1 + dy)])
 }
 
 fn cubic(a: P, b: P, c: P, d: P, t: f32) -> P {
@@ -117,6 +126,8 @@ fn outline(look: Look, right: bool) -> Vec<P> {
         Look::Down => DOWN,
         Look::Smug if right => SMUG_ARCH,
         Look::Smug => SMUG_FLAT,
+        Look::Curious if right => CURIOUS_SMALL,
+        Look::Curious => CURIOUS_BIG,
     };
     trace(lens, right)
 }

@@ -78,6 +78,10 @@ const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
 const SWIPE_TIME: Duration = Duration::from_secs(4);
+/// A file on its way to the notch: the eyes start, wonder "what's that?" with a "?" for a
+/// moment, then just follow it (seconds since it came over the window).
+pub const CURIOUS_FROM: f32 = 0.45;
+pub const CURIOUS_UNTIL: f32 = 2.4;
 /// How close to the notch a dragged file must come before the Shelf opens.
 const DRAG_REACH: f32 = 30.0;
 const EYES_AFTER_CLOSE: f32 = 1.5;
@@ -2468,7 +2472,8 @@ impl App {
         if let Some(since) = self.drag_near.filter(|_| !self.drag_over && self.settings.pet && !self.hidden && !self.minimal() && self.mode == Mode::Compact && self.toast.is_none()) {
             let (cx, w) = self.notch_geometry();
             let (x, y) = self.drag_pt;
-            let look = if since.elapsed() < Duration::from_millis(450) { eyes::Look::Surprised } else { eyes::Look::Neutral };
+            let age = since.elapsed().as_secs_f32();
+            let look = if age < CURIOUS_FROM { eyes::Look::Surprised } else if age < CURIOUS_UNTIL { eyes::Look::Curious } else { eyes::Look::Neutral };
             self.eye_feel = eyes::Feel {
                 show: true,
                 look,
