@@ -2685,7 +2685,7 @@ impl App {
         let now = chrono::Local::now();
         let idle = idle_seconds() as u64;
         let window = unsafe { GetForegroundWindow() }.0 as isize;
-        let busy = self.demo.is_none() && (sys::busy() || sys::foreground_covers(self.monitor, self.hwnd));
+        let busy = self.demo.is_none() && (sys::busy() || sys::foreground_covers(self.monitor, self.hwnd) == Some(true));
         let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
         let events = self.brain.tick(now, idle, window, busy);
         if !events.is_empty() {
@@ -3733,9 +3733,11 @@ impl App {
     }
 
     fn watch(&mut self) {
-        let cover = sys::foreground_covers(self.monitor, self.hwnd) && !self.expanded();
+        // A layer of Windows' own in front leaves the notch as it was.
+        let cover = sys::foreground_covers(self.monitor, self.hwnd).unwrap_or(self.hidden) && !self.expanded();
         if cover != self.hidden {
-            sys::timelog(&format!("fullscreen hidden={cover}"));
+            let m = self.monitor;
+            sys::timelog(&format!("fullscreen hidden={cover} mon=({},{},{},{}) front={}", m.left, m.top, m.right, m.bottom, sys::foreground_name()));
             self.hidden = cover;
             self.kick();
         }

@@ -922,62 +922,96 @@ unsafe extern "system" fn on_win_event(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32
     let _ = PostMessageW(Some(own), WM_FOREGROUND, WPARAM(0), LPARAM(0));
 }
 
-pub fn foreground_covers(mon: RECT, own: HWND) -> bool {
+/// Whether the foreground window is an app filling the monitor. `None` while one of Windows' own
+/// layers is in front (the capture overlay, a notification, Win+Tab, Start, a flyout): those come
+/// and go over whatever was there, so the notch stays as it was.
+pub fn foreground_covers(mon: RECT, own: HWND) -> Option<bool> {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() || fg == own || fg == GetShellWindow() || fg == GetDesktopWindow() {
-            return false;
+            return Some(false);
         }
-        let mut cls = [0u16; 64];
-        let n = GetClassNameW(fg, &mut cls) as usize;
-        let cls = String::from_utf16_lossy(&cls[..n]);
+        let cls = window_class(fg);
         if cls == "WorkerW" || cls == "Progman" || cls == "Shell_TrayWnd" {
-            return false;
+            return Some(false);
+        }
+        if shell_overlay(fg, &cls) {
+            return None;
         }
         let mut r = RECT::default();
         if GetWindowRect(fg, &mut r).is_err() {
-            return false;
+            return Some(false);
         }
-        if !(r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom) {
-            return false;
-        }
-        // Screen-wide shell layers (the capture overlay, Win+Tab, Start, the notification panel)
-        // are not full-screen apps.
-        if shell_overlay(fg, &cls) {
-            return false;
+        // Chrome in F11 gives up its bottom row for a moment after another window had the front.
+        const SLACK: i32 = 2;
+        if !(r.left <= mon.left + SLACK && r.top <= mon.top + SLACK && r.right >= mon.right - SLACK && r.bottom >= mon.bottom - SLACK) {
+            return Some(false);
         }
         use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
         if SHQueryUserNotificationState().is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE) {
-            return true;
+            return Some(true);
         }
         // Borderless full screen (a video after F11): an ordinary window filling the monitor.
         // A browser put in F11 from maximized still says it is maximized, but has lost its frame.
         let ex = GetWindowLongPtrW(fg, GWL_EXSTYLE) as u32;
         let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
         let framed = style & WS_CAPTION.0 == WS_CAPTION.0 || style & WS_THICKFRAME.0 != 0;
-        ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) == 0 && (!IsZoomed(fg).as_bool() || !framed)
+        Some(ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) == 0 && (!IsZoomed(fg).as_bool() || !framed))
     }
 }
 
-/// The foreground window belongs to one of the shell's transient full-screen layers.
-unsafe fn shell_overlay(fg: HWND, class: &str) -> bool {
-    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
-    if class == "XamlExplorerHostIslandWindow" || class == "MultitaskingViewFrame" {
-        return true;
+/// The foreground window's class and program, for the time log.
+pub fn foreground_name() -> String {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut r = RECT::default();
+        let _ = GetWindowRect(fg, &mut r);
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        let ex = GetWindowLongPtrW(fg, GWL_EXSTYLE) as u32;
+        format!(
+            "{} {} {:?} rect=({},{},{},{}) style={style:#X} ex={ex:#X} zoomed={}",
+            window_class(fg),
+            window_exe(fg).unwrap_or_default(),
+            fg.0,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom,
+            IsZoomed(fg).as_bool()
+        )
     }
+}
+
+unsafe fn window_class(h: HWND) -> String {
+    let mut cls = [0u16; 64];
+    let n = GetClassNameW(h, &mut cls) as usize;
+    String::from_utf16_lossy(&cls[..n])
+}
+
+/// The program a window belongs to, lower case (e.g. "chrome.exe").
+unsafe fn window_exe(h: HWND) -> Option<String> {
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     let mut pid = 0u32;
-    GetWindowThreadProcessId(fg, Some(&mut pid));
-    let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+    GetWindowThreadProcessId(h, Some(&mut pid));
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
     let mut buf = [0u16; 520];
     let mut len = buf.len() as u32;
-    let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
-    let _ = CloseHandle(h);
+    let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+    let _ = CloseHandle(process);
     if !ok {
-        return false;
+        return None;
     }
     let path = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
-    let exe = path.rsplit('\\').next().unwrap_or("");
-    ["screenclippinghost.exe", "snippingtool.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe"].contains(&exe)
+    path.rsplit('\\').next().map(str::to_string)
+}
+
+/// The foreground window belongs to one of the shell's transient layers.
+unsafe fn shell_overlay(fg: HWND, class: &str) -> bool {
+    // ForegroundStaging stands in front for a moment while Windows hands the foreground over.
+    if class == "XamlExplorerHostIslandWindow" || class == "MultitaskingViewFrame" || class == "ForegroundStaging" {
+        return true;
+    }
+    window_exe(fg).is_some_and(|exe| ["screenclippinghost.exe", "snippingtool.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe"].contains(&exe.as_str()))
 }
 
 // ---------------------------------------------------------------- icon
