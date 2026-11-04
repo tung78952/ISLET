@@ -765,6 +765,8 @@ pub struct App {
     /// While a mouse button is held near the notch the whole window takes hits, so a file
     /// dragged into its surroundings (not only onto the notch) opens the shelf, like Nusa.
     pub catch_all: bool,
+    /// The window lets the pointer through (it is not on the notch).
+    click_through: bool,
     /// Box of the looping indicator (equalizer / timer) drawn in the last frame.
     pub loop_rect: Option<gfx::Rc>,
     /// Last screen brightness reported, and the last chat sender shown.
@@ -1013,6 +1015,7 @@ impl App {
             blob: (Spring::new(0.0, 120.0, 18.0), Spring::new(0.0, 120.0, 18.0)),
             drag_energy: 0.3,
             catch_all: false,
+            click_through: true,
             loop_rect: None,
             brightness: None,
             phone_apps: std::fs::read_to_string(model::data_dir().join("phone_apps.txt")).unwrap_or_default().lines().map(str::to_string).collect(),
@@ -2013,11 +2016,32 @@ impl App {
             self.gfx.center_x = WIN_W / 2.0;
             if self.gfx.begin(area).is_ok() {
                 ui::draw(self);
+                self.update_click_through();
                 if self.gfx.end(self.hwnd, self.pos.0, self.pos.1).is_err() {
-                    self.gfx.invalidate();
+                    self.reset_gfx();
                 }
             }
         }
+    }
+
+    /// The GPU device went away (driver update, sleep, a new GPU in charge): start drawing again
+    /// on a new one. Pictures belong to the old device, so they are made again as they are needed.
+    fn reset_gfx(&mut self) {
+        sys::timelog("graphics device reset");
+        let (w, h, scale) = (self.gfx.w, self.gfx.h, self.gfx.scale);
+        let Ok(fresh) = (unsafe { Gfx::new(w, h, scale) }) else { return };
+        self.gfx = fresh;
+        unsafe {
+            let _ = self.gfx.attach(self.hwnd);
+        }
+        self.props.clear();
+        self.pics.clear();
+        self.shelf_icons.clear();
+        self.art = None;
+        if let Some(n) = self.notice.as_mut() {
+            n.thumb = None;
+        }
+        self.kick();
     }
 
     pub fn toast(&mut self, kind: ToastKind, title: &str, value: &str, level: Option<f32>) {
@@ -2406,6 +2430,7 @@ impl App {
         let mut pt = POINT::default();
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         let _ = unsafe { GetCursorPos(&mut pt) };
+        self.update_click_through();
         self.poll_yield(pt);
         self.sense_eyes(pt, down);
         // The hook sees nothing pressed in a window running as administrator: Windows still
@@ -3083,6 +3108,40 @@ impl App {
         let n = Page::ALL.len() as i32;
         self.strip_to = base;
         self.go_page(Page::ALL[(self.page.index() as i32 + way as i32).rem_euclid(n) as usize]);
+    }
+
+    /// Whether a point (layout units) is on the notch: there the window takes the pointer, and
+    /// everywhere else it lets it through to what is below, as the transparent pixels of a layered
+    /// window used to.
+    fn on_notch(&self, x: f32, y: f32) -> bool {
+        if self.catch_all || self.down.is_some() || self.wheel_held.is_some() || self.scrub.is_some() {
+            return true;
+        }
+        let (cx, w) = self.notch_geometry();
+        // The ears and the corner glow reach a little past the outline.
+        let on = (x - cx).abs() <= w / 2.0 + 12.0 && y <= self.sh.x.max(4.0) + 2.0;
+        let pad = self.minimal() && !self.yielded && self.mode == Mode::Compact && (x - cx).abs() <= 70.0 && y <= 18.0;
+        on || pad
+    }
+
+    /// Lets the pointer through the window unless it is on the notch.
+    fn update_click_through(&mut self) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let s = self.gfx.scale;
+        // A demo run has no pointer poll, so it simply takes the pointer everywhere.
+        let through = self.demo.is_none() && !self.on_notch((pt.x - self.pos.0) as f32 / s, (pt.y - self.pos.1) as f32 / s);
+        if through == self.click_through {
+            return;
+        }
+        self.click_through = through;
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            let flag = WS_EX_TRANSPARENT.0 as isize;
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, if through { ex | flag } else { ex & !flag });
+        }
     }
 
     fn set_noactivate(&self, on: bool) {
@@ -4860,7 +4919,7 @@ fn main() {
         };
         RegisterClassExW(&wc);
         let Ok(hwnd) = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("IsletNotch"),
             w!("Islet"),
             WS_POPUP,
@@ -4886,6 +4945,10 @@ fn main() {
         });
         pump::start(hwnd);
         APP = Box::into_raw(Box::new(App::new(hwnd, icon, demo)));
+        // Layered as well, only so that the pointer can be let through (WS_EX_TRANSPARENT); what
+        // shows is the composition content.
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        let _ = app().gfx.attach(hwnd);
         if let Some(spec) = &demo_spec {
             demo_setup(app(), spec);
         }

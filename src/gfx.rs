@@ -3,13 +3,15 @@
 use std::collections::HashMap;
 
 use windows::core::{w, Result, HSTRING};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindowIndirect, ULW_ALPHA, UPDATELAYEREDWINDOWINFO};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION};
+use windows::Win32::Graphics::DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual};
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,7 +73,13 @@ pub struct Gfx {
     inter: Option<IDWriteFontCollection>,
     factory: ID2D1Factory,
     dw: IDWriteFactory,
-    rt: ID2D1DCRenderTarget,
+    /// What every draw goes to: the device context, which draws on the GPU into the swap chain
+    /// that DirectComposition shows as the window's content.
+    rt: ID2D1RenderTarget,
+    dc: ID2D1DeviceContext,
+    d3d: ID3D11Device,
+    swap: Option<IDXGISwapChain1>,
+    comp: Option<(IDCompositionDevice, IDCompositionTarget, IDCompositionVisual)>,
     brush: ID2D1SolidColorBrush,
     round: ID2D1StrokeStyle,
     formats: HashMap<(u32, u32, Align, Font), IDWriteTextFormat>,
@@ -85,8 +93,6 @@ pub struct Gfx {
     depth: std::cell::Cell<usize>,
     widths: HashMap<(String, u32, u32), f32>,
     icon_family: HSTRING,
-    mem_dc: HDC,
-    dib: HBITMAP,
     pub w: i32,
     pub h: i32,
     pub scale: f32,
@@ -99,9 +105,21 @@ pub struct Gfx {
     /// Scale about the top center applied to the whole frame (startup grow-in).
     pub grow: f32,
     pub center_x: f32,
-    /// Pixel rect being drawn this frame and the one drawn last frame (None = whole window).
+    /// The pixel rect being drawn: always the whole window, as each frame is drawn anew.
     dirty: RECT,
-    last_dirty: Option<RECT>,
+}
+
+/// A GPU device for drawing, or the software one where there is none (WARP).
+unsafe fn d3d_device() -> Result<ID3D11Device> {
+    let mut last = Err(windows::core::Error::empty());
+    for kind in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        let mut device = None;
+        last = D3D11CreateDevice(None, D3D_DRIVER_TYPE(kind.0), Default::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, None);
+        if let (Ok(()), Some(d)) = (&last, device) {
+            return Ok(d);
+        }
+    }
+    last.map(|_| unreachable!())
 }
 
 /// The app's own typeface, from memory: nothing is installed on the machine.
@@ -120,22 +138,13 @@ unsafe fn load_inter() -> Option<IDWriteFontCollection> {
 
 impl Gfx {
     pub unsafe fn new(w: i32, h: i32, scale: f32) -> Result<Self> {
-        let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let factory1: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let factory: ID2D1Factory = windows::core::Interface::cast(&factory1)?;
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            // Software rendering: the hardware target reads every frame back from the GPU, which
-            // stalled for up to ~30 ms (and on power-source changes); software stays under ~9 ms.
-            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        let rt = factory.CreateDCRenderTarget(&props)?;
+        let d3d = d3d_device()?;
+        let dxgi: IDXGIDevice = windows::core::Interface::cast(&d3d)?;
+        let dc = factory1.CreateDevice(&dxgi)?.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+        let rt: ID2D1RenderTarget = windows::core::Interface::cast(&dc)?;
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         // White on black at small sizes needs more contrast than the system's default.
         if let Ok(params) = dw.CreateCustomRenderingParams(1.8, 1.0, 0.0, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC) {
@@ -167,12 +176,15 @@ impl Gfx {
         }
 
         let inter = load_inter();
-        let mem_dc = CreateCompatibleDC(None);
         let mut g = Gfx {
             factory,
             inter,
             dw,
             rt,
+            dc,
+            d3d,
+            swap: None,
+            comp: None,
             brush,
             round,
             formats: HashMap::new(),
@@ -182,8 +194,6 @@ impl Gfx {
             depth: Default::default(),
             widths: HashMap::new(),
             icon_family,
-            mem_dc,
-            dib: HBITMAP::default(),
             w: 0,
             h: 0,
             scale,
@@ -193,61 +203,74 @@ impl Gfx {
             grow: 1.0,
             center_x: 0.0,
             dirty: RECT::default(),
-            last_dirty: None,
         };
         g.resize(w, h)?;
         Ok(g)
     }
 
     pub unsafe fn resize(&mut self, w: i32, h: i32) -> Result<()> {
-        if !self.dib.is_invalid() {
-            let _ = DeleteObject(self.dib.into());
+        let (w, h) = (w.max(1), h.max(1));
+        self.dc.SetTarget(None);
+        match &self.swap {
+            Some(swap) => swap.ResizeBuffers(2, w as u32, h as u32, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG(0))?,
+            None => {
+                let dxgi: IDXGIDevice = windows::core::Interface::cast(&self.d3d)?;
+                let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+                let desc = DXGI_SWAP_CHAIN_DESC1 {
+                    Width: w as u32,
+                    Height: h as u32,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                    BufferCount: 2,
+                    Scaling: DXGI_SCALING_STRETCH,
+                    SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                    AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    ..Default::default()
+                };
+                self.swap = Some(factory.CreateSwapChainForComposition(&self.d3d, &desc, None)?);
+            }
         }
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
+        let swap = self.swap.as_ref().expect("made above");
+        let surface: IDXGISurface = swap.GetBuffer(0)?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             ..Default::default()
         };
-        let mut bits = std::ptr::null_mut();
-        self.dib = CreateDIBSection(Some(self.mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
-        SelectObject(self.mem_dc, self.dib.into());
+        let target = self.dc.CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
+        self.dc.SetTarget(&target);
+        if let Some((comp, _, visual)) = &self.comp {
+            visual.SetContent(swap)?;
+            comp.Commit()?;
+        }
         self.w = w;
         self.h = h;
-        self.last_dirty = None;
         Ok(())
     }
 
-    /// Starts a frame that redraws only `area` (layout units) plus whatever the previous
-    /// frame covered, so small notch states don't repaint and recomposite the whole window.
-    /// Forgets what the window shows: the next frame redraws and sends all of it. For when
-    /// Windows may have dropped the window's image (shown again, display change, failed update).
-    pub fn invalidate(&mut self) {
-        self.last_dirty = None;
+    /// Shows the drawing as `hwnd`'s content (the window is made without a redirection bitmap).
+    pub unsafe fn attach(&mut self, hwnd: HWND) -> Result<()> {
+        let dxgi: IDXGIDevice = windows::core::Interface::cast(&self.d3d)?;
+        let comp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
+        let target = comp.CreateTargetForHwnd(hwnd, true)?;
+        let visual = comp.CreateVisual()?;
+        if let Some(swap) = &self.swap {
+            visual.SetContent(swap)?;
+        }
+        target.SetRoot(&visual)?;
+        comp.Commit()?;
+        self.comp = Some((comp, target, visual));
+        Ok(())
     }
 
-    pub unsafe fn begin(&mut self, area: Rc) -> Result<()> {
-        let s = self.scale;
-        let cur = RECT {
-            left: ((area.x * s).floor() as i32 - 2).max(0),
-            top: 0,
-            right: (((area.x + area.w) * s).ceil() as i32 + 2).min(self.w),
-            bottom: (((area.y + area.h) * s).ceil() as i32 + 2).min(self.h),
-        };
-        let full = RECT { left: 0, top: 0, right: self.w, bottom: self.h };
-        let rc = match self.last_dirty {
-            Some(p) => RECT { left: cur.left.min(p.left), top: 0, right: cur.right.max(p.right), bottom: cur.bottom.max(p.bottom) },
-            None => full,
-        };
-        self.last_dirty = Some(cur);
-        self.dirty = rc;
-        self.rt.BindDC(self.mem_dc, &rc)?;
+    /// Every frame is drawn whole now; kept for callers that ask for a full redraw.
+    pub fn invalidate(&mut self) {}
+
+    pub unsafe fn begin(&mut self, _area: Rc) -> Result<()> {
+        self.dirty = RECT { left: 0, top: 0, right: self.w, bottom: self.h };
         self.rt.BeginDraw();
         self.depth.set(0);
         self.rt.Clear(Some(&rgba(0, 0.0)));
@@ -266,30 +289,12 @@ impl Gfx {
             * Matrix3x2::scale(self.scale, self.scale) * Matrix3x2::translation(-self.dirty.left as f32, -self.dirty.top as f32)
     }
 
-    pub unsafe fn end(&mut self, hwnd: HWND, x: i32, y: i32) -> Result<()> {
+    pub unsafe fn end(&mut self, _hwnd: HWND, _x: i32, _y: i32) -> Result<()> {
         self.rt.EndDraw(None, None)?;
-        let pos = POINT { x, y };
-        let size = SIZE { cx: self.w, cy: self.h };
-        let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let info = UPDATELAYEREDWINDOWINFO {
-            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
-            hdcDst: HDC::default(),
-            pptDst: &pos,
-            psize: &size,
-            hdcSrc: self.mem_dc,
-            pptSrc: &src,
-            crKey: COLORREF(0),
-            pblend: &blend,
-            dwFlags: ULW_ALPHA,
-            prcDirty: &self.dirty,
-        };
-        UpdateLayeredWindowIndirect(hwnd, &info).ok()
+        match &self.swap {
+            Some(swap) => swap.Present(0, DXGI_PRESENT(0)).ok(),
+            None => Ok(()),
+        }
     }
 
     fn set(&self, hex: u32, a: f32) {
@@ -991,13 +996,3 @@ impl Gfx {
     }
 }
 
-impl Drop for Gfx {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.dib.is_invalid() {
-                let _ = DeleteObject(self.dib.into());
-            }
-            let _ = DeleteDC(self.mem_dc);
-        }
-    }
-}
