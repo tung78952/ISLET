@@ -765,165 +765,81 @@ fn clock_text(left_s: f64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
-/// The focus timer: a red sun going down behind the horizon, with its light on the water below.
-/// `left` is how much of the time remains; the used part stays as the reflection and the line.
-fn sunset(a: &mut App, cx: f32, cy: f32, r: f32, left: f32) {
+/// The focus sun's colours: bright orange red at its top, red below.
+const SUN_HI: u32 = 0xFF8A66;
+/// What the sun's lower red deepens to by the end of a session.
+const SUN_DEEP: u32 = 0xB0140E;
+
+/// How far the sun's centre sits below the horizon (negative: above) when `used` of the time is
+/// gone: well up at the start, wholly under the line at the end.
+fn sun_below(used: f32, r: f32) -> f32 {
+    -r * 0.7 + used.clamp(0.0, 1.0) * r * 1.9
+}
+
+/// The focus timer: a sun of lit lines, like the eyes, setting over a sea of hairlines. Its dark
+/// gaps are thin up high and thicker toward the sea, and slide down slowly while the time
+/// runs; it deepens to a darker red as it goes, and its light on the water goes with it. `big`:
+/// the Focus page; otherwise the small one in the closed notch.
+fn sun_scene(a: &mut App, cx: f32, horizon: f32, r: f32, left: f32, running: bool, big: bool) {
     let t = a.born.elapsed().as_secs_f32();
-    let horizon = cy + r * 0.42;
-    let sun = horizon - r * 0.52 + (1.0 - left) * r * 1.5;
-    let height = (horizon - sun).clamp(-r, r);
-    let chord = (r * r - height * height).max(0.0).sqrt();
-    a.gfx.glow_ellipse(cx, horizon - r * 0.1, r * 1.5, r * 1.1, RED, 0.16 + 0.1 * left);
-    a.gfx.push_clip(Rc::new(cx - r - 2.0, cy - r * 2.0, 2.0 * r + 4.0, horizon - (cy - r * 2.0)));
-    a.gfx.fill_circle(cx, sun, r, r, RED, 1.0);
-    a.gfx.fill_circle(cx - r * 0.12, sun - r * 0.16, r * 0.76, r * 0.76, 0xFF7468, 0.5);
-    a.gfx.pop_clip();
-    // The light on the water, each band narrower and drifting a little.
-    let band = (r * 0.09).max(1.0);
-    let gap = (r * 0.2).max(2.4);
-    let width = chord.max(r * 0.34);
-    for i in 0..3 {
+    let used = 1.0 - left.clamp(0.0, 1.0);
+    let sun_y = horizon + sun_below(used, r);
+    // How much of it is still above the line.
+    let up = ((horizon - (sun_y - r)) / (2.0 * r)).clamp(0.0, 1.0);
+    let g = &a.gfx;
+    // Its light in the sky: wide and bright at first, smaller as it goes, breathing a little.
+    let breath = 0.5 + 0.5 * (t * 1.1).sin();
+    let halo = 1.0 - 0.45 * used;
+    g.glow_ellipse(cx, horizon - r * 0.2, r * 2.6 * halo, r * 1.5 * halo, RED, (0.1 + 0.22 * up) * (0.85 + 0.15 * breath));
+    let hi = mix(SUN_HI, RED, used * 0.7);
+    let lo = mix(RED, SUN_DEEP, used * 0.85);
+    g.push_clip(Rc::new(cx - r * 3.0, horizon - r * 3.0, r * 6.0, r * 3.0));
+    g.stroke_circle(cx, sun_y, r * 1.22, 1.0, hi, 0.25 + 0.2 * up);
+    g.clip_circle(cx, sun_y, r, || {
+        g.fill_rrect_vgrad(Rc::new(cx - r, sun_y - r, 2.0 * r, 2.0 * r), 0.0, (hi, 1.0), (lo, 1.0));
+        // The gaps are the notch's own black, as between the eyes' lines.
+        let pitch = if big { 5.2 } else { 3.2 };
+        let slide = if running { (t * if big { 1.6 } else { 0.8 }) % pitch } else { 0.0 };
+        let mut y = sun_y - r - pitch + slide;
+        while y < sun_y + r {
+            // Thicker the nearer they are to the sea, so whatever is still up keeps its lines.
+            let k = 1.0 - (horizon - y) / (r * 1.3);
+            if k >= 0.0 {
+                let w = if big { 0.6 } else { 0.5 } + if big { 2.6 } else { 1.4 } * k.min(1.0);
+                g.fill_rrect(Rc::new(cx - r - 1.0, y - w / 2.0, 2.0 * r + 2.0, w), 0.0, 0x000000, 1.0);
+            }
+            y += pitch;
+        }
+    });
+    g.pop_clip();
+    // The horizon: a red hairline fading out at both ends.
+    let reach = if big { r * 3.2 } else { r * 1.4 };
+    g.fill_rrect_hgrad(Rc::new(cx - reach, horizon - 0.6, reach, 1.2), 0.0, (RED, 0.0), (RED, 0.95));
+    g.fill_rrect_hgrad(Rc::new(cx, horizon - 0.6, reach, 1.2), 0.0, (RED, 0.95), (RED, 0.0));
+    // The sea: hairlines, and on them the sun's light, narrower further down, drifting slowly.
+    let (rows, gap) = if big { (5, 6.0) } else { (2, 2.6) };
+    let s = r / 30.0;
+    for i in 0..rows {
         let k = i as f32;
-        let drift = r * 0.05 * (t * 0.9 + k * 1.7).sin();
-        let half = width * (1.0 - 0.24 * k) + r * 0.04 * (t * 1.3 + k).sin();
-        let y = horizon + band * 0.5 + k * gap;
-        a.gfx.fill_rrect(Rc::new(cx + drift - half, y, 2.0 * half, band), band / 2.0, RED, (0.95 - 0.28 * k) * (0.55 + 0.45 * left));
-    }
-}
-
-/// The sun on the Focus page is cut into this many slices.
-const SLICES: usize = 8;
-/// Seconds a slice takes to fall into the water, and its rings to fade there.
-const SLICE_FALL: f32 = 1.2;
-/// A drop falls from the sun this often, taking this long to reach the water.
-/// When a falling slice reaches the water: it starts 6.5 above it and falls 28 by the end.
-const SLICE_LANDS: f32 = SLICE_FALL * 0.48;
-const DRIP_EVERY: f32 = 4.0;
-const DRIP_FALL: f32 = 0.55;
-const RING_LIFE: f32 = 3.5;
-
-/// How far the sun has come apart: slices gone, how loose the next one is (0 to 1), and how many
-/// seconds ago the last one let go.
-fn slices_gone(left: f32, total_s: f32) -> (usize, f32, f32) {
-    let used = (1.0 - left).clamp(0.0, 1.0) * SLICES as f32;
-    let part = used.fract();
-    (used as usize, part, part * total_s / SLICES as f32)
-}
-
-/// Rings spreading on the water, `age` seconds after something touched it.
-fn water_rings(a: &App, cx: f32, y: f32, age: f32, reach: f32, strength: f32) {
-    for ring in 0..3 {
-        let k = (age - 0.4 * ring as f32) / RING_LIFE;
-        if !(0.0..1.0).contains(&k) {
-            continue;
-        }
-        let k = 1.0 - (1.0 - k) * (1.0 - k);
-        let (rx, ry) = (6.0 + reach * k, (6.0 + reach * k) * 0.2);
-        let oval: Vec<(f32, f32)> = (0..=44)
-            .map(|n| {
-                let t = n as f32 / 44.0 * std::f32::consts::TAU;
-                (cx + rx * t.cos(), y + ry * t.sin())
-            })
-            .collect();
-        a.gfx.polyline(&oval, 1.3, RED, strength * (1.0 - k) * (1.0 - k));
-    }
-}
-
-/// The focus timer: a sun cut into slices that falls into the sea one slice at a time, each
-/// leaving rings where it went in. `left` is how much of the time remains.
-fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
-    const R: f32 = 30.0;
-    const CY: f32 = 71.0;
-    const HORIZON: f32 = 105.0;
-    const GAP: f32 = 2.2;
-    let t = a.born.elapsed().as_secs_f32();
-    let (gone, part, since) = slices_gone(left, total_s);
-    let band = 2.0 * R / SLICES as f32;
-    let warm = |k: f32| {
-        let mix = |top: u32, low: u32| low + ((top as f32 - low as f32) * k) as u32;
-        let (r, g, b) = (0xFF, mix(0x78, 0x2C), mix(0x48, 0x28));
-        r << 16 | g << 8 | b
-    };
-    // The lowest slice comes loose, falls into the sea and leaves rings right where it went in;
-    // the rest of the sun settles down by one slice meanwhile. Now and then a drop falls from the
-    // bottom edge and rings the water under it.
-    let used = gone as f32 + part;
-    let settle = if gone > 0 { smooth01(since / SLICE_FALL) } else { 1.0 };
-    // The sun hangs a little above the sea, so a slice can be seen to fall.
-    const AIR: f32 = -7.0;
-    let sink = AIR + (gone as f32 - 1.0 + settle).max(0.0) * band;
-    let slice = |g: &Gfx, k: usize, sink: f32, alpha: f32| {
-        let y1 = CY + R - k as f32 * band - GAP / 2.0;
-        let side = |n: i32| {
-            let y = y1 - (band - GAP) * n as f32 / 6.0;
-            ((R * R - (y - CY) * (y - CY)).max(0.0).sqrt(), y + sink)
-        };
-        let mut shape: Vec<(f32, f32)> = (0..=6).map(side).map(|(half, y)| (cx + half, y)).collect();
-        shape.extend((0..=6).rev().map(side).map(|(half, y)| (cx - half, y)));
-        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), alpha);
-    };
-    let above = Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0);
-    let below = Rc::new(cx - R - 4.0, HORIZON, 2.0 * R + 8.0, 22.0);
-    a.gfx.glow_ellipse(cx, CY + sink, R * 1.5, R * 1.4, RED, 0.2 * (1.0 - used / SLICES as f32) + 0.04);
-    a.gfx.push_clip(above);
-    for k in gone..SLICES {
-        // The one to go next comes loose a little before it does.
-        let loose = if k == gone { 2.5 * part * part } else { 0.0 };
-        slice(&a.gfx, k, sink + loose, 1.0);
-    }
-    a.gfx.pop_clip();
-    if gone > 0 && since < SLICE_FALL {
-        let q = since / SLICE_FALL;
-        let from = AIR + (gone as f32 - 1.0) * band + 2.5;
-        let at = from + 28.0 * q * q;
-        a.gfx.push_clip(above);
-        slice(&a.gfx, gone - 1, at, 1.0);
-        a.gfx.pop_clip();
-        // Under the water it shows dim and fades away.
-        a.gfx.push_clip(below);
-        slice(&a.gfx, gone - 1, at, 0.45 * (1.0 - q));
-        a.gfx.pop_clip();
-    }
-    // The water: light under the sun that goes with it, and a line.
-    let sun_left = 1.0 - gone as f32 / SLICES as f32;
-    for i in 0..4 {
-        let k = i as f32;
-        let half = (R * 0.8 - 5.0 * k) * sun_left + 1.0 * (t * 1.2 + k).sin();
-        if half > 2.0 {
-            a.gfx.fill_rrect(Rc::new(cx - half, HORIZON + 4.0 + k * 4.2, 2.0 * half, 1.6), 0.8, RED, (0.5 - 0.09 * k) * sun_left);
+        let y = horizon + gap * (k + 1.0);
+        let w = reach * (0.9 - 0.14 * k);
+        g.line(cx - w, y, cx + w, y, 1.0, 0x8E8E8E, 0.5 - 0.08 * k);
+        let half = r * (1.05 - 0.18 * k) * (0.25 + 0.75 * up) + (t * 0.8 + k).sin() * 1.5 * s;
+        let drift = (t * 0.5 + k * 1.7).sin() * 2.0 * s;
+        let band = if big { 2.0 } else { 1.2 };
+        if half > 1.0 {
+            g.fill_rrect(Rc::new(cx + drift - half, y - band / 2.0, 2.0 * half, band), band / 2.0, RED, (0.9 - 0.16 * k) * (0.3 + 0.7 * up));
         }
     }
-    a.gfx.fill_rrect_hgrad(Rc::new(cx - 62.0, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.0), (RED, 0.95));
-    a.gfx.fill_rrect_hgrad(Rc::new(cx, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.95), (RED, 0.0));
-    const WATER_Y: f32 = HORIZON + 9.0;
-    a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
-    if gone > 0 {
-        // The slice went in under the sun's centre.
-        water_rings(a, cx, WATER_Y, since - SLICE_LANDS, 50.0, 0.95);
-    }
-    a.gfx.pop_clip();
-    if running && gone < SLICES {
-        let (n, beat) = ((t / DRIP_EVERY) as u32, t % DRIP_EVERY);
-        // Where along the lowest slice's bottom edge this drop leaves from.
-        let bottom = CY + R - gone as f32 * band - GAP / 2.0;
-        let edge = (R * R - (bottom - CY) * (bottom - CY)).max(0.0).sqrt();
-        let spread = ((n.wrapping_mul(2654435761) >> 8) % 1000) as f32 / 1000.0 * 2.0 - 1.0;
-        let x = cx + spread * edge * 0.8;
-        let start = bottom + sink;
-        if beat < DRIP_FALL {
-            let q = beat / DRIP_FALL;
-            let y = start + (WATER_Y - start) * q * q;
-            a.gfx.fill_circle(x, y, 1.6, 2.0, RED, if y < HORIZON { 1.0 } else { 0.5 });
-        }
-        a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
-        water_rings(a, x, WATER_Y, beat - DRIP_FALL, 26.0, 0.35);
-        a.gfx.pop_clip();
+    // Done: a slow glow on the horizon where it went down.
+    if used >= 1.0 {
+        g.glow_ellipse(cx, horizon, r * 1.6, r * 0.35, RED, 0.25 + 0.15 * (t * 1.6).sin());
     }
 }
 
-fn smooth01(k: f32) -> f32 {
-    let k = k.clamp(0.0, 1.0);
-    k * k * (3.0 - 2.0 * k)
+/// The focus timer on the Focus page.
+fn sun_slices(a: &mut App, cx: f32, left: f32, running: bool) {
+    sun_scene(a, cx, 104.0, 28.0, left, running, true);
 }
 
 /// The small sun that stays in the notch while focus runs, moving with it as it opens.
@@ -931,7 +847,7 @@ fn focus_sun(a: &mut App, left: f32, w: f32, h: f32) {
     if a.brain.focus.is_none() || a.live_alpha <= 0.01 {
         return;
     }
-    let (time, total, _, _) = a.pomo_view();
+    let (time, total, running, _) = a.pomo_view();
     let open = ((h - 30.0) / 110.0).clamp(0.0, 1.0);
     let open = open * open * (3.0 - 2.0 * open);
     let ring = (left + w - 19.0, 14.8);
@@ -940,7 +856,7 @@ fn focus_sun(a: &mut App, left: f32, w: f32, h: f32) {
     let base = a.gfx.alpha;
     // The Focus page has the big one; two suns would be one too many.
     a.gfx.alpha = a.live_alpha * if a.page == Page::Pomo && a.view == View::Page { 1.0 - open } else { 1.0 };
-    sunset(a, at.0, at.1, 8.0, (time / total) as f32);
+    sun_scene(a, at.0, at.1 + 8.0 * 0.42, 8.0, (time / total) as f32, running, false);
     a.gfx.alpha = base;
 }
 
@@ -2727,7 +2643,7 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
 fn focus_running(a: &mut App, lx: f32, live: bool) {
     let (left_s, total_s, running, phase) = a.pomo_view();
     let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
-    sun_slices(a, lx + 104.0, left, total_s as f32, running);
+    sun_slices(a, lx + 104.0, left, running);
     pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
     a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
     a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
@@ -3775,15 +3691,13 @@ fn form(a: &mut App, lx: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{slices_gone, SLICES};
+    use super::sun_below;
 
     #[test]
-    fn slices_leave_one_by_one_as_time_runs_out() {
-        assert_eq!(slices_gone(1.0, 800.0).0, 0);
-        assert_eq!(slices_gone(0.0, 800.0).0, SLICES);
-        let (gone, part, since) = slices_gone(0.7, 800.0);
-        assert_eq!(gone, 2);
-        assert!((part - 0.4).abs() < 0.01);
-        assert!((since - 40.0).abs() < 1.0, "seconds since the last one let go");
+    fn the_sun_sets_as_time_runs_out() {
+        let r = 28.0;
+        assert!(sun_below(0.0, r) - r < 0.0, "at the start most of it is up");
+        assert!(sun_below(1.0, r) - r > 0.0, "at the end its top is under the line");
+        assert!(sun_below(0.3, r) < sun_below(0.6, r));
     }
 }
