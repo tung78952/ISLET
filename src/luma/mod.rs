@@ -64,9 +64,14 @@ pub struct Brain {
     ticks: u32,
 }
 
-/// Islet's copy of Luma's data.
+/// Islet's copy of Luma's data. Fast-time test runs keep theirs apart, so what Luma learns
+/// comes only from real days.
 pub fn data_dir() -> PathBuf {
-    crate::model::data_dir().join("luma")
+    crate::model::data_dir().join(if fast() { "luma-fast" } else { "luma" })
+}
+
+fn fast() -> bool {
+    std::env::var_os("ISLET_FAST").is_some()
 }
 
 /// The Luma app's own folder.
@@ -94,7 +99,9 @@ fn today(now: DateTime<Local>) -> String {
 impl Brain {
     pub fn open(now: DateTime<Local>) -> Self {
         let dir = data_dir();
-        migrate(&dir);
+        if !fast() {
+            migrate(&dir);
+        }
         Self::load(Some(dir), now)
     }
 
@@ -140,8 +147,9 @@ impl Brain {
     }
 
     /// Every 2 s. `idle`: seconds without input; `window`: the foreground window; `busy`: a
-    /// fullscreen app or presentation is in front (no heads-up, card without taking focus).
-    pub fn tick(&mut self, now: DateTime<Local>, idle: u64, window: isize, busy: bool) -> Vec<Event> {
+    /// fullscreen app or presentation is in front (no heads-up, card without taking focus);
+    /// `watching`: something full screen or playing, so no input is no sign of being away.
+    pub fn tick(&mut self, now: DateTime<Local>, idle: u64, window: isize, busy: bool, watching: bool) -> Vec<Event> {
         let mut out = Vec::new();
         self.ticks = self.ticks.wrapping_add(1);
         if self.stats.roll(&today(now)) {
@@ -192,7 +200,7 @@ impl Brain {
         let working = self.focus.as_ref().is_some_and(|f| !f.resting());
         let due = self
             .sched
-            .tick(&self.cfg, now, idle, &self.stats.fired)
+            .tick(&self.cfg, now, if watching { 0 } else { idle }, &self.stats.fired)
             // While working, the interval reminders keep quiet; bedtime and the user's own come.
             .filter(|due| !(working && matches!(due, Due::Builtin(k) if *k != Kind::Sleep)))
             .filter(|due| !matches!(due, Due::Builtin(kind) if self.live.hold(&self.habits, *kind, now, idle, resting)));
@@ -245,9 +253,11 @@ impl Brain {
     pub fn answer(&mut self, outcome: Outcome, timed_out: bool, now: DateTime<Local>) -> Option<(u32, String)> {
         let s = self.showing.take()?;
         let answer = if timed_out { "timeout".to_string() } else { format!("{outcome:?}").to_lowercase() };
+        // Left unanswered by someone who was not there (music on, away from the PC): not a skip.
+        let away = timed_out && self.live.idle() as i64 >= scheduler::minutes(self.cfg.idle_reset_minutes).num_seconds();
         match &s.due {
             Due::Builtin(kind) => {
-                if s.heads_up_until.is_none() {
+                if s.heads_up_until.is_none() && !away {
                     self.record(kind.id(), &answer, now);
                 }
                 self.sched.finish(*kind, outcome, &self.cfg, now);
@@ -258,7 +268,9 @@ impl Brain {
                 None
             }
             Due::Custom(id) => {
-                self.record("custom", &answer, now);
+                if !away {
+                    self.record("custom", &answer, now);
+                }
                 self.finish_custom(id, outcome, now);
                 let c = self.cfg.custom.iter().find(|c| &c.id == id).filter(|c| c.start && c.minutes > 0);
                 (outcome == Outcome::Done).then(|| c.map(|c| (c.minutes, c.title.clone()))).flatten()

@@ -2715,7 +2715,8 @@ impl App {
         let window = unsafe { GetForegroundWindow() }.0 as isize;
         let busy = self.demo.is_none() && (sys::busy() || sys::foreground_covers(self.monitor, self.hwnd) == Some(true));
         let goal_was = self.brain.stats.water >= self.brain.cfg.water_goal;
-        let events = self.brain.tick(now, idle, window, busy);
+        let watching = busy || self.playing();
+        let events = self.brain.tick(now, idle, window, busy, watching);
         if !events.is_empty() {
             self.kick();
         }

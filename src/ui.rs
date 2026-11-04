@@ -1620,25 +1620,6 @@ fn act_card(a: &mut App, left: f32, w: f32, h: f32, title: &str, value: &str, ki
             }
         }
     }
-    let drink = a.drink_time();
-    if let Some(age) = a.reaction.filter(|r| r.1).map(|r| r.0.elapsed().as_secs_f32() - drink).filter(|age| *age > 0.0) {
-        // Little hearts of scan lines drift up from the eyes.
-        for i in 0..6 {
-            let k = (age - 0.08 * i as f32) / 1.2;
-            if !(0.0..1.0).contains(&k) {
-                continue;
-            }
-            let at = (eyes_at + reach * 0.3 + (i as f32 - 2.5) * 13.0 + 6.0 * (k * 9.0 + i as f32).sin(), cy + 8.0 - 42.0 * k);
-            let heart: Vec<(f32, f32)> = (0..20)
-                .map(|n| {
-                    let t = n as f32 / 20.0 * std::f32::consts::TAU;
-                    let (x, y) = (16.0 * t.sin().powi(3), 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos());
-                    (at.0 + 0.32 * x, at.1 - 0.32 * y)
-                })
-                .collect();
-            a.gfx.fill_poly(&heart, crate::CHARACTER, (1.0 - k) * (k * 8.0).min(1.0));
-        }
-    }
     // The words come out from behind the prop, the second line a beat later.
     let tx = centre - 72.0 + if kind == K::Rest { -24.0 } else { 0.0 };
     let tw = 170.0;

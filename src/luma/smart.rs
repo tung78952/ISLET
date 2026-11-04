@@ -255,6 +255,11 @@ impl Live {
         }
     }
 
+    /// Seconds without input at the last tick.
+    pub fn idle(&self) -> u64 {
+        self.prev_idle
+    }
+
     /// A good moment to step in: just back at the PC, a pause in typing, or just switched apps.
     fn natural_break(&self, now: DateTime<Local>, idle_secs: u64) -> bool {
         let recent = |t: Option<DateTime<Local>>, secs: i64| t.is_some_and(|t| now - t < TimeDelta::seconds(secs));
@@ -264,7 +269,9 @@ impl Live {
     /// True to keep a due interval reminder waiting a little longer for a natural break.
     /// `resting`: a Pomodoro break, which is the right moment already.
     pub fn hold(&mut self, habits: &Habits, kind: Kind, now: DateTime<Local>, idle_secs: u64, resting: bool) -> bool {
-        if kind == Kind::Sleep || resting || self.natural_break(now, idle_secs) {
+        // At the hour the user usually does it, it comes as soon as it is due.
+        let best = habits.best_hour(kind.id(), now) == Some(now.hour());
+        if kind == Kind::Sleep || resting || best || self.natural_break(now, idle_secs) {
             self.held_since.remove(&kind);
             return false;
         }
@@ -394,5 +401,20 @@ mod tests {
         // Bedtime and Pomodoro breaks never wait.
         assert!(!live.hold(&h, Kind::Sleep, now, 1, false));
         assert!(!live.hold(&h, Kind::Eyes, now, 1, true));
+    }
+
+    #[test]
+    fn at_its_usual_hour_it_does_not_wait() {
+        let now = Local.with_ymd_and_hms(2026, 10, 28, 15, 10, 0).unwrap();
+        let mut h = Habits::default();
+        for day in 1..5 {
+            h.events.push(Event { t: (now - TimeDelta::days(day)).timestamp(), kind: "stretch".into(), outcome: "done".into() });
+        }
+        let mut live = Live::default();
+        live.observe(now, 1, 7);
+        // Typing away, but 15:00 is when stretching usually happens.
+        assert!(!live.hold(&h, Kind::Stretch, now, 1, false));
+        // Another hour: it waits for a break as usual.
+        assert!(live.hold(&h, Kind::Stretch, now + TimeDelta::hours(2), 1, false));
     }
 }
