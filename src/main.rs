@@ -640,6 +640,7 @@ pub struct App {
     /// Current period of the pointer/yield poll (ms).
     zone_every: u32,
     hook_blind: bool,
+    raised_over: Option<String>,
     /// Capture exclusion stays on until this moment after the last message card.
     private_until: Option<Instant>,
     pub eyes: eyes::Eyes,
@@ -909,6 +910,7 @@ impl App {
             drawn_minute: u32::MAX,
             zone_every: 50,
             hook_blind: false,
+            raised_over: None,
             private_until: None,
             eyes: eyes::Eyes::new(),
             eye_feel: eyes::Feel::ASLEEP,
@@ -2364,8 +2366,22 @@ impl App {
             self.hook_blind = blind;
             sys::timelog(&format!("hook blind {blind}"));
         }
-        if down && near {
+        // Windows' own layers (the bar between snapped windows) can come up over the notch.
+        let s = self.gfx.scale;
+        let (cx, w) = self.notch_geometry();
+        let area = RECT {
+            left: self.pos.0 + ((cx - w / 2.0) * s) as i32,
+            top: self.pos.1,
+            right: self.pos.0 + ((cx + w / 2.0) * s) as i32,
+            bottom: self.pos.1 + (self.sh.x.max(4.0) * s) as i32,
+        };
+        let over = sys::covered_from_above(self.hwnd, area);
+        if over.is_some() {
             self.raise();
+        }
+        if over != self.raised_over {
+            sys::timelog(&format!("raised over {over:?}"));
+            self.raised_over = over;
         }
         let every = if busy || blind { 50 } else { 250 };
         if every != self.zone_every {

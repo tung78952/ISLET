@@ -800,7 +800,13 @@ fn sunset(a: &mut App, cx: f32, cy: f32, r: f32, left: f32) {
 
 /// The sun on the Focus page is cut into this many slices.
 const SLICES: usize = 8;
-/// Seconds the rings of a slice that went under take to fade.
+/// Seconds a slice takes to fall into the water, and its rings to fade there.
+const SLICE_FALL: f32 = 1.2;
+/// A drop falls from the sun this often, taking this long to reach the water.
+/// When a falling slice reaches the water: it starts 6.5 above it and falls 28 by the end.
+const SLICE_LANDS: f32 = SLICE_FALL * 0.48;
+const DRIP_EVERY: f32 = 4.0;
+const DRIP_FALL: f32 = 0.55;
 const RING_LIFE: f32 = 3.5;
 
 /// How far the sun has come apart: slices gone, how loose the next one is (0 to 1), and how many
@@ -830,8 +836,8 @@ fn water_rings(a: &App, cx: f32, y: f32, age: f32, reach: f32, strength: f32) {
     }
 }
 
-/// The focus timer: a sun cut into slices that sinks into the sea, each slice that goes under
-/// leaving rings on the water. `left` is how much of the time remains.
+/// The focus timer: a sun cut into slices that falls into the sea one slice at a time, each
+/// leaving rings where it went in. `left` is how much of the time remains.
 fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
     const R: f32 = 30.0;
     const CY: f32 = 71.0;
@@ -845,11 +851,15 @@ fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
         let (r, g, b) = (0xFF, mix(0x78, 0x2C), mix(0x48, 0x28));
         r << 16 | g << 8 | b
     };
-    // The whole sun sinks as time runs out, one slice's height per slice; the lowest one goes
-    // under the horizon and leaves rings on the water.
+    // The lowest slice comes loose, falls into the sea and leaves rings right where it went in;
+    // the rest of the sun settles down by one slice meanwhile. Now and then a drop falls from the
+    // bottom edge and rings the water under it.
     let used = gone as f32 + part;
-    let sink = 2.0 + used * band;
-    let slice = |g: &Gfx, k: usize| {
+    let settle = if gone > 0 { smooth01(since / SLICE_FALL) } else { 1.0 };
+    // The sun hangs a little above the sea, so a slice can be seen to fall.
+    const AIR: f32 = -7.0;
+    let sink = AIR + (gone as f32 - 1.0 + settle).max(0.0) * band;
+    let slice = |g: &Gfx, k: usize, sink: f32, alpha: f32| {
         let y1 = CY + R - k as f32 * band - GAP / 2.0;
         let side = |n: i32| {
             let y = y1 - (band - GAP) * n as f32 / 6.0;
@@ -857,15 +867,31 @@ fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
         };
         let mut shape: Vec<(f32, f32)> = (0..=6).map(side).map(|(half, y)| (cx + half, y)).collect();
         shape.extend((0..=6).rev().map(side).map(|(half, y)| (cx - half, y)));
-        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), 1.0);
+        g.fill_poly(&shape, warm((k as f32 + 0.5) / SLICES as f32), alpha);
     };
+    let above = Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0);
+    let below = Rc::new(cx - R - 4.0, HORIZON, 2.0 * R + 8.0, 22.0);
     a.gfx.glow_ellipse(cx, CY + sink, R * 1.5, R * 1.4, RED, 0.2 * (1.0 - used / SLICES as f32) + 0.04);
-    a.gfx.push_clip(Rc::new(cx - R - 4.0, 30.0, 2.0 * R + 8.0, HORIZON - 30.0));
+    a.gfx.push_clip(above);
     for k in gone..SLICES {
-        slice(&a.gfx, k);
+        // The one to go next comes loose a little before it does.
+        let loose = if k == gone { 2.5 * part * part } else { 0.0 };
+        slice(&a.gfx, k, sink + loose, 1.0);
     }
     a.gfx.pop_clip();
-    // The water: light under the sun that goes with it, a line, and rings where slices landed.
+    if gone > 0 && since < SLICE_FALL {
+        let q = since / SLICE_FALL;
+        let from = AIR + (gone as f32 - 1.0) * band + 2.5;
+        let at = from + 28.0 * q * q;
+        a.gfx.push_clip(above);
+        slice(&a.gfx, gone - 1, at, 1.0);
+        a.gfx.pop_clip();
+        // Under the water it shows dim and fades away.
+        a.gfx.push_clip(below);
+        slice(&a.gfx, gone - 1, at, 0.45 * (1.0 - q));
+        a.gfx.pop_clip();
+    }
+    // The water: light under the sun that goes with it, and a line.
     let sun_left = 1.0 - gone as f32 / SLICES as f32;
     for i in 0..4 {
         let k = i as f32;
@@ -876,15 +902,35 @@ fn sun_slices(a: &mut App, cx: f32, left: f32, total_s: f32, running: bool) {
     }
     a.gfx.fill_rrect_hgrad(Rc::new(cx - 62.0, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.0), (RED, 0.95));
     a.gfx.fill_rrect_hgrad(Rc::new(cx, HORIZON - 0.5, 62.0, 1.2), 0.0, (RED, 0.95), (RED, 0.0));
+    const WATER_Y: f32 = HORIZON + 9.0;
     a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
     if gone > 0 {
-        water_rings(a, cx, HORIZON + 9.0, since, 50.0, 0.95);
-    }
-    if running {
-        // Now and then the sea moves by itself.
-        water_rings(a, cx, HORIZON + 9.0, (t % 7.0) - 0.8, 30.0, 0.32);
+        // The slice went in under the sun's centre.
+        water_rings(a, cx, WATER_Y, since - SLICE_LANDS, 50.0, 0.95);
     }
     a.gfx.pop_clip();
+    if running && gone < SLICES {
+        let (n, beat) = ((t / DRIP_EVERY) as u32, t % DRIP_EVERY);
+        // Where along the lowest slice's bottom edge this drop leaves from.
+        let bottom = CY + R - gone as f32 * band - GAP / 2.0;
+        let edge = (R * R - (bottom - CY) * (bottom - CY)).max(0.0).sqrt();
+        let spread = ((n.wrapping_mul(2654435761) >> 8) % 1000) as f32 / 1000.0 * 2.0 - 1.0;
+        let x = cx + spread * edge * 0.8;
+        let start = bottom + sink;
+        if beat < DRIP_FALL {
+            let q = beat / DRIP_FALL;
+            let y = start + (WATER_Y - start) * q * q;
+            a.gfx.fill_circle(x, y, 1.6, 2.0, RED, if y < HORIZON { 1.0 } else { 0.5 });
+        }
+        a.gfx.push_clip(Rc::new(cx - 66.0, HORIZON + 1.0, 132.0, 22.0));
+        water_rings(a, x, WATER_Y, beat - DRIP_FALL, 26.0, 0.35);
+        a.gfx.pop_clip();
+    }
+}
+
+fn smooth01(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
 }
 
 /// The small sun that stays in the notch while focus runs, moving with it as it opens.

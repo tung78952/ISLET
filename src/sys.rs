@@ -554,6 +554,35 @@ static LAST_KEY: AtomicIsize = AtomicIsize::new(0);
 /// Milliseconds since the last key press.
 /// Whether the window in front belongs to a process that outranks this one (run as administrator,
 /// or shielded by anti-cheat). The keyboard hook sees nothing pressed in such a window.
+/// The class of a window lying over `area` (screen pixels) above ours, if any: something shown,
+/// not cloaked and of real size. Only the few windows above ours are looked at.
+pub fn covered_from_above(ours: HWND, area: RECT) -> Option<String> {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    unsafe {
+        let mut w = GetWindow(ours, GW_HWNDPREV).ok();
+        let mut seen = 0;
+        while let Some(h) = w.filter(|h| !h.is_invalid()) {
+            seen += 1;
+            if seen > 64 {
+                break;
+            }
+            let mut r = RECT::default();
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4);
+            if IsWindowVisible(h).as_bool() && cloaked == 0 && GetWindowRect(h, &mut r).is_ok() && r.right - r.left > 4 && r.bottom - r.top > 4 {
+                let over = r.left < area.right && area.left < r.right && r.top < area.bottom && area.top < r.bottom;
+                if over {
+                    let mut name = [0u16; 64];
+                    let n = GetClassNameW(h, &mut name);
+                    return Some(String::from_utf16_lossy(&name[..n.max(0) as usize]));
+                }
+            }
+            w = GetWindow(h, GW_HWNDPREV).ok();
+        }
+        None
+    }
+}
+
 pub fn front_outranks_us() -> bool {
     use windows::Win32::Security::TOKEN_QUERY;
     use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
