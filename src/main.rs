@@ -776,6 +776,8 @@ pub struct App {
     pub drag_near: Option<Instant>,
     /// A Shelf file is being dragged out to another app.
     dragging_out: bool,
+    /// Hops done since the activity finished.
+    guide_hops: u8,
     /// A face to pull as soon as the eyes can come out (the notch was open or busy), with how
     /// many hops, and since when it waits.
     queued_mood: Option<(eyes::Look, u8, Instant)>,
@@ -1042,6 +1044,7 @@ impl App {
             drag_over: false,
             drag_near: None,
             dragging_out: false,
+            guide_hops: 0,
             queued_mood: None,
             mood_hops: (0, Instant::now()),
             active_since: Instant::now(),
@@ -1673,6 +1676,12 @@ impl App {
                     self.set_mode(Mode::Compact);
                     return;
                 }
+                // Done: heart eyes and two hops.
+                let hops = ((at.elapsed().as_secs_f32() / 0.42) as u8 + 1).min(2);
+                if done && self.guide_hops < hops {
+                    self.guide_hops += 1;
+                    self.eyes.hop.v -= 90.0;
+                }
                 if done { eyes::Look::Love } else { eyes::Look::Sad }
             }
             None => match guide::at(&g.steps, g.time()) {
@@ -1746,6 +1755,7 @@ impl App {
             Kind::Eyes => r.eyes.seconds,
             _ => r.breathe.seconds,
         });
+        self.guide_hops = 0;
         self.guide = Some(Guide { tile, steps: guide::steps(tile, length), started: Instant::now(), paused: None, ended: None });
         self.toast = None;
         self.set_mode(Mode::Expanded);

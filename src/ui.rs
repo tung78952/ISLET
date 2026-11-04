@@ -2861,14 +2861,6 @@ fn guide_page(a: &mut App, lx: f32) {
         lens(&a.gfx, &outline, 3.4, 1.0);
     }
     a.gfx.unzoom();
-    if let Some(age) = ended.filter(|e| e.1).map(|e| e.0.elapsed().as_secs_f32()) {
-        for i in 0..6 {
-            let k = (age - 0.08 * i as f32) / 1.2;
-            if (0.0..1.0).contains(&k) {
-                a.gfx.fill_circle(cx + (i as f32 - 2.5) * 14.0, cy - 8.0 - 36.0 * k, 3.0, 3.0, crate::CHARACTER, 1.0 - k);
-            }
-        }
-    }
     divider(a, lx + 196.0, 50.0, 118.0);
     let tint = tile.colour();
     match (moment, ended) {
