@@ -86,9 +86,21 @@ fn allow_shutdown(demo: bool, storm: bool, sample: bool) -> bool {
     !demo && !storm && !sample
 }
 /// No more movement for this long means the fingers have lifted.
-const SWIPE_REST_MS: u128 = 120;
-/// Sideways wheel units that move one page.
-const SWIPE_PAGE: f32 = 1300.0;
+const SWIPE_REST_MS: u128 = 200;
+/// Sideways wheel units that make a swipe: about one notch of a touchpad.
+const SWIPE_STEP: f32 = 120.0;
+/// Closed for less than this, the notch opens where it was left.
+const REOPEN_LAST: Duration = Duration::from_secs(5 * 60);
+
+/// One swipe moves one page: what has been swiped so far in this gesture, whether it has already
+/// turned the page, and the page to turn to now (+1 or -1), if any.
+fn swipe_step(swiped: f32, turned: bool, delta: f32) -> (f32, bool, Option<i32>) {
+    let swiped = swiped + delta;
+    if !turned && swiped.abs() >= SWIPE_STEP {
+        return (swiped, true, Some(swiped.signum() as i32));
+    }
+    (swiped, turned, None)
+}
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
@@ -562,7 +574,10 @@ pub struct App {
     /// swipe with its speed.
     pub strip: Spring,
     strip_to: f32,
-    swipe: Option<(Instant, f32)>,
+    /// The gesture under way: when it last moved, how far it went, and whether it turned the page.
+    swipe: Option<(Instant, f32, bool)>,
+    /// The page the notch was closed on, and when.
+    last_page: Option<(Page, Instant)>,
     pub mode: Mode,
     last_frame: Instant,
     animating: bool,
@@ -857,6 +872,7 @@ impl App {
             strip: Spring::new(0.0, 190.0, 26.0),
             strip_to: 0.0,
             swipe: None,
+            last_page: None,
             mode: Mode::Compact,
             last_frame: Instant::now(),
             animating: false,
@@ -1521,6 +1537,7 @@ impl App {
         self.sw.tune(k, c);
         self.sh.tune(k, c);
         if self.mode == Mode::Expanded && m != Mode::Expanded {
+            self.last_page = Some((self.page, Instant::now()));
             self.view = ui::View::Page;
             self.view_mix.x = 0.0;
             self.brief = None;
@@ -1755,7 +1772,7 @@ impl App {
         }
         // Pages set without go_page (startup, demo) are simply there.
         let n = Page::ALL.len() as i32;
-        if self.swipe.is_none() && (self.strip_to as i32).rem_euclid(n) as usize != self.page.index() {
+        if (self.strip_to as i32).rem_euclid(n) as usize != self.page.index() {
             self.strip_to += ((self.page.index() as i32 - self.strip_to as i32).rem_euclid(n)) as f32;
             self.strip.x = self.strip_to;
             self.strip.v = 0.0;
@@ -1804,10 +1821,8 @@ impl App {
             moving |= self.sw.step(t[0], sub);
             moving |= self.sh.step(t[1], sub);
             moving |= self.fade.step(fade_target, sub);
-            if self.swipe.is_none() {
-                moving |= self.strip.step(self.strip_to, sub);
-                moving |= self.notice_scroll.step(self.notice_scroll_to, sub);
-            }
+            moving |= self.strip.step(self.strip_to, sub);
+            moving |= self.notice_scroll.step(self.notice_scroll_to, sub);
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
             moving |= self.form_anim.step(form_target, sub);
@@ -2991,36 +3006,21 @@ impl App {
         if !self.expanded() || self.view != ui::View::Page || self.drag_over {
             return;
         }
-        let by = delta / SWIPE_PAGE;
-        let now = Instant::now();
-        let speed = self.swipe.map_or(0.0, |(t, v)| 0.7 * v + 0.3 * by / now.duration_since(t).as_secs_f32().max(0.004));
-        self.strip.x += by;
-        self.strip.v = 0.0;
-        self.swipe = Some((now, speed));
-        self.set_strip_page(self.strip.x.round());
-        self.kick();
+        self.step_swipe();
+        let (swiped, turned) = self.swipe.map_or((0.0, false), |s| (s.1, s.2));
+        let (swiped, turned, turn) = swipe_step(swiped, turned, delta);
+        self.swipe = Some((Instant::now(), swiped, turned));
+        if let Some(by) = turn {
+            let n = Page::ALL.len() as i32;
+            self.go_page(Page::ALL[(self.page.index() as i32 + by).rem_euclid(n) as usize]);
+        }
     }
 
-    /// The fingers lifted: settle on a page, leaning the way they were going.
+    /// The fingers lifted: the next swipe can turn the page again.
     fn step_swipe(&mut self) {
-        let Some((at, speed)) = self.swipe else { return };
-        if at.elapsed().as_millis() < SWIPE_REST_MS {
-            self.kick();
-            return;
+        if self.swipe.is_some_and(|s| s.0.elapsed().as_millis() >= SWIPE_REST_MS) {
+            self.swipe = None;
         }
-        self.swipe = None;
-        self.set_strip_page(ui::strip_rest(self.strip.x, speed));
-        self.kick();
-    }
-
-    fn set_strip_page(&mut self, at: f32) {
-        let p = Page::ALL[(at as i32).rem_euclid(Page::ALL.len() as i32) as usize];
-        if self.page != p {
-            self.page = p;
-            self.reminder_top = 0;
-            self.list_pos.x = 0.0;
-        }
-        self.strip_to = at;
     }
 
     fn set_noactivate(&self, on: bool) {
@@ -3099,6 +3099,12 @@ impl App {
     /// Pointed at or clicked open: a running focus first, then the song, else the day. A file being dragged
     /// goes to the shelf by its own path.
     fn open_by_hand(&mut self) {
+        // Back soon, it opens where it was left.
+        if let Some((p, _)) = self.last_page.filter(|l| l.1.elapsed() < REOPEN_LAST) {
+            self.page = p;
+            self.set_mode(Mode::Expanded);
+            return;
+        }
         self.page = if self.brain.focus.is_some() {
             Page::Pomo
         } else if self.has_media() {
@@ -4840,6 +4846,24 @@ mod zone_tests {
         assert!(!touches((0.0, 46.0, 1600.0, 80.0), notch), "address bar under the notch");
         assert!(touches((0.0, 20.0, 1600.0, 60.0), notch), "a field reaching into the notch");
         assert!(!touches((0.0, 0.0, 200.0, 60.0), notch), "a field beside the notch");
+    }
+}
+
+#[cfg(test)]
+mod swipe_tests {
+    use super::{swipe_step, SWIPE_STEP};
+
+    #[test]
+    fn one_swipe_turns_one_page_however_long_it_goes() {
+        let (mut swiped, mut turned, mut turns) = (0.0, false, Vec::new());
+        for _ in 0..40 {
+            let (s, t, turn) = swipe_step(swiped, turned, 30.0);
+            (swiped, turned) = (s, t);
+            turns.extend(turn);
+        }
+        assert_eq!(turns, [1], "a long swipe still turns just one page");
+        assert_eq!(swipe_step(0.0, false, -SWIPE_STEP).2, Some(-1), "the other way goes back");
+        assert_eq!(swipe_step(0.0, false, SWIPE_STEP / 2.0).2, None, "a touch does nothing");
     }
 }
 

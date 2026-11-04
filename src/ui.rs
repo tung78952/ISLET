@@ -57,13 +57,6 @@ pub fn wash_curve(t: f32, from: f32) -> f32 {
     }
 }
 
-/// Where the strip of pages comes to rest once the fingers lift: the nearest page, or the next
-/// one along if it was moving fast enough. It is a ring, so there is no end to stop at.
-pub fn strip_rest(at: f32, speed: f32) -> f32 {
-    let lean = if speed.abs() > 1.5 { 0.4 * speed.signum() } else { 0.0 };
-    (at + lean).round()
-}
-
 /// Every day, weekdays and weekends, as the form's quick choices.
 pub const PRESETS: [[bool; 7]; 3] = [[true; 7], [true, true, true, true, true, false, false], [false, false, false, false, false, true, true]];
 
@@ -2586,12 +2579,7 @@ mod layout_tests {
     }
 
     #[test]
-    fn the_strip_settles_on_a_page_and_runs_round() {
-        assert_eq!(strip_rest(2.3, 0.0), 2.0);
-        assert_eq!(strip_rest(2.3, 4.0), 3.0);
-        assert_eq!(strip_rest(2.7, -4.0), 2.0);
-        assert_eq!(strip_rest(5.7, 0.0).rem_euclid(6.0), 0.0);
-        assert_eq!(strip_rest(-0.7, 0.0).rem_euclid(6.0), 5.0);
+    fn the_pages_run_round() {
         assert!(Page::ALL[5].next() == Page::ALL[0]);
         assert!(Page::ALL[0].prev() == Page::ALL[5]);
     }
