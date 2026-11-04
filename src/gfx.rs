@@ -78,6 +78,11 @@ pub struct Gfx {
     /// Radial glow brushes per colour (re-centred and re-scaled per use) and measured text
     /// widths: creating these every frame caused render spikes.
     glows: std::cell::RefCell<HashMap<u32, ID2D1RadialGradientBrush>>,
+    /// Two-colour gradient brushes by colours and the ratio of their alphas; each use only moves
+    /// and fades the brush. Layers are kept one per nesting depth for the same reason.
+    linears: std::cell::RefCell<HashMap<(u32, u32, u8, u8), ID2D1LinearGradientBrush>>,
+    layers: std::cell::RefCell<Vec<ID2D1Layer>>,
+    depth: std::cell::Cell<usize>,
     widths: HashMap<(String, u32, u32), f32>,
     icon_family: HSTRING,
     mem_dc: HDC,
@@ -172,6 +177,9 @@ impl Gfx {
             round,
             formats: HashMap::new(),
             glows: Default::default(),
+            linears: Default::default(),
+            layers: Default::default(),
+            depth: Default::default(),
             widths: HashMap::new(),
             icon_family,
             mem_dc,
@@ -241,6 +249,7 @@ impl Gfx {
         self.dirty = rc;
         self.rt.BindDC(self.mem_dc, &rc)?;
         self.rt.BeginDraw();
+        self.depth.set(0);
         self.rt.Clear(Some(&rgba(0, 0.0)));
         self.off = (0.0, 0.0);
         self.rt.SetTransform(&self.base());
@@ -512,10 +521,21 @@ impl Gfx {
         g.is_some_and(|g| self.push_mask(&g))
     }
 
+    /// The layer for the next push, made once for each depth of nesting.
+    fn next_layer(&self) -> Option<ID2D1Layer> {
+        let depth = self.depth.get();
+        let mut pool = self.layers.borrow_mut();
+        if pool.len() <= depth {
+            pool.push(unsafe { self.rt.CreateLayer(None) }.ok()?);
+        }
+        self.depth.set(depth + 1);
+        Some(pool[depth].clone())
+    }
+
     fn push_mask(&self, g: &ID2D1PathGeometry) -> bool {
         let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(g) else { return false };
         unsafe {
-            let Ok(layer) = self.rt.CreateLayer(None) else { return false };
+            let Some(layer) = self.next_layer() else { return false };
             let mut params = D2D1_LAYER_PARAMETERS {
                 contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
                 geometricMask: std::mem::ManuallyDrop::new(Some(mask)),
@@ -536,8 +556,9 @@ impl Gfx {
     pub fn clip_circle(&self, cx: f32, cy: f32, r: f32, draw: impl FnOnce()) {
         unsafe {
             let e = D2D1_ELLIPSE { point: v2(cx, cy), radiusX: r, radiusY: r };
-            let (Ok(g), Ok(layer)) = (self.factory.CreateEllipseGeometry(&e), self.rt.CreateLayer(None)) else { return draw() };
+            let Ok(g) = self.factory.CreateEllipseGeometry(&e) else { return draw() };
             let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(&g) else { return draw() };
+            let Some(layer) = self.next_layer() else { return draw() };
             let mut params = D2D1_LAYER_PARAMETERS {
                 contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
                 geometricMask: std::mem::ManuallyDrop::new(Some(mask)),
@@ -550,11 +571,12 @@ impl Gfx {
             self.rt.PushLayer(&params, &layer);
             std::mem::ManuallyDrop::drop(&mut params.geometricMask);
             draw();
-            self.rt.PopLayer();
+            self.pop_layer();
         }
     }
 
     pub fn pop_layer(&self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
         unsafe { self.rt.PopLayer() };
     }
 
@@ -713,14 +735,34 @@ impl Gfx {
     }
 
     fn linear(&self, p0: (f32, f32), p1: (f32, f32), c0: (u32, f32), c1: (u32, f32)) -> Option<ID2D1LinearGradientBrush> {
+        // The stronger end is the brush's opacity; the stops only keep how the two compare.
+        let most = c0.1.max(c1.1);
+        let op = (most * self.alpha).clamp(0.0, 1.0);
+        if op <= 0.002 {
+            return None;
+        }
+        let q = |a: f32| ((a / most).clamp(0.0, 1.0) * 64.0).round() as u8;
+        let key = (c0.0, c1.0, q(c0.1), q(c1.1));
         unsafe {
-            let stops = [
-                D2D1_GRADIENT_STOP { position: 0.0, color: rgba(c0.0, c0.1 * self.alpha) },
-                D2D1_GRADIENT_STOP { position: 1.0, color: rgba(c1.0, c1.1 * self.alpha) },
-            ];
-            let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
-            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(p0.0, p0.1), endPoint: v2(p1.0, p1.1) };
-            self.rt.CreateLinearGradientBrush(&props, None, &coll).ok()
+            let mut cache = self.linears.borrow_mut();
+            if !cache.contains_key(&key) {
+                let stops = [
+                    D2D1_GRADIENT_STOP { position: 0.0, color: rgba(c0.0, key.2 as f32 / 64.0) },
+                    D2D1_GRADIENT_STOP { position: 1.0, color: rgba(c1.0, key.3 as f32 / 64.0) },
+                ];
+                let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
+                let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(p0.0, p0.1), endPoint: v2(p1.0, p1.1) };
+                let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).ok()?;
+                if cache.len() > 256 {
+                    cache.clear();
+                }
+                cache.insert(key, brush);
+            }
+            let brush = cache[&key].clone();
+            brush.SetStartPoint(v2(p0.0, p0.1));
+            brush.SetEndPoint(v2(p1.0, p1.1));
+            brush.SetOpacity(op);
+            Some(brush)
         }
     }
 
