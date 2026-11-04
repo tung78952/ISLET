@@ -3114,9 +3114,11 @@ impl App {
     /// everywhere else it lets it through to what is below, as the transparent pixels of a layered
     /// window used to.
     fn on_notch(&self, x: f32, y: f32) -> bool {
-        if self.catch_all || self.down.is_some() || self.wheel_held.is_some() || self.scrub.is_some() {
-            return true;
-        }
+        self.catch_all || self.down.is_some() || self.wheel_held.is_some() || self.scrub.is_some() || self.on_shape(x, y)
+    }
+
+    /// Whether a point (layout units) is over the notch as drawn.
+    fn on_shape(&self, x: f32, y: f32) -> bool {
         let (cx, w) = self.notch_geometry();
         // The ears and the corner glow reach a little past the outline.
         let on = (x - cx).abs() <= w / 2.0 + 12.0 && y <= self.sh.x.max(4.0) + 2.0;
@@ -3733,6 +3735,7 @@ impl App {
     fn watch(&mut self) {
         let cover = sys::foreground_covers(self.monitor, self.hwnd) && !self.expanded();
         if cover != self.hidden {
+            sys::timelog(&format!("fullscreen hidden={cover}"));
             self.hidden = cover;
             self.kick();
         }
@@ -3757,6 +3760,15 @@ impl App {
             self.kick();
         }
         if !self.mouse_in {
+            // The window lets the pointer through only after the next poll, and takes it everywhere
+            // while a drag from outside is held over it: neither is the notch being touched.
+            if self.demo.is_none() && !self.on_shape(x, y) {
+                if !self.catch_all {
+                    sys::timelog(&format!("hover off notch at ({x:.0},{y:.0})"));
+                }
+                self.update_click_through();
+                return;
+            }
             self.mouse_in = true;
             self.minimal_armed = true;
             let mut tme = TRACKMOUSEEVENT {
@@ -3772,7 +3784,7 @@ impl App {
             // just below it. It comes back when the pointer leaves, or on a click.
             let held = self.yielded || self.hidden || self.no_hover_until.is_some_and(|t| Instant::now() < t);
             sys::timelog(&format!(
-                "hover enter mode={:?} yielded={} hidden={} no_hover={} notice={} card={} toast={:?}",
+                "hover enter at ({x:.0},{y:.0}) mode={:?} yielded={} hidden={} no_hover={} notice={} card={} toast={:?}",
                 self.mode,
                 self.yielded,
                 self.hidden,

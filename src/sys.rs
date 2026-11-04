@@ -951,8 +951,11 @@ pub fn foreground_covers(mon: RECT, own: HWND) -> bool {
             return true;
         }
         // Borderless full screen (a video after F11): an ordinary window filling the monitor.
+        // A browser put in F11 from maximized still says it is maximized, but has lost its frame.
         let ex = GetWindowLongPtrW(fg, GWL_EXSTYLE) as u32;
-        ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) == 0 && !IsZoomed(fg).as_bool()
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        let framed = style & WS_CAPTION.0 == WS_CAPTION.0 || style & WS_THICKFRAME.0 != 0;
+        ex & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) == 0 && (!IsZoomed(fg).as_bool() || !framed)
     }
 }
 
