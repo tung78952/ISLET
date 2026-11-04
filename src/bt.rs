@@ -148,17 +148,17 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     let cached = {
         let kinds = kinds.clone();
         move |c: windows::core::GUID| {
-            if let Some(k) = kinds.lock().unwrap().get(&c) {
+            if let Some(k) = kinds.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&c) {
                 return *k;
             }
             let k = kind_of(c);
-            kinds.lock().unwrap().insert(c, k);
+            kinds.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(c, k);
             k
         }
     };
     let (d, kind_for) = (devices.clone(), cached.clone());
     let check_phone = move || {
-        let on = d.lock().unwrap().values().filter(|v| v.connected).filter_map(|v| v.container).collect::<Vec<_>>();
+        let on = d.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().filter(|v| v.connected).filter_map(|v| v.container).collect::<Vec<_>>();
         let on = on.into_iter().any(|c| kind_for(c) == DeviceKind::Phone);
         if PHONE_ON.swap(on, Ordering::Relaxed) && !on {
             PHONE_LEFT.store(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }, Ordering::Relaxed);
@@ -186,7 +186,7 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
             if on && r.load(Ordering::Acquire) {
                 post(name.clone(), true, cont);
             }
-            d.lock().unwrap().insert(info.Id()?.to_string(), Device { name, connected: on, container: cont });
+            d.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(info.Id()?.to_string(), Device { name, connected: on, container: cont });
             if on {
                 phone_added();
             }
@@ -199,7 +199,7 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
         if let Some(upd) = upd.as_ref() {
             let Some(on) = upd.Properties().ok().and_then(connected) else { return Ok(()) };
             let changed = {
-                let mut map = d.lock().unwrap();
+                let mut map = d.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 map.get_mut(&upd.Id()?.to_string()).filter(|dev| dev.connected != on).map(|dev| {
                     dev.connected = on;
                     (dev.name.clone(), dev.container)
@@ -219,7 +219,7 @@ fn watch(target: isize) -> windows::core::Result<DeviceWatcher> {
     let d = devices.clone();
     w.Removed(&TypedEventHandler::new(move |_: Ref<DeviceWatcher>, upd: Ref<DeviceInformationUpdate>| {
         if let Some(upd) = upd.as_ref() {
-            d.lock().unwrap().remove(&upd.Id()?.to_string());
+            d.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&upd.Id()?.to_string());
         }
         Ok(())
     }))?;

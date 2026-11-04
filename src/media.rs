@@ -307,7 +307,7 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
                 // The song keeps its place for now, but its words don't belong on another clip.
                 let held = clip_since.is_some_and(|t| t.elapsed() < TAKE_OVER);
                 {
-                    let mut l = lyrics.lock().unwrap();
+                    let mut l = lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if l.held != held {
                         l.held = held;
                         crate::sys::timelog(&format!("lyrics held={held} key={key:?}"));
@@ -354,7 +354,7 @@ pub fn spawn(hwnd: isize, info: Arc<Mutex<MediaInfo>>, lyrics: Arc<Mutex<Lyrics>
             }
 
             let changed = {
-                let mut cur = info.lock().unwrap();
+                let mut cur = info.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let changed = cur.has != next.has
                     || cur.title != next.title
                     || cur.artist != next.artist
@@ -389,12 +389,18 @@ fn is_song(s: &GlobalSystemMediaTransportControlsSession) -> bool {
 fn sync_sessions(mgr: &GlobalSystemMediaTransportControlsSessionManager, tracked: &mut Vec<Tracked>, events: &Sender<Cmd>, changed: bool) {
     let Ok(sessions) = mgr.GetSessions() else { return };
     let sessions: Vec<_> = sessions.into_iter().collect();
-    let id = |s: &GlobalSystemMediaTransportControlsSession| s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
+    // A browser has one session per tab, all under the same app id: the object tells them apart.
+    let id = |s: &GlobalSystemMediaTransportControlsSession| {
+        let app = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
+        let one = s.cast::<windows::core::IUnknown>().map_or(0, |u| u.as_raw() as usize);
+        format!("{app}#{one:x}")
+    };
     let ids: Vec<String> = sessions.iter().map(id).collect();
     tracked.retain(|t| ids.contains(&t.id));
     for (s, sid) in sessions.into_iter().zip(ids) {
         if !tracked.iter().any(|t| t.id == sid) {
             let song = is_song(&s);
+            crate::sys::timelog(&format!("media session {sid}"));
             tracked.push(Tracked { id: sid, watched: Watched::new(s, events), song, playing_since: None });
         }
     }
@@ -459,7 +465,7 @@ pub fn decode_square(buf: &[u8], size: u32) -> windows::core::Result<Arc<Art>> {
 /// The song has gone: no words, and any lookup still under way finds its key taken.
 fn forget_lyrics(hwnd: isize, lyrics: &Mutex<Lyrics>) {
     {
-        let mut l = lyrics.lock().unwrap();
+        let mut l = lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         l.key.clear();
         l.status = LyrStatus::Missing;
         l.lines.clear();
@@ -471,7 +477,7 @@ fn forget_lyrics(hwnd: isize, lyrics: &Mutex<Lyrics>) {
 fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: String, artist: String, dur: f64) {
     crate::sys::timelog(&format!("media key {key:?}"));
     {
-        let mut l = lyrics.lock().unwrap();
+        let mut l = lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         l.key = key.clone();
         l.held = false;
         l.status = LyrStatus::Loading;
@@ -487,7 +493,7 @@ fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: Str
         let mut attempt = 0;
         loop {
             let lines = fetch_best(&title, &artist, dur);
-            let mut l = lyrics.lock().unwrap();
+            let mut l = lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if l.key != key {
                 return;
             }
@@ -506,7 +512,7 @@ fn start_lyrics(hwnd: isize, lyrics: Arc<Mutex<Lyrics>>, key: String, title: Str
             }
             std::thread::sleep(retry_delay(attempt));
             attempt += 1;
-            if lyrics.lock().unwrap().key != key {
+            if lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).key != key {
                 return;
             }
         }

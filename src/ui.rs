@@ -1398,9 +1398,20 @@ fn notice_detail(a: &mut App, left: f32, w: f32, h: f32, live: bool) {
     } else {
         a.gfx.ui(&title, Rc::new(x0, top, x1 - x0, 20.0), 15.0, 600, WHITE, 1.0, Align::L);
         let by = top + 24.0;
-        a.gfx.push_clip(Rc::new(x0, by, x1 - x0, (bottom - by).max(0.0)));
-        a.gfx.text(&body, Rc::new(x0, by, x1 - x0, 200.0), 13.0, 400, 0xD8D8DC, 1.0, Align::LW, Font::Ui);
+        let room = (bottom - by).max(0.0);
+        let tall = a.gfx.measure_wrapped(&body, 13.0, 400, x1 - x0);
+        a.notice_scroll_max = (tall - room).max(0.0);
+        let down = a.notice_scroll.x.clamp(0.0, a.notice_scroll_max);
+        a.gfx.push_clip(Rc::new(x0, by, x1 - x0, room));
+        a.gfx.text(&body, Rc::new(x0, by - down, x1 - x0, tall + 4.0), 13.0, 400, 0xD8D8DC, 1.0, Align::LW, Font::Ui);
         a.gfx.pop_clip();
+        if a.notice_scroll_max > 0.0 {
+            // How much is left, on the text's right edge.
+            let bar = room * room / tall;
+            let y = by + (room - bar) * down / a.notice_scroll_max;
+            a.gfx.fill_rrect(Rc::new(x1 + 6.0, by, 3.0, room), 1.5, WHITE, 0.1);
+            a.gfx.fill_rrect(Rc::new(x1 + 6.0, y, 3.0, bar), 1.5, WHITE, 0.6);
+        }
     }
 
     // Close always; Open when it leads somewhere. Clicking the content opens too.
@@ -2239,7 +2250,7 @@ fn page(a: &mut App, p: Page, lx: f32) {
 
 fn transport(a: &mut App, quote: (f32, f32), xs: [f32; 3], cy: f32, playing: bool, lyrics_on: bool) {
     let live = {
-        let m = a.media.lock().unwrap();
+        let m = a.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         m.has && !m.title.is_empty()
     };
     let qr = Rc::new(quote.0 - 13.0, quote.1 - 12.0, 26.0, 24.0);
@@ -2299,7 +2310,7 @@ fn progress(a: &mut App, pos: f64, dur: f64, x0: f32, bar: (f32, f32), x1: f32, 
 }
 
 fn music(a: &mut App, lx: f32) {
-    let m = a.media.lock().unwrap().clone();
+    let m = a.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let k = a.lyr_mix.x.clamp(0.0, 1.0);
     let l = |x: f32, y: f32| x + (y - x) * k;
     let has = m.has && !m.title.is_empty();
@@ -2395,7 +2406,7 @@ fn lyrics_column(a: &mut App, lx: f32, pos: f64, k: f32) {
     let col = Rc::new(lx + 265.2, 10.0, crate::LYRICS[0] - 265.2 - 22.0, 124.0);
     let rise = 30.0 * (1.0 - k);
     let (status, idx, lines, times, key) = {
-        let l = a.lyrics.lock().unwrap();
+        let l = a.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if l.held {
             return;
         }

@@ -445,7 +445,7 @@ impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for AudioDevices_I
             return Ok(());
         }
         let Ok(id) = (unsafe { id.to_string() }) else { return Ok(()) };
-        let was = self.known.lock().unwrap().insert(id.clone(), active);
+        let was = self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.clone(), active);
         if was.unwrap_or(false) == active {
             return Ok(());
         }
@@ -737,7 +737,7 @@ static FOCUS_RECT: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
 
 /// Last focused-field rectangle found by the background focus watcher (see `spawn_focus_watch`).
 pub fn focused_rect() -> Option<RECT> {
-    *FOCUS_RECT.lock().unwrap()
+    *FOCUS_RECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// UI Automation calls go to other processes and can block, so they run here, only while the user
@@ -755,7 +755,7 @@ pub fn spawn_focus_watch() {
                 GetWindowRect(GetForegroundWindow(), &mut r).is_ok() && r.top < 240
             };
             let r = if wanted { focused_rect_now() } else { None };
-            *FOCUS_RECT.lock().unwrap() = r;
+            *FOCUS_RECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = r;
         }
     });
 }

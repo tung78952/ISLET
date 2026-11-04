@@ -330,7 +330,7 @@ pub struct DeviceCard {
 
 /// Time on screen for a text: `base`, plus 40 ms per character past the first 40, at most 12 s.
 fn reading_ms(base: u64, text: &str) -> u64 {
-    (base + 40 * text.chars().count().saturating_sub(40) as u64).min(12_000)
+    (base + 40 * text.chars().count().saturating_sub(40) as u64).min(8_000)
 }
 
 const HISTORY_MAX: usize = 50;
@@ -515,6 +515,10 @@ pub struct App {
     pub notice: Option<NoticeInfo>,
     /// The notification toast is grown into its detail view (hovered or clicked).
     pub toast_open: bool,
+    /// How far a long notification has been scrolled, and how far it can go (set as it is drawn).
+    pub notice_scroll: Spring,
+    pub notice_scroll_to: f32,
+    pub notice_scroll_max: f32,
     /// Timeline fill, eased toward the playback (or dragged) position.
     pub tl_frac: Spring,
     /// Caps Lock icon: 0 = outline arrow, 1 = filled arrow with a bright bar.
@@ -821,6 +825,9 @@ impl App {
             bright_bounce: None,
             notice: None,
             toast_open: false,
+            notice_scroll: Spring::new(0.0, 300.0, 34.0),
+            notice_scroll_to: 0.0,
+            notice_scroll_max: 0.0,
             tl_frac: Spring::new(0.0, 420.0, 40.0),
             caps_mix: Spring::new(0.0, 700.0, 52.0),
             lyr_user: Spring::new(0.0, 260.0, 32.0),
@@ -1072,7 +1079,7 @@ impl App {
     }
 
     pub fn playing(&self) -> bool {
-        let m = self.media.lock().unwrap();
+        let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         m.has && m.playing && !m.title.is_empty()
     }
 
@@ -1085,7 +1092,7 @@ impl App {
     }
 
     pub fn has_media(&self) -> bool {
-        let m = self.media.lock().unwrap();
+        let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         m.has && !m.title.is_empty()
     }
 
@@ -1094,12 +1101,16 @@ impl App {
         if !self.lyrics_on || !self.has_media() {
             return None;
         }
-        let pos = self.media.lock().unwrap().position();
-        let l = self.lyrics.lock().unwrap();
+        let pos = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).position();
+        let l = self.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if l.status == media::LyrStatus::Loading {
             return Some("Loading lyrics...".into());
         }
-        l.line_at(pos).map(str::to_string)
+        // Until there are words (or when there are none) the bar shows what is playing.
+        l.line_at(pos).map(str::to_string).or_else(|| {
+            let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            Some(if m.artist.trim().is_empty() { m.title.clone() } else { format!("{} · {}", m.title, m.artist) })
+        })
     }
 
     /// Target notch size for the current state.
@@ -1676,8 +1687,8 @@ impl App {
         if self.act_now().is_some_and(|a| a.0 == eyes::ActKind::Nod) && self.hit(self.mouse.0, self.mouse.1).is_none() {
             return (rest, rest_gaze);
         }
-        // Towards the pointer from where the eyes stand, which on an act's card is far left.
-        let from = if self.act_now().is_some() { self.card_eyes_x } else { WIN_W / 2.0 };
+        // Towards the pointer from where the eyes stand, which on a card is far left.
+        let from = if self.interactive_toast() { self.card_eyes_x } else { WIN_W / 2.0 };
         let gaze = ((self.mouse.0 - from) / CARD_GAZE).clamp(-1.0, 1.0);
         match self.hit(self.mouse.0, self.mouse.1) {
             Some(Act::LumaLater | Act::ShutdownCancel) => (Look::Sad, gaze),
@@ -1715,6 +1726,7 @@ impl App {
         } else if self.toast.as_ref().is_some_and(|t| t.kind.answered()) {
             // Cards without an act of their own still watch the pointer.
             let (look, gaze) = self.card_mood(eyes::Look::Neutral, 0.0, 1.0);
+            self.eyes.lean.tune(CARD_LEAN.0, CARD_LEAN.1);
             self.eyes.step(eyes::Feel { show: true, look, gaze, lift: self.card_lift(), ..eyes::Feel::ASLEEP }, dt);
         } else if self.sample.is_none() {
             self.eyes.step(self.eye_feel, dt);
@@ -1772,6 +1784,7 @@ impl App {
             moving |= self.fade.step(fade_target, sub);
             if self.swipe.is_none() {
                 moving |= self.strip.step(self.strip_to, sub);
+                moving |= self.notice_scroll.step(self.notice_scroll_to, sub);
             }
             moving |= self.toast_mix.step(toast_target, sub);
             moving |= self.pill_mix.step(pill_target, sub);
@@ -1787,7 +1800,7 @@ impl App {
             let caps_on = matches!(self.toast.as_ref().map(|t| t.kind), Some(ToastKind::Caps(true)));
             moving |= self.caps_mix.step(if caps_on { 1.0 } else { 0.0 }, sub);
             let tl = {
-                let m = self.media.lock().unwrap();
+                let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 match self.scrub {
                     Some((_, _, f)) => f,
                     None if m.dur > 0.0 => (m.position() / m.dur).clamp(0.0, 1.0) as f32,
@@ -1934,8 +1947,8 @@ impl App {
             ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal => 2_600,
             ToastKind::Bluetooth(_) | ToastKind::Device(_) => 4_000,
             ToastKind::Song => 2_400,
-            ToastKind::Notice => reading_ms(6_000, title),
-            ToastKind::Message => reading_ms(8_000, title),
+            ToastKind::Notice => reading_ms(4_000, title),
+            ToastKind::Message => reading_ms(5_000, title),
             _ => 1_800,
         };
         let now = Instant::now();
@@ -1952,6 +1965,11 @@ impl App {
                 self.held_notice = Some(t);
             }
             return;
+        }
+        if matches!(kind, ToastKind::Notice | ToastKind::Message) {
+            self.notice_scroll_to = 0.0;
+            self.notice_scroll = Spring::new(0.0, 300.0, 34.0);
+            self.notice_scroll_max = 0.0;
         }
         // Sadness is about an unanswered card; whatever comes next, that moment has passed.
         self.eyes.mind.forget(eyes::Look::Sad);
@@ -2038,6 +2056,12 @@ impl App {
 
     /// Mouse wheel over the lyrics view scrolls them; they glide back to the current line later.
     fn wheel(&mut self, notches: f32, ctrl: bool) {
+        // A long notification, opened, reads on with the wheel.
+        if self.toast_open && self.notice_toast() && self.notice_scroll_max > 0.0 {
+            self.notice_scroll_to = (self.notice_scroll_to - notches * 26.0).clamp(0.0, self.notice_scroll_max);
+            self.kick();
+            return;
+        }
         if let Some(Act::Wheel(id)) = self.hit(self.mouse.0, self.mouse.1) {
             self.pick_wheel(id);
             self.wheels[id as usize].turn(notches);
@@ -2220,7 +2244,7 @@ impl App {
         let (dx, dy) = ((along.abs() - w / 2.0).max(0.0), (uy - h).max(0.0));
         let t = self.eye_time();
         let (song, artist, playing) = {
-            let m = self.media.lock().unwrap();
+            let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (m.title.clone(), m.artist.clone(), m.has && m.playing && !m.title.is_empty())
         };
         // A new song passes by once, unless something else has the notch.
@@ -2318,6 +2342,9 @@ impl App {
         if blind != self.hook_blind {
             self.hook_blind = blind;
             sys::timelog(&format!("hook blind {blind}"));
+        }
+        if down && near {
+            self.raise();
         }
         let every = if busy || blind { 50 } else { 250 };
         if every != self.zone_every {
@@ -2969,7 +2996,7 @@ impl App {
     fn open_form(&mut self, index: Option<usize>) {
         use chrono::Timelike;
         let item = index.and_then(|i| self.reminders().into_iter().nth(i));
-        let soon = chrono::Local::now() + chrono::TimeDelta::hours(1);
+        let soon = chrono::Local::now();
         let time = item.as_ref().and_then(|r| luma::scheduler::parse_hm(&r.time)).unwrap_or(soon.time());
         self.wheels[ui::WheelId::FormHour as usize].set(time.hour() as usize);
         self.wheels[ui::WheelId::FormMinute as usize].set(time.minute() as usize);
@@ -3133,7 +3160,7 @@ impl App {
             Act::Prev => self.media_cmd(Cmd::Prev),
             Act::Toggle => {
                 // Optimistic UI: flip immediately, the session poll will confirm.
-                let mut m = self.media.lock().unwrap();
+                let mut m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 m.pos = m.position();
                 m.stamp = Some(Instant::now());
                 m.playing = !m.playing;
@@ -3152,7 +3179,7 @@ impl App {
             Act::Scrub(..) => {}
             Act::Seek(ms) => {
                 let secs = ms as f64 / 1000.0;
-                let mut m = self.media.lock().unwrap();
+                let mut m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 m.pos = secs;
                 m.stamp = Some(Instant::now());
                 drop(m);
@@ -3470,7 +3497,7 @@ impl App {
         }
         // Album art lives in the media thread; upload it once per track.
         let art = {
-            let m = self.media.lock().unwrap();
+            let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             m.art.clone().map(|a| (m.art_id, a))
         };
         match art {
@@ -3528,6 +3555,13 @@ impl App {
             }
         }
         self.power = Some(p);
+    }
+
+    /// Back on top of everything: a window being dragged (a browser tab) can come up over it.
+    fn raise(&self) {
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
     }
 
     fn watch(&mut self) {
@@ -3836,7 +3870,7 @@ impl App {
         }
         let Some((_, _, pressed)) = self.down.take() else { return };
         if let Some((_, _, f)) = self.scrub.take() {
-            let dur = self.media.lock().unwrap().dur;
+            let dur = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).dur;
             if dur > 0.0 {
                 self.act(Act::Seek((f as f64 * dur * 1000.0) as u32));
             }
@@ -4163,7 +4197,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             a.poll_power();
             a.render();
         }
-        WM_FOREGROUND => a.watch(),
+        WM_FOREGROUND => {
+            a.raise();
+            a.watch();
+        }
         WM_VOLKEY => {
             let up = wp.0 != 0;
             sys::timelog(&format!("volume key up={up}"));
@@ -4308,7 +4345,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.blob.1.x = y;
     }
     {
-        let mut m = a.media.lock().unwrap();
+        let mut m = a.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(t) = kv.get("title") {
             m.has = true;
             m.title = t.to_string();
@@ -4347,11 +4384,11 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     // Demo: synced lyrics from a local .lrc file, with the position running.
     if let Some(text) = kv.get("lrc").and_then(|p| std::fs::read_to_string(p).ok()) {
-        let mut l = a.lyrics.lock().unwrap();
+        let mut l = a.lyrics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         l.lines = media::parse_lrc(&text);
         l.status = media::LyrStatus::Ready;
         l.key = "demo".into();
-        a.media.lock().unwrap().stamp = Some(Instant::now());
+        a.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stamp = Some(Instant::now());
     }
     if let Some(v) = kv.get("view") {
         a.view = match *v {
@@ -4673,7 +4710,23 @@ fn bedtime_line(time: &str, past: Option<u32>) -> String {
     }
 }
 
+/// A panic inside a window callback cannot unwind and stops the app with no word: what it was,
+/// where, and how it got there go to crash.log first.
+fn log_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let trace = std::backtrace::Backtrace::force_capture();
+        let path = model::data_dir().join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{} {info}
+{trace}
+", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        }
+    }));
+}
+
 fn main() {
+    log_panics();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let demo_spec = std::env::var("ISLET_DEMO").ok();
