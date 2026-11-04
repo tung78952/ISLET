@@ -3841,7 +3841,6 @@ impl App {
                         self.toast(ToastKind::Charging(true), "Charging", "Charger connected", lv);
                     } else {
                         self.toast(ToastKind::Charging(false), "Charger unplugged", &format!("{}% remaining", p.pct), lv);
-                        self.react(eyes::Look::Surprised, 0);
                     }
                 } else if !p.ac && old.pct > 20 && p.pct <= 20 && p.pct > 10 {
                     sound::play(sound::Chime::Alert);
