@@ -10,6 +10,7 @@ use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYME
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
@@ -132,6 +133,25 @@ fn read_contents(obj: &IDataObject, index: i32) -> Option<Vec<u8>> {
     }
 }
 
+/// How many files a drag carries (a link or a piece of text counts as one).
+fn count(obj: &IDataObject) -> usize {
+    unsafe {
+        if let Ok(mut m) = obj.GetData(&fmt(CF_HDROP)) {
+            let n = DragQueryFileW(HDROP(m.u.hGlobal.0), u32::MAX, None) as usize;
+            ReleaseStgMedium(&mut m);
+            return n;
+        }
+        if let Ok(mut m) = obj.GetData(&fmt(descriptor_format())) {
+            let g = GlobalLock(m.u.hGlobal) as *const FILEGROUPDESCRIPTORW;
+            let n = if g.is_null() { 1 } else { (*g).cItems as usize };
+            let _ = GlobalUnlock(m.u.hGlobal);
+            ReleaseStgMedium(&mut m);
+            return n;
+        }
+    }
+    1
+}
+
 /// Saves virtual files (Outlook attachments, browser images) that arrive without a path.
 fn read_virtual(obj: &IDataObject) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -143,7 +163,7 @@ fn read_virtual(obj: &IDataObject) -> Vec<PathBuf> {
         if !g.is_null() {
             let count = (*g).cItems as usize;
             let first = std::ptr::addr_of!((*g).fgd) as *const FILEDESCRIPTORW;
-            for i in 0..count.min(crate::model::SHELF_MAX) {
+            for i in 0..count.min(app().shelf.room()) {
                 let d = std::ptr::read_unaligned(first.add(i));
                 let (attrs, file_name) = (d.dwFileAttributes, d.cFileName);
                 let n = file_name.iter().position(|&c| c == 0).unwrap_or(file_name.len());
@@ -238,6 +258,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let ok = obj.as_ref().is_some_and(accepts);
         unsafe { *effect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
         if ok {
+            app().drag_count = obj.as_ref().map_or(1, count);
             app().drag_move(pt.x, pt.y, true);
             app().drag_seen();
         }
@@ -246,11 +267,22 @@ impl IDropTarget_Impl for DropTarget_Impl {
 
     fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         app().drag_move(pt.x, pt.y, false);
-        unsafe { *effect = if app().drag_over { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
+        // A full shelf shows the no-entry pointer: nothing more fits.
+        let take = app().drag_over && app().shelf.room() > 0;
+        unsafe { *effect = if take { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
         Ok(())
     }
 
     fn DragLeave(&self) -> Result<()> {
+        // A full shelf shows the no-entry pointer, so letting go on it ends the drag here rather
+        // than in Drop: with the buttons up over the open Shelf, that was a drop turned away.
+        let up = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 == 0 && GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 == 0 };
+        let refused = up && app().drag_over && app().shelf.room() == 0;
+        // Said before the drag is gone, so the Shelf stays open to show it.
+        if refused {
+            let n = app().drag_count;
+            app().shelf_add(Vec::new(), n);
+        }
         app().drag_gone();
         Ok(())
     }
@@ -258,25 +290,35 @@ impl IDropTarget_Impl for DropTarget_Impl {
     fn Drop(&self, obj: Ref<IDataObject>, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         app().drag_move(pt.x, pt.y, false);
         let mut paths = Vec::new();
+        // Files the shelf had no room for before they were even read (virtual ones, links).
+        let mut turned = 0;
         // Only a file let go on the notch (the Shelf open) is taken.
         if let Some(obj) = obj.as_ref().filter(|_| app().drag_over) {
+            let room = app().shelf.room();
             paths = read_files(obj);
-            if paths.is_empty() {
+            if paths.is_empty() && room > 0 {
                 paths = read_virtual(obj);
+                if !paths.is_empty() {
+                    turned = app().drag_count.saturating_sub(room);
+                }
             }
-            if paths.is_empty() {
+            if paths.is_empty() && room > 0 {
                 let url = read_text(obj, url_format()).or_else(|| read_text(obj, CF_UNICODETEXT));
                 if let Some(p) = url.and_then(|u| save_link(&u)) {
                     paths.push(p);
                 }
             }
+            if paths.is_empty() && room == 0 {
+                turned = app().drag_count;
+            }
         }
-        unsafe { *effect = if paths.is_empty() { DROPEFFECT_NONE } else { DROPEFFECT_COPY } };
-        if !paths.is_empty() {
+        let took = paths.len().min(app().shelf.room());
+        unsafe { *effect = if took == 0 { DROPEFFECT_NONE } else { DROPEFFECT_COPY } };
+        if took > 0 {
             app().drop_burst();
         }
+        app().shelf_add(paths, turned);
         app().drag_gone();
-        app().shelf_add(paths);
         Ok(())
     }
 }

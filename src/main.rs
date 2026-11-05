@@ -84,6 +84,8 @@ pub const CURIOUS_FROM: f32 = 0.45;
 pub const CURIOUS_UNTIL: f32 = 2.4;
 /// How long a face may wait for the eyes to be free before it no longer fits the moment.
 const MOOD_WAIT: Duration = Duration::from_secs(30);
+/// How long the Shelf keeps saying how much of a drop did not fit.
+pub const SHELF_NOTE: Duration = Duration::from_secs(4);
 /// At the PC this long without a five-minute break: sleepy, and again this often after.
 const TIRED_AFTER: Duration = Duration::from_secs(60 * 60);
 const TIRED_EVERY: Duration = Duration::from_secs(15 * 60);
@@ -574,6 +576,8 @@ pub struct App {
     /// Rubber-band stretch when volume is pushed past either endpoint. The
     /// toast silhouette takes the impulse while the meter keeps its width.
     pub vol_stretch: Spring,
+    /// The notch shaking its head at a drop the full Shelf had no room for.
+    pub refuse: Spring,
     /// Brightness sun rotation (degrees); each change turns it by the change, as Nusa does.
     pub sun_rot: Spring,
     pub sun_target: f32,
@@ -771,6 +775,10 @@ pub struct App {
     brain_ticks: u32,
     pub shelf: Shelf,
     pub drag_over: bool,
+    /// How many files the drag in progress carries.
+    pub drag_count: usize,
+    /// The last drop the Shelf could not take all of: when, how many it took, how many it turned away.
+    pub shelf_note: Option<(Instant, usize, usize)>,
     /// A file is being dragged over the notch's window but not onto the notch yet: since when.
     /// The eyes come out and follow it.
     pub drag_near: Option<Instant>,
@@ -915,6 +923,7 @@ impl App {
             roll_t: Spring::new(1.0, 1100.0, 66.0),
             vol_level: Spring::new(0.0, 260.0, 30.0),
             vol_stretch: Spring::new(0.0, 520.0, 9.0),
+            refuse: Spring::new(0.0, 1100.0, 9.0),
             sun_rot: Spring::new(0.0, 900.0, 60.0),
             sun_target: 0.0,
             bright_bounce: None,
@@ -1042,6 +1051,8 @@ impl App {
             brain_ticks: 0,
             shelf: Shelf::load(),
             drag_over: false,
+            drag_count: 0,
+            shelf_note: None,
             drag_near: None,
             dragging_out: false,
             guide_hops: 0,
@@ -1313,6 +1324,7 @@ impl App {
             w += grow;
             cx += s.signum() * grow / 2.0;
         }
+        cx += self.refuse.x;
         // An act can pull the notch wider, or breathe it in and out.
         if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
@@ -1933,6 +1945,7 @@ impl App {
             moving |= self.intro.step(0.0, sub);
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
+            moving |= self.refuse.step(0.0, sub);
             moving |= self.sun_rot.step(self.sun_target, sub);
             moving |= self.lyr_user.step(self.lyr_user_target, sub);
             moving |= self.lyr_zoom.step(1.0, sub);
@@ -2041,7 +2054,8 @@ impl App {
             // an answer then holds still instead of redrawing 60 times a second. The heads-up
             // counts down to the end.
             || self.toast.as_ref().is_some_and(|t| (t.kind.tall() && (t.born.elapsed() < Duration::from_secs(5) || t.kind == ToastKind::HeadsUp)) || fresh(t))
-            || self.drag_over || self.ripple.is_some_and(|r| r.0.elapsed() < Duration::from_millis(3800));
+            || self.drag_over || self.ripple.is_some_and(|r| r.0.elapsed() < Duration::from_millis(3800))
+            || self.shelf_note.is_some_and(|n| n.0.elapsed() < SHELF_NOTE);
         effects
     }
 
@@ -2231,7 +2245,10 @@ impl App {
             self.drag_energy = self.drag_energy.max(0.75);
             self.go_page(Page::Shelf);
             self.set_mode(Mode::Expanded);
-        } else if !self.mouse_in && self.ripple.is_none_or(|r| r.0.elapsed() > Duration::from_millis(1200)) {
+        } else if !self.mouse_in
+            && self.ripple.is_none_or(|r| r.0.elapsed() > Duration::from_millis(1200))
+            && self.shelf_note.is_none_or(|n| n.0.elapsed() > Duration::from_millis(1200))
+        {
             // Stay open after a drop so the new items (and the burst) are visible.
             self.set_mode(Mode::Compact);
         }
@@ -2598,7 +2615,7 @@ impl App {
             self.catch_all = want;
             self.render();
         }
-        if !down && !self.drag_over && !self.mouse_in && self.expanded() && self.form.is_none() && self.ripple.is_some() {
+        if !down && !self.drag_over && !self.mouse_in && self.expanded() && self.form.is_none() && (self.ripple.is_some() || self.shelf_note.is_some()) {
             let (cx, w) = self.notch_geometry();
             let ux = (pt.x - wx) as f32 / s;
             let uy = (pt.y - wy) as f32 / s;
@@ -3194,9 +3211,15 @@ impl App {
         self.kick();
     }
 
-    pub fn shelf_add(&mut self, paths: Vec<PathBuf>) {
-        if !paths.is_empty() {
-            self.shelf.add(paths);
+    /// Puts dropped files on the Shelf; `turned` were turned away before they were read. When
+    /// some did not fit, the notch shakes its head and the Shelf says how many it took.
+    pub fn shelf_add(&mut self, paths: Vec<PathBuf>, turned: usize) {
+        let (took, refused) = if paths.is_empty() { (0, 0) } else { self.shelf.add(paths) };
+        let refused = refused + turned;
+        if refused > 0 {
+            sys::timelog(&format!("shelf full: took {took}, turned away {refused}"));
+            self.shelf_note = Some((Instant::now(), took, refused));
+            self.refuse.v += 260.0;
         }
         self.kick();
         self.render();
@@ -4675,6 +4698,10 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.drag_pt = (x, y);
         a.blob.0.x = x;
         a.blob.1.x = y;
+        a.drag_count = kv.get("dragn").and_then(|v| v.parse().ok()).unwrap_or(1);
+    }
+    if let Some((took, refused)) = kv.get("note").and_then(|v| v.split_once(',')).and_then(|(t, r)| Some((t.parse().ok()?, r.parse().ok()?))) {
+        a.shelf_note = Some((Instant::now(), took, refused));
     }
     {
         let mut m = a.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

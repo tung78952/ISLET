@@ -1933,7 +1933,7 @@ fn clock_at(a: &mut App, lx: f32) -> (f32, f32, f32) {
 
 /// The Clear chip, halfway between the Shelf title and what stands left of the clock.
 fn clear_chip(a: &mut App, lx: f32) -> Rc {
-    let title_end = lx + 49.0 + a.gfx.measure("Shelf", HEAD, 600);
+    let title_end = shelf_title_end(a, lx);
     let clock = clock_at(a, lx).0 - if a.power.is_some_and(|p| p.battery && p.ac) { 13.0 + 7.6 } else { 0.0 };
     Rc::new((title_end + clock) / 2.0 - 20.0, 10.2, 40.0, 17.6)
 }
@@ -3218,11 +3218,49 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
 
 // ---------------------------------------------------------------- shelf
 
+fn shelf_title_end(a: &mut App, lx: f32) -> f32 {
+    lx + 49.0 + a.gfx.measure("Shelf", HEAD, 600)
+}
+
+/// A drag the Shelf cannot take all of: its ten places, the free ones as dashed boxes, and
+/// below them how much still fits.
+fn shelf_tight(a: &mut App, lx: f32, items: &[std::path::PathBuf], area: Rc, room: usize) {
+    const N: usize = model::SHELF_MAX;
+    // "7/10" by the title, where the Clear chip stands otherwise (no use mid-drag).
+    let count = format!("{}/{N}", items.len());
+    let x = shelf_title_end(a, lx) + 8.0;
+    a.gfx.ui(&count, Rc::new(x, 10.2, 60.0, 17.6), SMALL, 400, if room == 0 { 0xD6D6D6 } else { GREY }, 1.0, Align::L);
+    const ICON: f32 = 26.0;
+    let step = area.w / N as f32;
+    let y = area.y + 12.0;
+    for i in 0..N {
+        let c = area.x + step * (i as f32 + 0.5);
+        let ib = Rc::new(c - ICON / 2.0, y, ICON, ICON);
+        match items.get(i) {
+            Some(p) => match a.shelf_icon(p) {
+                (Some(bmp), _) => a.gfx.image_fit(&bmp, ib, 0.0, 1.0, false),
+                _ => a.gfx.fill_rrect(ib, 5.0, 0x2A2A2A, 1.0),
+            },
+            None => a.gfx.stroke_rrect_dashed(ib, 5.0, 1.2, 3.0, 2.5, 0xBDBDBD, 1.0),
+        }
+    }
+    let (text, tone) = if room == 0 { (format!("Shelf full · {N} max"), 0xBDBDBD) } else { (format!("Room for {room} more"), WHITE) };
+    let w = a.gfx.measure(&text, SMALL, 400) + 28.0;
+    let chip = Rc::new(area.cx() - w / 2.0, y + ICON + 16.0, w, 22.0);
+    a.gfx.fill_rrect(chip, 11.0, 0x1E1E1E, 1.0);
+    a.gfx.ui(&text, chip, SMALL, 400, tone, 1.0, Align::C);
+}
+
 fn shelf(a: &mut App, lx: f32) {
     title(a, lx, "Shelf");
     let area = Rc::new(lx + 43.6, 32.0, 336.8, 91.2);
     let drag = a.drag_over;
     let items = a.shelf.items.clone();
+    let room = a.shelf.room();
+    if drag && !items.is_empty() && a.drag_count > room {
+        shelf_tight(a, lx, &items, area, room);
+        return;
+    }
     if drag && !items.is_empty() {
         // Nusa keeps the Clear chip next to the title while files are dragged in.
         let clear = clear_chip(a, lx);
@@ -3320,6 +3358,15 @@ fn shelf(a: &mut App, lx: f32) {
         if hot {
             icon::x_circle(&a.gfx, tile.x + tile.w - 7.0, tile.y + 7.0, 7.0, 0x4A4A4A, WHITE, 1.0);
             hit(a, Rc::new(tile.x + tile.w - 15.0, tile.y - 1.0, 16.0, 16.0), Act::ShelfRemove(i));
+        }
+    }
+    // A drop that did not all fit says so for a moment, under the files.
+    if let Some((at, took, refused)) = a.shelf_note {
+        let t = at.elapsed().as_secs_f32();
+        let k = ((crate::SHELF_NOTE.as_secs_f32() - t) / 0.8).clamp(0.0, 1.0) * (t / 0.15).clamp(0.0, 1.0);
+        if k > 0.0 {
+            let text = if took == 0 { format!("Shelf full · {refused} didn't fit") } else { format!("Took {took} · {refused} didn't fit") };
+            a.gfx.ui(&text, Rc::new(area.x, 111.0, area.w, 14.0), 10.5, 400, GREY, k, Align::C);
         }
     }
 }

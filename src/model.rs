@@ -226,14 +226,31 @@ impl Shelf {
         let body: String = self.items.iter().map(|p| format!("{}\n", p.display())).collect();
         let _ = fs::write(data_dir().join("shelf.txt"), body);
     }
-    pub fn add(&mut self, paths: Vec<PathBuf>) {
+    /// Free places left on the shelf.
+    pub fn room(&self) -> usize {
+        SHELF_MAX.saturating_sub(self.items.len())
+    }
+    /// Takes new files while there is room, in the order they came, and never pushes old ones
+    /// off: returns how many were taken and how many did not fit (files already on it count
+    /// as neither).
+    pub fn add(&mut self, paths: Vec<PathBuf>) -> (usize, usize) {
+        let (took, refused) = self.take(paths);
+        if took > 0 {
+            self.save();
+        }
+        (took, refused)
+    }
+    fn take(&mut self, paths: Vec<PathBuf>) -> (usize, usize) {
+        let mut fresh: Vec<PathBuf> = Vec::new();
         for p in paths {
-            if !self.items.contains(&p) {
-                self.items.insert(0, p);
+            if !self.items.contains(&p) && !fresh.contains(&p) {
+                fresh.push(p);
             }
         }
-        self.items.truncate(SHELF_MAX);
-        self.save();
+        let took = fresh.len().min(self.room());
+        let refused = fresh.len() - took;
+        self.items.splice(0..0, fresh.into_iter().take(took));
+        (took, refused)
     }
     pub fn remove(&mut self, i: usize) {
         if i < self.items.len() {
@@ -322,5 +339,31 @@ mod lyric_offset_tests {
         assert_eq!(back.get("c\u{1}d"), -1.0);
         assert_eq!(o.shift("c\u{1}d", 1.0), 0.0);
         assert!(!o.text().contains("c\u{1}d"), "a song back in sync is not kept");
+    }
+}
+
+#[cfg(test)]
+mod shelf_tests {
+    use super::*;
+
+    fn files(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn a_full_shelf_turns_new_files_away_and_keeps_the_old_ones() {
+        let mut s = Shelf { items: files(&["1", "2", "3", "4", "5", "6", "7", "8"]) };
+        assert_eq!(s.take(files(&["a", "b", "c", "d", "e"])), (2, 3));
+        assert_eq!(s.items, files(&["a", "b", "1", "2", "3", "4", "5", "6", "7", "8"]));
+        assert_eq!(s.room(), 0);
+        assert_eq!(s.take(files(&["f"])), (0, 1));
+        assert_eq!(s.items.len(), SHELF_MAX);
+    }
+
+    #[test]
+    fn files_already_on_the_shelf_are_neither_taken_nor_turned_away() {
+        let mut s = Shelf { items: files(&["1"]) };
+        assert_eq!(s.take(files(&["1", "a", "a"])), (1, 0));
+        assert_eq!(s.items, files(&["a", "1"]));
     }
 }
