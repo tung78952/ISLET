@@ -214,7 +214,7 @@ pub struct Shelf {
     pub items: Vec<PathBuf>,
 }
 
-pub const SHELF_MAX: usize = 10;
+pub const SHELF_MAX: usize = 30;
 
 impl Shelf {
     pub fn load() -> Self {
@@ -352,9 +352,11 @@ mod shelf_tests {
 
     #[test]
     fn a_full_shelf_turns_new_files_away_and_keeps_the_old_ones() {
-        let mut s = Shelf { items: files(&["1", "2", "3", "4", "5", "6", "7", "8"]) };
+        let old: Vec<PathBuf> = (0..SHELF_MAX - 2).map(|i| PathBuf::from(i.to_string())).collect();
+        let mut s = Shelf { items: old.clone() };
         assert_eq!(s.take(files(&["a", "b", "c", "d", "e"])), (2, 3));
-        assert_eq!(s.items, files(&["a", "b", "1", "2", "3", "4", "5", "6", "7", "8"]));
+        assert_eq!(s.items[..2], files(&["a", "b"])[..]);
+        assert_eq!(s.items[2..], old[..]);
         assert_eq!(s.room(), 0);
         assert_eq!(s.take(files(&["f"])), (0, 1));
         assert_eq!(s.items.len(), SHELF_MAX);

@@ -578,6 +578,9 @@ pub struct App {
     pub vol_stretch: Spring,
     /// The notch shaking its head at a drop the full Shelf had no room for.
     pub refuse: Spring,
+    /// How far the Shelf row has been scrolled to the left, and where the wheel sends it.
+    pub shelf_scroll: Spring,
+    pub shelf_scroll_to: f32,
     /// Brightness sun rotation (degrees); each change turns it by the change, as Nusa does.
     pub sun_rot: Spring,
     pub sun_target: f32,
@@ -924,6 +927,8 @@ impl App {
             vol_level: Spring::new(0.0, 260.0, 30.0),
             vol_stretch: Spring::new(0.0, 520.0, 9.0),
             refuse: Spring::new(0.0, 1100.0, 9.0),
+            shelf_scroll: Spring::new(0.0, 260.0, 32.0),
+            shelf_scroll_to: 0.0,
             sun_rot: Spring::new(0.0, 900.0, 60.0),
             sun_target: 0.0,
             bright_bounce: None,
@@ -1946,6 +1951,8 @@ impl App {
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
             moving |= self.refuse.step(0.0, sub);
+            self.shelf_scroll_to = self.shelf_scroll_to.clamp(0.0, ui::shelf_scroll_max(self.shelf.items.len()));
+            moving |= self.shelf_scroll.step(self.shelf_scroll_to, sub);
             moving |= self.sun_rot.step(self.sun_target, sub);
             moving |= self.lyr_user.step(self.lyr_user_target, sub);
             moving |= self.lyr_zoom.step(1.0, sub);
@@ -2273,6 +2280,13 @@ impl App {
         if self.expanded() && self.view == ui::View::History {
             let last = self.history.len().saturating_sub(2);
             self.history_top = (self.history_top as i32 - notches.signum() as i32).clamp(0, last as i32) as usize;
+            self.kick();
+            return;
+        }
+        if self.expanded() && self.page == Page::Shelf && self.view == ui::View::Page && !self.drag_over {
+            // The wheel slides the Shelf row along, a tile per notch.
+            let max = ui::shelf_scroll_max(self.shelf.items.len());
+            self.shelf_scroll_to = (self.shelf_scroll_to - notches * ui::SHELF_STEP).clamp(0.0, max);
             self.kick();
             return;
         }
@@ -3216,6 +3230,10 @@ impl App {
     pub fn shelf_add(&mut self, paths: Vec<PathBuf>, turned: usize) {
         let (took, refused) = if paths.is_empty() { (0, 0) } else { self.shelf.add(paths) };
         let refused = refused + turned;
+        if took > 0 {
+            // New files go in at the front: slide back there to see them land.
+            self.shelf_scroll_to = 0.0;
+        }
         if refused > 0 {
             sys::timelog(&format!("shelf full: took {took}, turned away {refused}"));
             self.shelf_note = Some((Instant::now(), took, refused));
@@ -4699,6 +4717,10 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.blob.0.x = x;
         a.blob.1.x = y;
         a.drag_count = kv.get("dragn").and_then(|v| v.parse().ok()).unwrap_or(1);
+    }
+    if let Some(v) = kv.get("shelfscroll").and_then(|v| v.parse().ok()) {
+        a.shelf_scroll = Spring::new(v, 260.0, 32.0);
+        a.shelf_scroll_to = v;
     }
     if let Some((took, refused)) = kv.get("note").and_then(|v| v.split_once(',')).and_then(|(t, r)| Some((t.parse().ok()?, r.parse().ok()?))) {
         a.shelf_note = Some((Instant::now(), took, refused));

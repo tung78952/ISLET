@@ -3218,6 +3218,16 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
 
 // ---------------------------------------------------------------- shelf
 
+/// Each Shelf tile's place along the row; the row slides with the wheel past four or so.
+pub const SHELF_STEP: f32 = 76.0;
+const SHELF_ROW_W: f32 = 336.8;
+const SHELF_FADE: f32 = 28.0;
+
+/// How far the Shelf row can slide with `n` files on it.
+pub fn shelf_scroll_max(n: usize) -> f32 {
+    (n as f32 * SHELF_STEP - 6.0 - SHELF_ROW_W).max(0.0)
+}
+
 fn shelf_title_end(a: &mut App, lx: f32) -> f32 {
     lx + 49.0 + a.gfx.measure("Shelf", HEAD, 600)
 }
@@ -3231,11 +3241,19 @@ fn shelf_tight(a: &mut App, lx: f32, items: &[std::path::PathBuf], area: Rc, roo
     let x = shelf_title_end(a, lx) + 8.0;
     a.gfx.ui(&count, Rc::new(x, 10.2, 60.0, 17.6), SMALL, 400, if room == 0 { 0xD6D6D6 } else { GREY }, 1.0, Align::L);
     const ICON: f32 = 26.0;
-    let step = area.w / N as f32;
+    const SLOTS: usize = 10;
+    let step = area.w / SLOTS as f32;
     let y = area.y + 12.0;
-    for i in 0..N {
+    // Ten small places: the newest files, a "+N" for the rest, then the free places dashed.
+    let more = items.len().saturating_sub(SLOTS);
+    for i in 0..SLOTS {
         let c = area.x + step * (i as f32 + 0.5);
         let ib = Rc::new(c - ICON / 2.0, y, ICON, ICON);
+        if more > 0 && i == SLOTS - 1 {
+            a.gfx.fill_rrect(ib, 5.0, 0x2A2A2A, 1.0);
+            a.gfx.ui(&format!("+{}", more + 1), ib, 10.5, 600, 0xD6D6D6, 1.0, Align::C);
+            continue;
+        }
         match items.get(i) {
             Some(p) => match a.shelf_icon(p) {
                 (Some(bmp), _) => a.gfx.image_fit(&bmp, ib, 0.0, 1.0, false),
@@ -3253,7 +3271,7 @@ fn shelf_tight(a: &mut App, lx: f32, items: &[std::path::PathBuf], area: Rc, roo
 
 fn shelf(a: &mut App, lx: f32) {
     title(a, lx, "Shelf");
-    let area = Rc::new(lx + 43.6, 32.0, 336.8, 91.2);
+    let area = Rc::new(lx + 43.6, 32.0, SHELF_ROW_W, 91.2);
     let drag = a.drag_over;
     let items = a.shelf.items.clone();
     let room = a.shelf.room();
@@ -3272,17 +3290,21 @@ fn shelf(a: &mut App, lx: f32) {
             // Items already on the shelf stay faintly visible behind the drop frame.
             let n = items.len().min(crate::model::SHELF_MAX);
             if n > 0 {
-                let step = (area.w / n as f32).min(76.0);
                 let base = a.gfx.alpha;
                 a.gfx.alpha = base * 0.22;
+                a.gfx.push_clip(area);
                 for (i, p) in items.iter().take(n).enumerate() {
-                    let tile = Rc::new(area.x + i as f32 * step, area.y, step - 6.0, area.h - 4.0);
+                    let tile = Rc::new(area.x + i as f32 * SHELF_STEP - a.shelf_scroll.x, area.y, SHELF_STEP - 6.0, area.h - 4.0);
+                    if tile.x + tile.w < area.x || tile.x > area.x + area.w {
+                        continue;
+                    }
                     if let (Some(bmp), _) = a.shelf_icon(p) {
                         a.gfx.image_fit(&bmp, Rc::new(tile.cx() - 20.0, tile.y + 8.0, 40.0, 40.0), 0.0, 1.0, false);
                     }
                     let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     a.gfx.ui(&name, Rc::new(tile.x + 2.0, tile.y + 53.0, tile.w - 4.0, 14.0), 10.5, 600, WHITE, 1.0, Align::C);
                 }
+                a.gfx.pop_clip();
                 a.gfx.alpha = base;
             }
             // Nusa keeps the target itself near-neutral charcoal.  The colour
@@ -3325,16 +3347,26 @@ fn shelf(a: &mut App, lx: f32) {
     hit(a, clear, Act::ShelfClear);
 
     let n = items.len().min(crate::model::SHELF_MAX);
-    let step = (area.w / n as f32).min(76.0);
+    let step = SHELF_STEP;
+    let scroll = a.shelf_scroll.x;
+    let clip = Rc::new(area.x, area.y - 4.0, area.w, area.h + 8.0);
+    a.gfx.push_clip(clip);
     for (i, p) in items.iter().take(n).enumerate() {
-        let tile = Rc::new(area.x + i as f32 * step, area.y, step - 6.0, area.h - 4.0);
+        let tile = Rc::new(area.x + i as f32 * step - scroll, area.y, step - 6.0, area.h - 4.0);
+        // Tiles slid out of the row are neither drawn nor clickable; one cut by an edge only
+        // answers on its visible part.
+        let (l, r) = (tile.x.max(area.x), (tile.x + tile.w).min(area.x + area.w));
+        if r - l < 1.0 {
+            continue;
+        }
+        let seen = Rc::new(l, tile.y, r - l, tile.h);
         // Freshly dropped items fade and rise into place.
         let enter = a.ripple.map(|r| ((r.0.elapsed().as_secs_f32() - 0.02) / 0.12).clamp(0.0, 1.0)).unwrap_or(1.0);
         let (base, off) = (a.gfx.alpha, a.gfx.off);
         a.gfx.alpha = base * enter;
         a.gfx.offset(off.0, off.1 + 8.0 * (1.0 - enter).powi(2));
-        let hot = hovering(a, tile);
-        let h = btn(a, tile, 0.05);
+        let hot = hovering(a, seen);
+        let h = btn(a, seen, 0.05);
         if h > 0.0 {
             a.gfx.fill_rrect(tile, 10.0, 0x2A2A2A, 0.6 * h.min(1.0));
         }
@@ -3354,12 +3386,22 @@ fn shelf(a: &mut App, lx: f32) {
         a.gfx.unzoom();
         a.gfx.offset(off.0, off.1);
         a.gfx.alpha = base;
-        hit(a, tile, Act::ShelfOpen(i));
-        if hot {
+        hit(a, seen, Act::ShelfOpen(i));
+        if hot && tile.x + tile.w <= area.x + area.w + 0.5 {
             icon::x_circle(&a.gfx, tile.x + tile.w - 7.0, tile.y + 7.0, 7.0, 0x4A4A4A, WHITE, 1.0);
             hit(a, Rc::new(tile.x + tile.w - 15.0, tile.y - 1.0, 16.0, 16.0), Act::ShelfRemove(i));
         }
     }
+    // Files out of sight on a side: that edge of the row fades out.
+    let max = shelf_scroll_max(n);
+    let (left, right) = ((scroll / 30.0).clamp(0.0, 1.0), ((max - scroll) / 30.0).clamp(0.0, 1.0));
+    if left > 0.01 {
+        a.gfx.fill_rrect_hgrad(Rc::new(area.x, clip.y, SHELF_FADE, clip.h), 0.0, (0x000000, left), (0x000000, 0.0));
+    }
+    if right > 0.01 {
+        a.gfx.fill_rrect_hgrad(Rc::new(area.x + area.w - SHELF_FADE, clip.y, SHELF_FADE, clip.h), 0.0, (0x000000, 0.0), (0x000000, right));
+    }
+    a.gfx.pop_clip();
     // A drop that did not all fit says so for a moment, under the files.
     if let Some((at, took, refused)) = a.shelf_note {
         let t = at.elapsed().as_secs_f32();
