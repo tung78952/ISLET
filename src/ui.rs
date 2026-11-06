@@ -614,7 +614,9 @@ pub fn draw(a: &mut App) {
     let breath = a.breath();
     // The outline as drawn (breathing); the colour layers on it follow it, the content does not.
     let (bw, bh) = (w + breath, h + 0.4 * breath);
-    a.gfx.notch(cx, bw, bh, radius, ear, 0x000000, 1.0);
+    // Liquid glass: closed, the outline leans toward a pointer nearby; what is on it stays.
+    let (lean, lean_w) = (a.lean.x, a.lean_w.x.max(0.0));
+    a.gfx.notch(cx + lean, bw + lean_w, bh, radius, ear, 0x000000, 1.0);
     let left = cx - w / 2.0;
 
     // The drop light sits behind everything on the panel, header included.

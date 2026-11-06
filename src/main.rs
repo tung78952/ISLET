@@ -88,6 +88,19 @@ const MOOD_WAIT: Duration = Duration::from_secs(30);
 /// videos changes the "song" every few seconds, and a card for each would never stop.
 const SONG_SETTLE: Duration = Duration::from_secs(20);
 
+/// Liquid glass: how far the closed notch's outline shifts toward a pointer `along` px from its
+/// middle and `dist` px outside it, and how much wider it gets (px), for a notch `w` wide. Nothing
+/// beyond 200 px or once the pointer is on it; at most a 4% stretch.
+fn lean_toward(along: f32, dist: f32, w: f32) -> (f32, f32) {
+    if dist <= 0.0 || dist >= 200.0 {
+        return (0.0, 0.0);
+    }
+    let fade = 1.0 - dist / 200.0;
+    let shift = (along * 0.015 * fade).clamp(-6.0, 6.0);
+    let stretch = (dist / 300.0).min(1.0) * 0.04 * fade * w;
+    (shift, stretch)
+}
+
 fn song_worth_showing(prev_lasted: Duration) -> bool {
     prev_lasted >= SONG_SETTLE
 }
@@ -585,6 +598,11 @@ pub struct App {
     pub vol_stretch: Spring,
     /// The notch shaking its head at a drop the full Shelf had no room for.
     pub refuse: Spring,
+    /// Liquid glass: the closed notch's outline leaning toward a pointer nearby (shift and extra
+    /// width, in px), and where it is heading.
+    pub lean: Spring,
+    pub lean_w: Spring,
+    lean_to: (f32, f32),
     /// How far the Shelf row has been scrolled to the left, and where the wheel sends it.
     pub shelf_scroll: Spring,
     pub shelf_scroll_to: f32,
@@ -944,6 +962,9 @@ impl App {
             vol_level: Spring::new(0.0, 260.0, 30.0),
             vol_stretch: Spring::new(0.0, 520.0, 9.0),
             refuse: Spring::new(0.0, 1100.0, 9.0),
+            lean: Spring::new(0.0, 260.0, 18.0),
+            lean_w: Spring::new(0.0, 260.0, 18.0),
+            lean_to: (0.0, 0.0),
             shelf_scroll: Spring::new(0.0, 260.0, 32.0),
             shelf_scroll_to: 0.0,
             sun_rot: Spring::new(0.0, 900.0, 60.0),
@@ -2014,6 +2035,8 @@ impl App {
             moving |= self.intro_grow.step(1.0, sub);
             moving |= self.vol_stretch.step(0.0, sub);
             moving |= self.refuse.step(0.0, sub);
+            moving |= self.lean.step(self.lean_to.0, sub);
+            moving |= self.lean_w.step(self.lean_to.1, sub);
             self.shelf_scroll_to = self.shelf_scroll_to.clamp(0.0, ui::shelf_scroll_max(self.shelf.items.len()));
             moving |= self.shelf_scroll.step(self.shelf_scroll_to, sub);
             moving |= self.sun_rot.step(self.sun_target, sub);
@@ -2538,6 +2561,16 @@ impl App {
         let (ux, uy) = ((pt.x as f32 - self.pos.0 as f32) / s, (pt.y as f32 - self.pos.1 as f32) / s);
         let along = ux - WIN_W / 2.0;
         let (dx, dy) = ((along.abs() - w / 2.0).max(0.0), (uy - h).max(0.0));
+        // Liquid glass: the closed notch leans a little toward a pointer coming near.
+        let lean = if self.settings.glass && self.mode == Mode::Compact && !self.hidden && !self.minimal() && !self.yielded && self.toast.is_none() {
+            lean_toward(along, dx.hypot(dy), w)
+        } else {
+            (0.0, 0.0)
+        };
+        if lean != self.lean_to {
+            self.lean_to = lean;
+            self.kick();
+        }
         let t = self.eye_time();
         let (song, artist, playing) = {
             let m = self.media.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5266,6 +5299,21 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod lean_tests {
+    use super::lean_toward;
+
+    #[test]
+    fn the_notch_leans_only_toward_a_pointer_nearby_and_only_a_little() {
+        assert_eq!(lean_toward(300.0, 0.0, 150.0), (0.0, 0.0), "not once it is on the notch");
+        assert_eq!(lean_toward(300.0, 250.0, 150.0), (0.0, 0.0), "not from far away");
+        let (shift, wide) = lean_toward(200.0, 60.0, 150.0);
+        assert!(shift > 0.0 && shift <= 6.0, "toward the pointer: {shift}");
+        assert!(wide > 0.0 && wide <= 0.04 * 150.0, "at most 4%: {wide}");
+        assert!(lean_toward(-200.0, 60.0, 150.0).0 < 0.0, "and the other way");
     }
 }
 
