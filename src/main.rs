@@ -1079,7 +1079,7 @@ impl App {
             backdrop: None,
             bg_map: None,
             backdrop_retry: None,
-            glass_mix: Spring::new(0.0, 200.0, 26.0),
+            glass_mix: Spring::new(0.0, 330.0, 21.0),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
@@ -1512,7 +1512,7 @@ impl App {
 
     /// Liquid glass is open: the notch is out and the glass may show the screen behind it.
     fn glass_open(&self) -> bool {
-        self.settings.glass && self.mode == Mode::Expanded && !self.hidden && !self.minimal()
+        self.settings.glass && (self.mode == Mode::Expanded || self.glass_mix.x > 0.01) && !self.hidden && !self.minimal()
     }
 
     /// Starts or stops the screen capture behind the open notch, as the glass needs it.
@@ -1535,25 +1535,34 @@ impl App {
         }
     }
 
-    /// The glass for the open notch (centre `cx`, `w`×`h`, corner `radius`, window units): the
-    /// screen behind it, the refraction map, where the picture's corner goes, and units per pixel.
-    pub fn backdrop_frame(&mut self, cx: f32, w: f32, h: f32, radius: f32) -> Option<(ID2D1Bitmap1, ID2D1Bitmap, (f32, f32), f32)> {
+    /// The glass for the open notch (centre `cx`, now `w`×`h`), as it opens toward `target`: the
+    /// screen behind it, the refraction map made once for the open shape, where the picture's
+    /// corner goes, units per pixel, and how much the map is squeezed (x, y) about its top middle
+    /// so it fits the notch while it grows. The captured strip is the size of the widest and
+    /// tallest open notch, so nothing is remade while it opens.
+    #[allow(clippy::type_complexity)]
+    pub fn backdrop_frame(&mut self, cx: f32, w: f32, h: f32, target: [f32; 2]) -> Option<(ID2D1Bitmap1, ID2D1Bitmap, (f32, f32), f32, (f32, f32))> {
         const MARGIN: f32 = 24.0;
+        const OPEN_RADIUS: f32 = 31.6;
         let s = self.gfx.scale;
-        let (x0, ww, hh) = (cx - w / 2.0 - MARGIN, w + 2.0 * MARGIN, h + MARGIN);
+        let (full_w, full_h) = (LYRICS[0].max(EXPANDED[0]).max(CALENDAR[0]), LYRICS[1].max(EXPANDED[1]).max(CALENDAR[1]));
+        let (ww, hh) = (full_w + 2.0 * MARGIN, full_h + MARGIN);
+        let x0 = cx - ww / 2.0;
         let area = (self.pos.0 + (x0 * s).round() as i32, self.pos.1, (ww * s).round() as u32, (hh * s).round() as u32);
         let bmp = self.backdrop.as_mut()?.latest(&self.gfx, area)?;
-        let key = (area.2, area.3, (radius * s).round() as u32);
+        let key = (area.2, area.3, (target[0] * 10.0) as u32 * 10_000 + (target[1] * 10.0) as u32);
         if self.bg_map.as_ref().is_none_or(|m| m.0 != key) {
-            // The notch inside the picture; its top runs up past the screen edge, so only the
-            // sides and the rounded bottom bend.
-            let (m, r) = (MARGIN * s, radius * s);
-            let shape = (m, -r, area.2 as f32 - 2.0 * m, area.3 as f32 - m + r);
+            // The open notch, centred at the top of the strip; its top runs up past the screen
+            // edge, so only the sides and the rounded bottom bend.
+            let r = OPEN_RADIUS * s;
+            let (sw, sh) = (target[0] * s, target[1] * s);
+            let shape = ((area.2 as f32 - sw) / 2.0, -r, sw, sh + r);
             let px = glass::map_in(area.2, area.3, shape, r, 18.0 * s, 10.0 * s);
             self.bg_map = Some((key, self.gfx.bitmap(area.2, area.3, &px)));
         }
         let map = self.bg_map.as_ref()?.1.clone()?;
-        Some((bmp, map, (x0, 0.0), 1.0 / s))
+        let squeeze = ((w / target[0]).clamp(0.05, 1.5), (h / target[1]).clamp(0.05, 1.5));
+        Some((bmp, map, (x0, 0.0), 1.0 / s, squeeze))
     }
 
     /// A prop's picture, `tinted` for the part in the character's colour.
@@ -2063,9 +2072,8 @@ impl App {
             }
         }
         self.watch_backdrop();
-        let [tw, th] = t;
-        let settled = (self.sw.x - tw).abs() < 2.0 && (self.sh.x - th).abs() < 2.0;
-        let glass_to = if self.backdrop.is_some() && settled && self.fade.x > 0.9 { 1.0 } else { 0.0 };
+        // The glass comes in as the notch opens, not after.
+        let glass_to = if self.backdrop.is_some() && self.mode == Mode::Expanded { 1.0 } else { 0.0 };
         let ears = self.playing() && !self.hidden && (self.eq_mix.x > 0.01 || self.jam_show || (self.expanded() && self.page == Page::Music));
         spectrum::want(ears);
         if self.eye_feel.show != self.logged_eyes {

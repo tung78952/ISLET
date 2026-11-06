@@ -102,7 +102,7 @@ pub struct Gfx {
     /// Liquid glass: the refraction for pictures (the cover), and for the screen behind the open
     /// notch (with its blur and saturation first). Made once, on first use.
     glass_fx: std::cell::RefCell<Option<GlassChain>>,
-    glass_bg: std::cell::RefCell<Option<(ID2D1Effect, ID2D1Effect, GlassChain)>>,
+    glass_bg: std::cell::RefCell<Option<(ID2D1Effect, ID2D1Effect, ID2D1Effect, ID2D1Effect, GlassChain)>>,
     /// What the backdrop chain was last wired to (picture, map, blur, bend): wiring it again
     /// every frame cost far more than drawing it.
     glass_bg_wired: std::cell::Cell<(usize, usize, u32, u32)>,
@@ -841,17 +841,27 @@ impl Gfx {
 
     /// The screen behind the open notch as glass: `bmp` (captured pixels, its top-left at `at`,
     /// `k` window units per pixel) blurred by `blur` px, its colours lifted, and bent near the rim
-    /// by `map` up to `amount` px. The caller clips to the notch.
-    pub fn backdrop_glass(&self, bmp: &ID2D1Bitmap1, map: &ID2D1Bitmap, at: (f32, f32), k: f32, amount: f32, blur: f32) -> bool {
+    /// by `map` (made for the open notch) squeezed by `squeeze` about its top middle to fit the
+    /// notch as it grows, up to `amount` px. The caller clips to the notch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backdrop_glass(&self, bmp: &ID2D1Bitmap1, map: &ID2D1Bitmap, at: (f32, f32), k: f32, squeeze: (f32, f32), amount: f32, blur: f32) -> bool {
         unsafe {
             let mut fx = self.glass_bg.borrow_mut();
             if fx.is_none() {
-                let (Some(b), Some(s), Some(chain)) = (self.effect(&CLSID_D2D1GaussianBlur), self.effect(&CLSID_D2D1Saturation), self.glass_chain()) else { return false };
+                let (Some(b), Some(s), Some(fit), Some(edge), Some(chain)) =
+                    (self.effect(&CLSID_D2D1GaussianBlur), self.effect(&CLSID_D2D1Saturation), self.effect(&CLSID_D2D12DAffineTransform), self.effect(&CLSID_D2D1Border), self.glass_chain())
+                else {
+                    return false;
+                };
                 let _ = b.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_le_bytes());
                 let _ = s.SetValue(D2D1_SATURATION_PROP_SATURATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &1.4f32.to_le_bytes());
-                *fx = Some((b, s, chain));
+                // Past the squeezed map's edge, its own (still) edge carries on.
+                let clamp = (D2D1_BORDER_EDGE_MODE_CLAMP.0 as u32).to_le_bytes();
+                let _ = edge.SetValue(D2D1_BORDER_PROP_EDGE_MODE_X.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &clamp);
+                let _ = edge.SetValue(D2D1_BORDER_PROP_EDGE_MODE_Y.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &clamp);
+                *fx = Some((b, s, fit, edge, chain));
             }
-            let Some((b, s, chain)) = fx.as_ref() else { return false };
+            let Some((b, s, fit, edge, chain)) = fx.as_ref() else { return false };
             let wiring = (windows::core::Interface::as_raw(bmp) as usize, windows::core::Interface::as_raw(map) as usize, blur.to_bits(), amount.to_bits());
             if self.glass_bg_wired.get() != wiring {
                 let (Ok(src), Ok(field)) = (windows::core::Interface::cast::<ID2D1Image>(bmp), windows::core::Interface::cast::<ID2D1Image>(map)) else { return false };
@@ -860,11 +870,22 @@ impl Gfx {
                 let Ok(soft) = b.GetOutput() else { return false };
                 s.SetInput(0, &soft, true);
                 let Ok(vivid) = s.GetOutput() else { return false };
+                fit.SetInput(0, &field, true);
+                let Ok(fitted) = fit.GetOutput() else { return false };
+                edge.SetInput(0, &fitted, true);
+                let Ok(field) = edge.GetOutput() else { return false };
                 if Self::refract(chain, &vivid, &field, amount).is_none() {
                     return false;
                 }
                 self.glass_bg_wired.set(wiring);
             }
+            // The squeeze changes every frame while the notch opens: only this value moves.
+            let size = map.GetSize();
+            let about = (size.width / 2.0, 0.0);
+            let m = Matrix3x2::translation(-about.0, -about.1) * Matrix3x2::scale(squeeze.0, squeeze.1) * Matrix3x2::translation(about.0, about.1);
+            let cells = [m.M11, m.M12, m.M21, m.M22, m.M31, m.M32];
+            let bytes: Vec<u8> = cells.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let _ = fit.SetValue(D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_3X2, &bytes);
             let Ok(image) = chain.sum.GetOutput() else { return false };
             self.draw_scaled(&image, at, k, k);
             true

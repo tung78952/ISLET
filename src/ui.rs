@@ -617,11 +617,12 @@ pub fn draw(a: &mut App) {
     // and bent at the rim; a thin black still lies over it so the words stay readable.
     let glass_k = a.glass_mix.x.clamp(0.0, 1.0);
     if glass_k > 0.01 {
-        if let Some((bmp, map, at, k)) = a.backdrop_frame(cx, bw, bh, radius) {
+        let target = a.target();
+        if let Some((bmp, map, at, k, squeeze)) = a.backdrop_frame(cx, bw, bh, target) {
             let clipped = a.gfx.push_notch_clip(cx, bw, bh, radius, ear);
             let base = a.gfx.alpha;
             a.gfx.alpha = base * glass_k;
-            a.gfx.backdrop_glass(&bmp, &map, at, k, 10.0 * a.gfx.scale, 10.0 * a.gfx.scale);
+            a.gfx.backdrop_glass(&bmp, &map, at, k, squeeze, 10.0 * a.gfx.scale, 10.0 * a.gfx.scale);
             a.gfx.alpha = base;
             if clipped {
                 a.gfx.pop_layer();
