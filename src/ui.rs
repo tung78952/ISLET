@@ -2655,6 +2655,7 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
         a.gfx.alpha = base * pick;
         a.gfx.offset(off.0 + 30.0 * (1.0 - pick), off.1);
         let area = Rc::new(lx + 222.0, 30.0, 110.0, 96.0);
+        pick_band(a, area.x, area.x + area.w, area.cy(), 32.0);
         if pomodoro {
             let rounds: Vec<String> = (1..=8).map(|n| if n == 1 { "1 round".to_string() } else { format!("{n} rounds") }).collect();
             wheel_sized(a, WheelId::Rounds, area, &rounds, 18.0, RED);
@@ -3269,6 +3270,7 @@ fn goal(a: &mut App, lx: f32) {
     let goals: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
     let (base, k) = (a.gfx.alpha, a.pick_mix.x.clamp(0.0, 1.0));
     a.gfx.alpha = base * (1.0 - 0.72 * k);
+    pick_band(a, lx + 64.0, lx + 336.0, 82.0, 32.0);
     wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 36.0, 140.0, 92.0), &cups, 20.0, WATER);
     a.gfx.alpha = base * (0.28 + 0.72 * k);
     wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 36.0, 130.0, 92.0), &goals, 20.0, WATER);
@@ -3280,6 +3282,7 @@ fn bed(a: &mut App, lx: f32) {
     back_title(a, lx, "Bedtime", Act::View(View::Care(Tile::Sleep)));
     let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
     let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
+    pick_band(a, lx + 118.0, lx + 302.0, 82.0, 38.0);
     wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 36.0, 76.0, 92.0), &hours, 28.0, WHITE);
     a.gfx.ui(":", Rc::new(lx + 198.0, 60.0, 24.0, 40.0), 26.0, 600, WHITE, 1.0, Align::C);
     wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 36.0, 76.0, 92.0), &quarters, 28.0, WHITE);
@@ -3287,6 +3290,12 @@ fn bed(a: &mut App, lx: f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The iOS-style band behind the chosen row of one or more wheels side by side: from `x0` to
+/// `x1`, centred on `cy`, `h` tall.
+fn pick_band(a: &mut App, x0: f32, x1: f32, cy: f32, h: f32) {
+    a.gfx.fill_rrect(Rc::new(x0, cy - h / 2.0, x1 - x0, h), 9.0, 0xFFFFFF, 0.1);
+}
+
 /// What a rolling picker sets.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WheelId {
@@ -3327,21 +3336,12 @@ fn back_title(a: &mut App, lx: f32, title: &str, act: Act) {
 }
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.
-/// The chosen value is lit in the page's own colour (`tint`), held between two hairlines that
-/// fade out at both ends like the Focus sun's horizon; they flash as a value rolls past.
+/// The chosen value is lit in the page's own colour (`tint`); the band behind it comes from
+/// `pick_band`, drawn by the screen so it can run under several wheels, as on iOS.
 fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32, tint: u32) {
     let row = a.wheels[id as usize].row;
     let pos = a.wheels[id as usize].pos;
-    let flash = (1.0 - a.wheels[id as usize].since_tick / 0.25).clamp(0.0, 1.0);
     a.gfx.push_clip(r);
-    let cy = r.cy();
-    {
-        let (dy, alpha, half) = (big * 0.78, 0.55 + 0.4 * flash, r.w / 2.0 - 4.0);
-        for y in [cy - dy, cy + dy] {
-            a.gfx.fill_rrect_hgrad(Rc::new(r.cx() - half, y - 0.6, half, 1.2), 0.0, (tint, 0.0), (tint, alpha));
-            a.gfx.fill_rrect_hgrad(Rc::new(r.cx(), y - 0.6, half, 1.2), 0.0, (tint, alpha), (tint, 0.0));
-        }
-    }
     let first = (pos.floor() as i32 - 2).max(0);
     for i in first..(pos.ceil() as i32 + 3).min(labels.len() as i32) {
         let d = i as f32 - pos;
@@ -3872,6 +3872,7 @@ fn form(a: &mut App, lx: f32) {
             let cx = lx + 210.0 + 50.0 * (1.0 - to_time);
             let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
             let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
+            pick_band(a, cx - 92.0, cx + 92.0, 82.0, 40.0);
             wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 36.0, 76.0, 92.0), &hours, big, WHITE);
             a.gfx.ui(":", Rc::new(cx - 12.0, CY - 22.0, 24.0, 40.0), big, 600, WHITE, 1.0, Align::C);
             wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 36.0, 76.0, 92.0), &minutes, big, WHITE);
