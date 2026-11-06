@@ -16,9 +16,10 @@ const N: usize = 1024;
 const HOP: usize = 512;
 /// The bands, in Hz: bass, low mids, mids, upper mids, treble.
 pub const BANDS: [(f32, f32); 5] = [(40.0, 150.0), (150.0, 400.0), (400.0, 1000.0), (1000.0, 3000.0), (3000.0, 10000.0)];
-/// How fast a bar follows the sound up, and how slowly it falls back (per analysis).
-const RISE: f32 = 0.5;
-const FALL: f32 = 0.12;
+/// How quickly each band's own average follows it (per analysis, about half a second).
+const SETTLE: f32 = 0.03;
+/// While anything sounds, a bar never lies completely flat.
+const FLOOR: f32 = 0.12;
 /// A bass beat: this much above its recent average, and not again for this many analyses.
 const BEAT_OVER: f32 = 1.35;
 const BEAT_GAP: u32 = 8;
@@ -143,9 +144,10 @@ fn listen() -> windows::core::Result<()> {
 pub struct Analyser {
     rate: f32,
     window: Vec<f32>,
-    level: [f32; 5],
-    /// The loudest each band has been lately (decaying), to level quiet music up.
-    peak: [f32; 5],
+    /// Each band's recent average: a bar shows how far the band stands above it.
+    avg: [f32; 5],
+    /// The loudest the whole sound has been lately (decaying): below a hundredth of it is silence.
+    peak: f32,
     bass_avg: f32,
     cooling: u32,
 }
@@ -153,21 +155,24 @@ pub struct Analyser {
 impl Analyser {
     pub fn new(rate: f32) -> Self {
         let window = (0..N).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / (N - 1) as f32).cos()).collect();
-        Analyser { rate, window, level: [0.0; 5], peak: [1e-6; 5], bass_avg: 0.0, cooling: 0 }
+        Analyser { rate, window, avg: [0.0; 5], peak: 1e-6, bass_avg: 0.0, cooling: 0 }
     }
 
-    /// One block of N samples: the band heights (0..1) and whether a bass beat landed.
+    /// One block of N samples: the band heights (0..1) and whether a bass beat landed. Each bar
+    /// shows how far its band stands above its own recent average, so a kick lifts the bass, a
+    /// steady sound sits in the middle, and the five move each to their own beat. The drawing
+    /// smooths them.
     pub fn step(&mut self, block: &[f32]) -> ([f32; 5], bool) {
         let raw = band_energy(block, &self.window, self.rate);
+        let total: f32 = raw.iter().sum();
+        self.peak = (self.peak * 0.998).max(total).max(1e-6);
+        let sounding = total > self.peak * 0.01 && total > 1e-5;
         let mut out = [0.0; 5];
         for i in 0..5 {
-            self.peak[i] = (self.peak[i] * 0.995).max(raw[i]).max(1e-6);
-            // On a log scale, so soft parts still move: 0 at 40 dB under the recent peak.
-            let db = 20.0 * (raw[i].max(1e-9) / self.peak[i]).log10();
-            let target = ((db + 40.0) / 40.0).clamp(0.0, 1.0);
-            let k = if target > self.level[i] { RISE } else { FALL };
-            self.level[i] += (target - self.level[i]) * k;
-            out[i] = self.level[i];
+            let avg = self.avg[i].max(1e-7);
+            let r = raw[i] / avg;
+            self.avg[i] += (raw[i] - self.avg[i]) * SETTLE;
+            out[i] = if sounding { FLOOR + (1.0 - FLOOR) * ((r - 0.7) / 1.3).clamp(0.0, 1.0) } else { 0.0 };
         }
         let bass = raw[0];
         let beat = self.cooling == 0 && bass > 1e-4 && bass > self.bass_avg * BEAT_OVER;
@@ -254,19 +259,21 @@ mod tests {
     }
 
     #[test]
-    fn bars_jump_up_and_fall_back_slowly_and_kicks_are_beats() {
+    fn a_kick_lifts_the_bass_and_a_steady_sound_settles_mid_way() {
         let mut an = Analyser::new(48_000.0);
         let silence = vec![0.0; N];
         let kick = tone(80.0, 48_000.0);
         for _ in 0..20 {
-            an.step(&silence);
+            assert_eq!(an.step(&silence).0, [0.0; 5], "silence lies flat");
         }
         let (up, beat) = an.step(&kick);
-        assert!(up[0] > 0.4, "it rises at once: {}", up[0]);
-        assert!(beat, "a kick after silence is a beat");
-        let (after, again) = an.step(&kick);
-        assert!(!again, "not twice in a row");
-        let (down, _) = an.step(&silence);
-        assert!(down[0] > 0.0 && down[0] < after[0], "it falls back slowly");
+        assert!(up[0] > 0.9, "a kick out of quiet lifts the bass: {}", up[0]);
+        assert!(beat, "and is a beat");
+        assert!(!an.step(&kick).1, "not twice in a row");
+        let mut steady = [0.0; 5];
+        for _ in 0..400 {
+            steady = an.step(&kick).0;
+        }
+        assert!(steady[0] > 0.2 && steady[0] < 0.6, "a steady sound sits mid-way: {}", steady[0]);
     }
 }

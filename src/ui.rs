@@ -603,7 +603,9 @@ pub fn draw(a: &mut App) {
     }
     let na = 1.0;
     a.gfx.alpha = na;
-    a.gfx.notch(cx, w, h, radius, ear, 0x000000, 1.0);
+    // Only the black outline breathes; everything on it keeps its place.
+    let breath = a.breath();
+    a.gfx.notch(cx, w + breath, h + 0.4 * breath, radius, ear, 0x000000, 1.0);
     let left = cx - w / 2.0;
 
     // The drop light sits behind everything on the panel, header included.
@@ -889,7 +891,7 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
     for i in 0..5 {
         let fi = i as f32;
         let level = match heard {
-            Some(b) => b[i],
+            Some(_) => a.eq_bars[i],
             None => {
                 let wave = 0.55 * (t * (2.1 + fi * 0.37) + fi * 1.9).sin() + 0.45 * (t * (3.3 - fi * 0.29) + fi * 0.7).sin();
                 (0.5 + 0.5 * wave).clamp(0.0, 1.0)

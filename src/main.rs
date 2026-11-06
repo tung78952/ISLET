@@ -738,6 +738,8 @@ pub struct App {
     pics: std::collections::HashMap<(&'static str, u32, u32), Option<ID2D1Bitmap>>,
     /// How far the equalizer bars are up (0..1), and when music was last heard of.
     pub eq_mix: Spring,
+    /// The equalizer bars as drawn: they rise quickly to the sound and fall back more slowly.
+    pub eq_bars: [f32; 5],
     last_playing: Instant,
     meter_on: bool,
     mini_busy: bool,
@@ -1041,6 +1043,7 @@ impl App {
             props: std::collections::HashMap::new(),
             pics: std::collections::HashMap::new(),
             eq_mix: Spring::new(0.0, 170.0, 24.0),
+            eq_bars: [0.0; 5],
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
@@ -1337,6 +1340,16 @@ impl App {
     /// pulls the outer toast edge as well as the level bar: zero extends left,
     /// full volume extends right.  Keeping the opposite edge fixed makes the
     /// spring feel anchored to the endpoint that was hit.
+    /// How much wider the notch's black outline is drawn just now: the open music page breathes
+    /// with the bass. Only the outline; what is inside, and where it can be pressed, stay put.
+    pub fn breath(&self) -> f32 {
+        if self.mode == Mode::Expanded && self.page == Page::Music && self.view == ui::View::Page && self.playing() {
+            (if self.lyrics_view() { 3.0 } else { 5.0 }) * spectrum::pulse()
+        } else {
+            0.0
+        }
+    }
+
     pub fn notch_geometry(&self) -> (f32, f32) {
         let mut cx = WIN_W / 2.0;
         let mut w = self.sw.x;
@@ -1349,10 +1362,7 @@ impl App {
             cx += s.signum() * grow / 2.0;
         }
         cx += self.refuse.x;
-        // The open music page breathes with the bass.
-        if self.mode == Mode::Expanded && self.page == Page::Music && self.view == ui::View::Page && self.playing() {
-            w += if self.lyrics_view() { 3.0 } else { 5.0 } * spectrum::pulse();
-        }
+
         // An act can pull the notch wider, or breathe it in and out.
         if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
@@ -1961,6 +1971,12 @@ impl App {
                 self.jam_show,
                 self.lyric_line().is_some()
             ));
+        }
+        if let Some(heard) = spectrum::bands() {
+            for (bar, to) in self.eq_bars.iter_mut().zip(heard) {
+                let rate = if to > *bar { 22.0 } else { 9.0 };
+                *bar += (to - *bar) * (1.0 - (-rate * dt).exp());
+            }
         }
         let ears = self.playing() && !self.hidden && (self.eq_mix.x > 0.01 || self.jam_show || (self.expanded() && self.page == Page::Music));
         spectrum::want(ears);
