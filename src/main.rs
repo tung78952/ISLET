@@ -13,6 +13,7 @@ mod media;
 mod model;
 mod notify;
 mod sound;
+mod spectrum;
 mod pump;
 mod stage;
 mod storm;
@@ -1348,6 +1349,10 @@ impl App {
             cx += s.signum() * grow / 2.0;
         }
         cx += self.refuse.x;
+        // The open music page breathes with the bass.
+        if self.mode == Mode::Expanded && self.page == Page::Music && self.view == ui::View::Page && self.playing() {
+            w += if self.lyrics_view() { 3.0 } else { 5.0 } * spectrum::pulse();
+        }
         // An act can pull the notch wider, or breathe it in and out.
         if let Some((kind, e)) = self.act_now() {
             let f = eyes::act(kind, e);
@@ -1957,6 +1962,8 @@ impl App {
                 self.lyric_line().is_some()
             ));
         }
+        let ears = self.playing() && !self.hidden && (self.eq_mix.x > 0.01 || self.jam_show || (self.expanded() && self.page == Page::Music));
+        spectrum::want(ears);
         if self.eye_feel.show != self.logged_eyes {
             self.logged_eyes = self.eye_feel.show;
             sys::timelog(&if self.eye_feel.show { format!("eyes show look={:?}", self.eye_feel.look) } else { "eyes hide".to_string() });
@@ -2097,6 +2104,7 @@ impl App {
         let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| t.elapsed() < Duration::from_millis(ms));
         let effects = recent(self.lyr_anim.map(|x| x.0), 1100)
             || recent(self.drank_at, 1700)
+            || (self.expanded() && self.page == Page::Music && spectrum::pulse() > 0.0)
             || recent(self.pill_prev.as_ref().map(|x| x.0), 450)
             // Cards animate as they arrive (ripples, count-up, a few shakes); one left waiting for
             // an answer then holds still instead of redrawing 60 times a second. The heads-up
@@ -2545,7 +2553,8 @@ impl App {
                 sys::open_meter();
                 self.meter_on = true;
             }
-            if self.mini.feed(t, sys::audio_peak()) {
+            let level = spectrum::bands().map_or_else(sys::audio_peak, |b| b[0]);
+            if self.mini.feed(t, level) {
                 self.jam.beat(t);
                 self.kick();
             }

@@ -884,10 +884,18 @@ fn right_indicator(a: &mut App, x: f32, cy: f32) {
         return;
     }
     let t = a.born.elapsed().as_secs_f32();
+    // The sound itself when it can be heard (bass on the left, treble on the right), else a sway.
+    let heard = crate::spectrum::bands();
     for i in 0..5 {
         let fi = i as f32;
-        let wave = 0.55 * (t * (2.1 + fi * 0.37) + fi * 1.9).sin() + 0.45 * (t * (3.3 - fi * 0.29) + fi * 0.7).sin();
-        let bh = (3.0 + 7.4 * (0.5 + 0.5 * wave).clamp(0.0, 1.0)) * mix;
+        let level = match heard {
+            Some(b) => b[i],
+            None => {
+                let wave = 0.55 * (t * (2.1 + fi * 0.37) + fi * 1.9).sin() + 0.45 * (t * (3.3 - fi * 0.29) + fi * 0.7).sin();
+                (0.5 + 0.5 * wave).clamp(0.0, 1.0)
+            }
+        };
+        let bh = (3.0 + 7.4 * level) * mix;
         a.gfx.fill_rrect(Rc::new(x + i as f32 * 4.05, cy - bh / 2.0, 2.2, bh), 1.1, WHITE, (2.0 * mix).min(1.0));
     }
 }
