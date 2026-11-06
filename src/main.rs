@@ -750,6 +750,9 @@ pub struct App {
     /// When a cup was last drunk from the notch: the drop on the Care page splashes for it.
     pub drank_at: Option<Instant>,
     last_song: String,
+    /// What the time log last heard about the notch's size and the eyes (ISLET_TIMELOG only).
+    logged_size: [f32; 2],
+    logged_eyes: bool,
     /// When the title now playing came on.
     song_since: Instant,
     /// Preview run (ISLET_DEMO "sample=tour|eyes|jam|battery|0..11"): start and what it shows.
@@ -1048,6 +1051,8 @@ impl App {
             last_drink: Instant::now(),
             drank_at: None,
             last_song: String::new(),
+            logged_size: [0.0, 0.0],
+            logged_eyes: false,
             song_since: Instant::now(),
             sample: None,
             device_kind: devices::DeviceKind::Other,
@@ -1940,6 +1945,24 @@ impl App {
             self.mini_busy = false;
         }
         let t = self.target();
+        // Why the notch grows or shrinks when no one asked: the time log says what it was for.
+        if t != self.logged_size {
+            self.logged_size = t;
+            sys::timelog(&format!(
+                "size {:.0}x{:.0} mode={:?} toast={:?} act={} jam={} lyric={}",
+                t[0],
+                t[1],
+                self.mode,
+                self.toast.as_ref().map(|t| t.kind),
+                self.act_now().is_some(),
+                self.jam_show,
+                self.lyric_line().is_some()
+            ));
+        }
+        if self.eye_feel.show != self.logged_eyes {
+            self.logged_eyes = self.eye_feel.show;
+            sys::timelog(&if self.eye_feel.show { format!("eyes show look={:?}", self.eye_feel.look) } else { "eyes hide".to_string() });
+        }
         let n = ((dt / 0.004).ceil() as usize).max(1);
         let sub = dt / n as f32;
         let mut moving = false;
@@ -2513,7 +2536,11 @@ impl App {
         }
         // The bar grows for the eyes now and then, and they listen only while it is out.
         let free = self.settings.jam_mode != 0 && playing && self.pill_mix.x > 0.5 && self.toast.is_none() && self.mode == Mode::Compact && !self.yielded && !self.hidden && !self.minimal() && sys::key_idle_ms() >= 1000;
+        let was = self.jam_show;
         self.jam_show = self.jam.tick(t, free);
+        if self.jam_show != was {
+            sys::timelog(&format!("jam {} song={:?}", if self.jam_show { "on" } else { "off" }, self.last_song));
+        }
         if self.jam_show {
             self.mini.pose = eyes::Pose::Round;
             if !self.meter_on {
