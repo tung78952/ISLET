@@ -730,6 +730,8 @@ pub struct App {
     /// The calendar shows days, months or years.
     pub cal: ui::Cal,
     pub switches: std::collections::HashMap<(i32, i32), (Spring, bool)>,
+    /// Each switch's knob speed, smoothed (Liquid glass squashes the knob with it).
+    pub toggle_speed: std::collections::HashMap<(i32, i32), f32>,
     /// Glides between the steps of the reminder form.
     pub form_anim: Spring,
     wheel_held: Option<ui::WheelId>,
@@ -768,6 +770,10 @@ pub struct App {
     bg_map: Option<((u32, u32, u32), Option<ID2D1Bitmap>)>,
     backdrop_retry: Option<Instant>,
     pub glass_mix: Spring,
+    /// This frame's glass behind the open notch (the captured strip, its corner, units per px),
+    /// for the liquid buttons drawn on it; and their refraction maps by size.
+    pub glass_frame: Option<(ID2D1Bitmap1, (f32, f32), f32)>,
+    pub lens_maps: std::collections::HashMap<(u32, u32, u32), Option<ID2D1Bitmap>>,
     last_playing: Instant,
     meter_on: bool,
     mini_busy: bool,
@@ -1053,6 +1059,7 @@ impl App {
             wash_from: None,
             cal: ui::Cal::Days,
             switches: std::collections::HashMap::new(),
+            toggle_speed: std::collections::HashMap::new(),
             form_anim: Spring::new(0.0, 170.0, 22.0),
             wheel_held: None,
             wheels_moving: false,
@@ -1080,6 +1087,8 @@ impl App {
             bg_map: None,
             backdrop_retry: None,
             glass_mix: Spring::new(0.0, 330.0, 21.0),
+            glass_frame: None,
+            lens_maps: std::collections::HashMap::new(),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
@@ -1563,6 +1572,20 @@ impl App {
         let map = self.bg_map.as_ref()?.1.clone()?;
         let squeeze = ((w / target[0]).clamp(0.05, 1.5), (h / target[1]).clamp(0.05, 1.5));
         Some((bmp, map, (x0, 0.0), 1.0 / s, squeeze))
+    }
+
+    /// The refraction map for a liquid button `w`×`h` px with corners `rad` px: a rim a quarter of
+    /// its height deep, bending by up to a third of its height (after the repo's lens(12, 24) on a
+    /// 48 tall button, a little gentler).
+    pub fn lens_map(&mut self, w: u32, h: u32, rad: u32) -> Option<ID2D1Bitmap> {
+        if let Some(m) = self.lens_maps.get(&(w, h, rad)) {
+            return m.clone();
+        }
+        let hh = h as f32;
+        let px = glass::map(w, h, rad as f32, hh * 0.25, hh * 0.33);
+        let bmp = self.gfx.bitmap(w, h, &px);
+        self.lens_maps.insert((w, h, rad), bmp.clone());
+        bmp
     }
 
     /// A prop's picture, `tinted` for the part in the character's colour.
@@ -2277,6 +2300,8 @@ impl App {
         }
         self.backdrop = None;
         self.bg_map = None;
+        self.glass_frame = None;
+        self.lens_maps.clear();
         self.glass_maps.clear();
         self.props.clear();
         self.pics.clear();

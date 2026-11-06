@@ -69,6 +69,16 @@ impl Rc {
     }
 }
 
+/// One liquid button's effects: the piece of the screen under it, softened and brightened, and
+/// its refraction map moved to where the button is.
+struct LensFx {
+    crop: ID2D1Effect,
+    blur: ID2D1Effect,
+    sat: ID2D1Effect,
+    place: ID2D1Effect,
+    chain: GlassChain,
+}
+
 /// Three displacements (one per colour, a little apart), their colour picks, and their sum.
 struct GlassChain {
     disp: [ID2D1Effect; 3],
@@ -106,6 +116,10 @@ pub struct Gfx {
     /// What the backdrop chain was last wired to (picture, map, blur, bend): wiring it again
     /// every frame cost far more than drawing it.
     glass_bg_wired: std::cell::Cell<(usize, usize, u32, u32)>,
+    /// Liquid buttons: one effect chain per button drawn this frame (they must not share), what
+    /// each was last wired to, and how many have been used so far this frame.
+    lens_pool: std::cell::RefCell<Vec<(LensFx, (usize, usize, [u32; 4]))>>,
+    lens_used: std::cell::Cell<usize>,
     icon_family: HSTRING,
     pub w: i32,
     pub h: i32,
@@ -210,6 +224,8 @@ impl Gfx {
             glass_fx: std::cell::RefCell::new(None),
             glass_bg: std::cell::RefCell::new(None),
             glass_bg_wired: std::cell::Cell::new((0, 0, 0, 0)),
+            lens_pool: std::cell::RefCell::new(Vec::new()),
+            lens_used: std::cell::Cell::new(0),
             icon_family,
             w: 0,
             h: 0,
@@ -290,6 +306,7 @@ impl Gfx {
         self.dirty = RECT { left: 0, top: 0, right: self.w, bottom: self.h };
         self.rt.BeginDraw();
         self.depth.set(0);
+        self.lens_used.set(0);
         self.rt.Clear(Some(&rgba(0, 0.0)));
         self.off = (0.0, 0.0);
         self.rt.SetTransform(&self.base());
@@ -890,6 +907,98 @@ impl Gfx {
             self.draw_scaled(&image, at, k, k);
             true
         }
+    }
+
+    /// A liquid button: the screen under `r` (window units; `strip` is the captured screen with
+    /// its top-left at `at`, `k` units per pixel) softened, brightened and bent at its rim by
+    /// `map` (made for the button's size in pixels) up to `amount` px, inside the rounded
+    /// rectangle. The caller adds the surface and the light on top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn liquid_lens(&self, strip: &ID2D1Bitmap1, at: (f32, f32), k: f32, r: Rc, rad: f32, map: &ID2D1Bitmap, amount: f32) -> bool {
+        unsafe {
+            let slot = self.lens_used.get();
+            let mut pool = self.lens_pool.borrow_mut();
+            if pool.len() <= slot {
+                let (Some(crop), Some(blur), Some(sat), Some(place), Some(chain)) =
+                    (self.effect(&CLSID_D2D1Crop), self.effect(&CLSID_D2D1GaussianBlur), self.effect(&CLSID_D2D1Saturation), self.effect(&CLSID_D2D12DAffineTransform), self.glass_chain())
+                else {
+                    return false;
+                };
+                let _ = blur.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_le_bytes());
+                let _ = sat.SetValue(D2D1_SATURATION_PROP_SATURATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &1.5f32.to_le_bytes());
+                pool.push((LensFx { crop, blur, sat, place, chain }, (0, 0, [0; 4])));
+            }
+            self.lens_used.set(slot + 1);
+            let (fx, wired) = &mut pool[slot];
+            // The button in the strip's pixels.
+            let (px, py, pw, ph) = ((r.x - at.0) / k, (r.y - at.1) / k, r.w / k, r.h / k);
+            let wiring = (windows::core::Interface::as_raw(strip) as usize, windows::core::Interface::as_raw(map) as usize, [px.to_bits(), py.to_bits(), pw.to_bits(), amount.to_bits()]);
+            if *wired != wiring {
+                let (Ok(src), Ok(field)) = (windows::core::Interface::cast::<ID2D1Image>(strip), windows::core::Interface::cast::<ID2D1Image>(map)) else { return false };
+                let pad = 6.0 / k;
+                let rect = [px - pad, py - pad, px + pw + pad, py + ph + pad];
+                let bytes: Vec<u8> = rect.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let _ = fx.crop.SetValue(D2D1_CROP_PROP_RECT.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, &bytes);
+                fx.crop.SetInput(0, &src, true);
+                let Ok(piece) = fx.crop.GetOutput() else { return false };
+                let _ = fx.blur.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &(2.0 / k).to_le_bytes());
+                fx.blur.SetInput(0, &piece, true);
+                let Ok(soft) = fx.blur.GetOutput() else { return false };
+                fx.sat.SetInput(0, &soft, true);
+                let Ok(vivid) = fx.sat.GetOutput() else { return false };
+                let m = Matrix3x2::translation(px, py);
+                let cells = [m.M11, m.M12, m.M21, m.M22, m.M31, m.M32];
+                let bytes: Vec<u8> = cells.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let _ = fx.place.SetValue(D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_3X2, &bytes);
+                fx.place.SetInput(0, &field, true);
+                let Ok(placed) = fx.place.GetOutput() else { return false };
+                if Self::refract(&fx.chain, &vivid, &placed, amount).is_none() {
+                    return false;
+                }
+                *wired = wiring;
+            }
+            let Ok(image) = fx.chain.sum.GetOutput() else { return false };
+            let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
+            let Ok(shape) = self.factory.CreateRoundedRectangleGeometry(&rr) else { return false };
+            let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(&shape) else { return false };
+            let Some(layer) = self.next_layer() else { return false };
+            let mut params = D2D1_LAYER_PARAMETERS {
+                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
+                geometricMask: std::mem::ManuallyDrop::new(Some(mask)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: self.alpha.clamp(0.0, 1.0),
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.rt.PushLayer(&params, &layer);
+            std::mem::ManuallyDrop::drop(&mut params.geometricMask);
+            self.draw_scaled(&image, at, k, k);
+            self.pop_layer();
+            true
+        }
+    }
+
+    /// A rounded rectangle's rim lit like glass: `bright` toward its top-left and bottom-right,
+    /// `faint` in between.
+    pub fn stroke_rrect_lit(&self, r: Rc, rad: f32, width: f32, bright: f32, faint: f32) {
+        let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
+        let mid = (r.cx(), r.cy());
+        unsafe {
+            if let Some(b) = self.linear((r.x, r.y), mid, (0xFFFFFF, bright), (0xFFFFFF, faint / 2.0)) {
+                self.rt.DrawRoundedRectangle(&rr, &b, width, None);
+            }
+            if let Some(b) = self.linear(mid, (r.x + r.w, r.y + r.h), (0xFFFFFF, faint / 2.0), (0xFFFFFF, bright)) {
+                self.rt.DrawRoundedRectangle(&rr, &b, width, None);
+            }
+        }
+    }
+
+    /// Scales subsequent drawing by (sx, sy) about (cx, cy) and moves it by (dx, dy), on top of
+    /// the current offset.
+    pub fn zoom_xy(&self, cx: f32, cy: f32, sx: f32, sy: f32, dx: f32, dy: f32) {
+        let about = Matrix3x2::translation(-cx, -cy) * Matrix3x2::scale(sx, sy) * Matrix3x2::translation(cx + dx, cy + dy);
+        unsafe { self.rt.SetTransform(&(about * Matrix3x2::translation(self.off.0, self.off.1) * self.base())) };
     }
 
     /// The notch's outline lit like glass: `bright` toward its top-left and bottom-right corners,

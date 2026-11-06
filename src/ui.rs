@@ -308,8 +308,35 @@ fn btn(a: &mut App, r: Rc, grow: f32) -> f32 {
     if changed {
         a.kick();
     }
-    a.gfx.zoom(r.cx(), r.cy(), 1.0 + grow * h);
+    if glass && pressed {
+        // Held and dragged: it follows the pointer a little (tanh, so never far) and stretches
+        // toward it (after LiquidButton).
+        let (dx, dy) = a.down.map_or((0.0, 0.0), |(x, y, _)| (a.mouse.0 - x, a.mouse.1 - y));
+        let (sx, sy, ox, oy) = liquid_drag(r, dx, dy, 1.0 + grow * h);
+        a.gfx.zoom_xy(r.cx(), r.cy(), sx, sy, ox, oy);
+    } else {
+        a.gfx.zoom(r.cx(), r.cy(), 1.0 + grow * h);
+    }
     h
+}
+
+/// The toggle knob's squash at speed `v` (its spring's, units per second): wider and flatter
+/// the faster it goes, never more than a fifth (after LiquidToggle).
+pub fn toggle_squash(v: f32) -> (f32, f32) {
+    let v = v / 8.0;
+    (1.0 / (1.0 - (v.abs() * 0.75).min(0.2)), 1.0 - (v.abs() * 0.25).min(0.2))
+}
+
+/// How a held liquid button follows a drag of (dx, dy): its scale (x, y) and offset, starting
+/// from the press scale `base`.
+pub fn liquid_drag(r: Rc, dx: f32, dy: f32, base: f32) -> (f32, f32, f32, f32) {
+    let reach = r.h * 0.5;
+    let follow = |d: f32| reach * (0.05 * d / reach).tanh();
+    let longest = r.w.max(r.h);
+    let stretch = 4.0 / r.h;
+    let sx = base + stretch * (dx / longest).abs().min(1.0) * (r.w / r.h).min(1.0);
+    let sy = base + stretch * (dy / longest).abs().min(1.0) * (r.h / r.w).min(1.0);
+    (sx, sy, follow(dx), follow(dy))
 }
 
 /// Blends two 0xRRGGBB colors.
@@ -616,6 +643,7 @@ pub fn draw(a: &mut App) {
     // Liquid glass, open: the screen behind shows through the notch, blurred, brighter in colour
     // and bent at the rim; a thin black still lies over it so the words stay readable.
     let glass_k = a.glass_mix.x.clamp(0.0, 1.0);
+    a.glass_frame = None;
     if glass_k > 0.01 {
         let target = a.target();
         if let Some((bmp, map, at, k, squeeze)) = a.backdrop_frame(cx, bw, bh, target) {
@@ -623,6 +651,9 @@ pub fn draw(a: &mut App) {
             let base = a.gfx.alpha;
             a.gfx.alpha = base * glass_k;
             a.gfx.backdrop_glass(&bmp, &map, at, k, squeeze, 10.0 * a.gfx.scale, 10.0 * a.gfx.scale);
+            if glass_k > 0.6 {
+                a.glass_frame = Some((bmp.clone(), at, k));
+            }
             a.gfx.alpha = base;
             if clipped {
                 a.gfx.pop_layer();
@@ -2031,10 +2062,33 @@ fn glass(g: &Gfx, r: Rc, rad: f32, h: f32) {
     g.stroke_rrect_diag(rim, (rad - 0.5).max(0.0), 1.0, (WHITE, 0.42 + 0.2 * h.min(1.0)), (WHITE, 0.05));
 }
 
+/// A liquid glass button (after Kyant0's LiquidButton): the screen behind bent at its rim, then a
+/// clear white surface (or the page's colour for a main button), and light caught at its rim;
+/// brighter while pressed. Without the screen behind (glass not open) it is the light glass.
+fn liquid(a: &mut App, r: Rc, rad: f32, h: f32, tint: Option<u32>) {
+    let press = ((h - 1.0) / 0.8).clamp(0.0, 1.0);
+    let s = a.gfx.scale;
+    let bent = a.glass_frame.clone().is_some_and(|(strip, at, k)| {
+        let (w, hh, rr) = ((r.w * s).round() as u32, (r.h * s).round() as u32, (rad * s).round() as u32);
+        a.lens_map(w.max(4), hh.max(4), rr).is_some_and(|map| a.gfx.liquid_lens(&strip, at, k, r, rad, &map, r.h * s * 0.33))
+    });
+    if !bent {
+        glass(&a.gfx, r, rad, h);
+        return;
+    }
+    match tint {
+        Some(c) => a.gfx.fill_rrect(r, rad, c, 0.62 + 0.1 * press),
+        None => a.gfx.fill_rrect(r, rad, WHITE, 0.10 + 0.06 * h.clamp(0.0, 1.0)),
+    }
+    a.gfx.fill_rrect(r, rad, WHITE, 0.08 * press);
+    let rim = Rc::new(r.x + 0.4, r.y + 0.4, r.w - 0.8, r.h - 0.8);
+    a.gfx.stroke_rrect_lit(rim, (rad - 0.4).max(0.0), 0.8, 0.5, 0.04);
+}
+
 fn head_button(a: &mut App, r: Rc, act: Act, draw: impl FnOnce(&Gfx, f32, f32)) {
     let h = btn(a, r, 0.15);
     if a.settings.glass {
-        glass(&a.gfx, r, r.w / 2.0, h);
+        liquid(a, r, r.w / 2.0, h, None);
     } else {
         a.gfx.fill_circle(r.cx(), r.cy(), r.w / 2.0, r.w / 2.0, 0xFFFFFF, 0.1 + 0.12 * h);
     }
@@ -2577,6 +2631,18 @@ mod layout_tests {
     }
 
     #[test]
+    fn a_held_button_follows_a_drag_only_a_little() {
+        let r = Rc::new(0.0, 0.0, 36.0, 36.0);
+        let (_, _, ox, _) = liquid_drag(r, 400.0, 0.0, 1.1);
+        assert!(ox > 0.0 && ox <= 18.0, "toward the drag, never past half its height: {ox}");
+        let (sx, sy, _, _) = liquid_drag(r, 30.0, 0.0, 1.0);
+        assert!(sx > sy, "it stretches along the drag");
+        let (q, p) = toggle_squash(40.0);
+        assert!((1.0..=1.25).contains(&q) && (0.8..=1.0).contains(&p), "the knob squashes, at most a fifth");
+        assert_eq!(toggle_squash(0.0), (1.0, 1.0));
+    }
+
+    #[test]
     fn the_repeat_is_one_of_three_or_none() {
         assert_eq!(repeat_choice([true; 7]), Some(0));
         assert_eq!(repeat_choice(REPEATS[1]), Some(1));
@@ -2669,7 +2735,9 @@ fn labelled_hot(a: &mut App, cx: f32, cy: f32, label: &str, live: bool, hot: u32
     let h = if live { btn(a, r, 0.08) } else { 0.0 };
     let y = cy - 1.5 * h.clamp(0.0, 1.0);
     if a.settings.glass {
-        glass(&a.gfx, Rc::new(cx - R, y - R, 2.0 * R, 2.0 * R), R, h);
+        // The main buttons wear the page's colour; the rest are clear.
+        let tint = (hot != 0x5A5A5E).then_some(hot);
+        liquid(a, Rc::new(cx - R, y - R, 2.0 * R, 2.0 * R), R, h, tint);
     } else {
         a.gfx.fill_circle(cx, y, R, R, mix(BUTTON, hot, h.clamp(0.0, 1.0)), 1.0);
     }
@@ -2760,10 +2828,7 @@ fn focus_chip(a: &mut App, r: Rc, key: i32, on: bool, words: &str, live: bool, a
     let k = flip(a, key, on);
     let h = if live { btn(a, r, 0.06) } else { 0.0 };
     if a.settings.glass {
-        let base = a.gfx.alpha;
-        a.gfx.alpha = base * (1.0 - k);
-        glass(&a.gfx, r, 14.0, h);
-        a.gfx.alpha = base;
+        liquid(a, r, 14.0, h, None);
     } else {
         a.gfx.fill_rrect(r, 14.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
     }
@@ -3792,13 +3857,28 @@ fn toggle(a: &mut App, r: Rc, key: (i32, i32), on: bool, act: Act, tint: (u32, u
     let radius = r.h / 2.0 - 3.0;
     let tone = mix(0xB4B4B8, 0xF2F2F6, k);
     if a.settings.glass {
-        // Liquid glass: the knob widens while pressed and stretches as it slides.
-        let speed = a.switches.get(&key).map_or(0.0, |e| e.0.v.abs());
-        let pressed = hovering(a, r) && a.down.is_some_and(|(x, y, _)| r.contains(x, y));
-        let wide = radius * (1.0 + if pressed { 0.4 } else { 0.0 } + (speed * 0.05).min(0.25));
-        let half = (r.w / 2.0 - 3.0).min(wide);
-        let at = knob.clamp(r.x + 3.0 + half, r.x + r.w - 3.0 - half);
-        a.gfx.fill_rrect(Rc::new(at - half, r.cy() - radius, 2.0 * half, 2.0 * radius), radius, tone, 1.0);
+        // Liquid glass (after LiquidToggle): pressed or moving, the knob grows half again and turns
+        // to clear glass; it squashes with its speed, smoothed so it never flickers.
+        let v = a.switches.get(&key).map_or(0.0, |e| e.0.v);
+        let smooth = a.toggle_speed.entry(key).or_insert(0.0);
+        *smooth += (v - *smooth) * 0.25;
+        let (sx, sy) = toggle_squash(*smooth);
+        let moving = smooth.abs() > 0.05;
+        let press = (((h - 0.3) / 0.7).clamp(0.0, 1.0)).max(if moving { 1.0 } else { 0.0 });
+        let grow = 1.0 + 0.5 * press;
+        let (kw, kh) = (2.0 * radius * grow * sx * 1.3, 2.0 * radius * grow * sy);
+        let thumb = Rc::new(knob - kw / 2.0, r.cy() - kh / 2.0, kw, kh);
+        if press > 0.05 {
+            // The track shows through the clear knob.
+            let base = a.gfx.alpha;
+            a.gfx.alpha = base * press;
+            glass(&a.gfx, thumb, kh / 2.0, h);
+            a.gfx.alpha = base;
+        }
+        a.gfx.fill_rrect(thumb, kh / 2.0, tone, 1.0 - 0.85 * press);
+        if moving {
+            a.kick();
+        }
     } else {
         a.gfx.fill_circle(knob, r.cy(), radius, radius, tone, 1.0);
     }
@@ -4090,7 +4170,7 @@ fn form(a: &mut App, lx: f32) {
         let chosen = repeat_choice(days);
         let group = Rc::new(lx + 24.0, 88.0, 172.0, 30.0);
         if a.settings.glass {
-            glass(&a.gfx, group, 15.0, 0.0);
+            liquid(a, group, 15.0, 0.0, None);
         } else {
             a.gfx.fill_rrect(group, 15.0, 0x1A1A1C, 1.0);
         }
@@ -4118,7 +4198,11 @@ fn form(a: &mut App, lx: f32) {
     let ready = !text.trim().is_empty();
     let save = Rc::new(lx + 340.0, 63.0, 62.0, 36.0);
     let h = if ready { btn(a, save, 0.06) } else { 0.0 };
-    a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0x5A92FF, h) } else { 0x3A3A3E }, 1.0);
+    if a.settings.glass {
+        liquid(a, save, 18.0, h, Some(if ready { REMIND } else { 0x3A3A3E }));
+    } else {
+        a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0x5A92FF, h) } else { 0x3A3A3E }, 1.0);
+    }
     a.gfx.ui("Save", save, BODY, 600, if ready { WHITE } else { 0x8E8E93 }, 1.0, Align::C);
     a.gfx.unzoom();
     if ready {
