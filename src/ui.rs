@@ -18,7 +18,7 @@ const GREY: u32 = 0x8C8C8C;
 const BLUE: u32 = 0x4DBDFF;
 const CYAN: u32 = 0x66DBFF;
 /// Water is water-coloured whoever the character is.
-const WATER: u32 = 0x35D6E8;
+pub const WATER: u32 = 0x35D6E8;
 pub const EVENING: u32 = 0xFF8A2A;
 /// The colour rising behind the reminder form.
 pub const CALM: u32 = 0x3E7BFF;
@@ -241,6 +241,8 @@ pub enum Act {
     GuideBack,
     ShutdownCancel,
     FocusMode(bool),
+    /// The Focus page's wheel of lengths: slide it in (true) or put it away.
+    FocusPick(bool),
     PomoPlan(u32, u32),
     FormPreset(u8),
     DoNow(Tile),
@@ -772,6 +774,9 @@ const SUN_DEEP: u32 = 0xB0140E;
 
 /// How far the sun's centre sits below the horizon (negative: above) when `used` of the time is
 /// gone: well up at the start, wholly under the line at the end.
+/// Where a waiting sun sits, below the horizon by this many radii: about a quarter shows.
+const SUN_WAITS: f32 = 0.5;
+
 fn sun_below(used: f32, r: f32) -> f32 {
     -r * 0.7 + used.clamp(0.0, 1.0) * r * 1.9
 }
@@ -779,11 +784,13 @@ fn sun_below(used: f32, r: f32) -> f32 {
 /// The focus timer: a sun of lit lines, like the eyes, setting over a sea of hairlines. Its dark
 /// gaps are thin up high and thicker toward the sea, and slide down slowly while the time
 /// runs; it deepens to a darker red as it goes, and its light on the water goes with it. `big`:
-/// the Focus page; otherwise the small one in the closed notch.
-fn sun_scene(a: &mut App, cx: f32, horizon: f32, r: f32, left: f32, running: bool, big: bool) {
+/// the Focus page; otherwise the small one in the closed notch. `rise`: 0 while a session waits
+/// to start (only its top peeks over the line), 1 once it runs.
+#[allow(clippy::too_many_arguments)]
+fn sun_scene(a: &mut App, cx: f32, horizon: f32, r: f32, left: f32, running: bool, big: bool, rise: f32) {
     let t = a.born.elapsed().as_secs_f32();
     let used = 1.0 - left.clamp(0.0, 1.0);
-    let sun_y = horizon + sun_below(used, r);
+    let sun_y = horizon + SUN_WAITS * r + (sun_below(used, r) - SUN_WAITS * r) * rise.clamp(0.0, 1.0);
     // How much of it is still above the line.
     let up = ((horizon - (sun_y - r)) / (2.0 * r)).clamp(0.0, 1.0);
     let g = &a.gfx;
@@ -837,9 +844,9 @@ fn sun_scene(a: &mut App, cx: f32, horizon: f32, r: f32, left: f32, running: boo
     }
 }
 
-/// The focus timer on the Focus page.
-fn sun_slices(a: &mut App, cx: f32, left: f32, running: bool) {
-    sun_scene(a, cx, 104.0, 28.0, left, running, true);
+/// The focus timer on the Focus page; `rise` as in `sun_scene`.
+fn sun_slices(a: &mut App, cx: f32, left: f32, running: bool, rise: f32) {
+    sun_scene(a, cx, 104.0, 28.0, left, running, true, rise);
 }
 
 /// The small sun that stays in the notch while focus runs, moving with it as it opens.
@@ -856,7 +863,7 @@ fn focus_sun(a: &mut App, left: f32, w: f32, h: f32) {
     let base = a.gfx.alpha;
     // The Focus page has the big one; two suns would be one too many.
     a.gfx.alpha = a.live_alpha * if a.page == Page::Pomo && a.view == View::Page { 1.0 - open } else { 1.0 };
-    sun_scene(a, at.0, at.1 + 8.0 * 0.42, 8.0, (time / total) as f32, running, false);
+    sun_scene(a, at.0, at.1 + 8.0 * 0.42, 8.0, (time / total) as f32, running, false, 1.0);
     a.gfx.alpha = base;
 }
 
@@ -2557,6 +2564,14 @@ mod layout_tests {
 fn pomo(a: &mut App, lx: f32) {
     title(a, lx, "Focus");
     let run = a.focus_mix.x.clamp(0.0, 1.0);
+    // One sun for both: it waits at the horizon, rises as a session starts, then sets with it.
+    let (left_s, total_s, running, _) = a.pomo_view();
+    let left = if a.brain.focus.is_some() { (left_s / total_s).clamp(0.0, 1.0) as f32 } else { 1.0 };
+    // Pointing at Start lifts it a little, as if about to come up.
+    let start = Rc::new(lx + FOCUS_GO.0 - 20.0, FOCUS_GO.1 - 20.0, 40.0, 40.0);
+    let near = run < 0.5 && !a.focus_pick && hovering(a, start);
+    let peek = flip(a, 40, near) * 0.12;
+    sun_slices(a, lx + 104.0, left, running, run + peek * (1.0 - run));
     let base = a.gfx.alpha;
     if run < 0.99 {
         a.gfx.alpha = base * (1.0 - run);
@@ -2594,56 +2609,95 @@ fn labelled_hot(a: &mut App, cx: f32, cy: f32, label: &str, live: bool, hot: u32
     }
 }
 
+/// Where the Start (and, while the wheel is out, Done) button sits on the Focus page.
+const FOCUS_GO: (f32, f32) = (385.0, 72.0);
+
+/// The Focus page before a session: the sun waits on the left; on the right the kind of session,
+/// the length, and Start. "···" slides the controls away for the wheel; Done brings them back.
 fn focus_idle(a: &mut App, lx: f32, live: bool) {
     let pomodoro = a.settings.pomodoro;
-    // Plain focus or Pomodoro: a pill glides to the one in use.
-    let mode = flip(a, 1, pomodoro);
-    a.gfx.fill_rrect(Rc::new(lx + 34.0 + mode * 84.0, 42.0, 84.0, 26.0), 13.0, BUTTON, 1.0);
-    for (i, (name, on)) in [("Focus", false), ("Pomodoro", true)].into_iter().enumerate() {
-        let r = Rc::new(lx + 34.0 + i as f32 * 84.0, 42.0, 84.0, 26.0);
-        let lit = if on { mode } else { 1.0 - mode };
-        let h = if live { btn(a, r, 0.03) } else { 0.0 };
-        a.gfx.ui(name, r, SMALL, 500, mix(0x8E8E93, WHITE, lit.max(h.clamp(0.0, 1.0))), 1.0, Align::C);
-        a.gfx.unzoom();
-        if live {
-            hit(a, r, Act::FocusMode(on));
+    let pick = flip(a, 41, a.focus_pick);
+    divider(a, lx + 200.0, 48.0, 112.0);
+    let base = a.gfx.alpha;
+    let off = a.gfx.off;
+    if pick < 0.99 {
+        let live = live && !a.focus_pick;
+        a.gfx.alpha = base * (1.0 - pick);
+        a.gfx.offset(off.0 - 26.0 * pick, off.1);
+        // Plain focus or Pomodoro: a pill glides to the one in use.
+        let mode = flip(a, 1, pomodoro);
+        const PILL: f32 = 68.0;
+        a.gfx.fill_rrect(Rc::new(lx + 212.0 + mode * PILL, 40.0, PILL, 26.0), 13.0, BUTTON, 1.0);
+        for (i, (name, on)) in [("Focus", false), ("Pomodoro", true)].into_iter().enumerate() {
+            let r = Rc::new(lx + 212.0 + i as f32 * PILL, 40.0, PILL, 26.0);
+            let lit = if on { mode } else { 1.0 - mode };
+            let h = if live { btn(a, r, 0.03) } else { 0.0 };
+            a.gfx.ui(name, r, SMALL, 500, mix(0x8E8E93, WHITE, lit.max(h.clamp(0.0, 1.0))), 1.0, Align::C);
+            a.gfx.unzoom();
+            if live {
+                hit(a, r, Act::FocusMode(on));
+            }
         }
-    }
-    let chosen = a.settings.pomo_work;
-    let rest = a.settings.pomo_rest;
-    const CY: f32 = 98.0;
-    let plans: [(u32, u32); 3] = [(25, 5), (50, 10), (90, 15)];
-    for (i, (work, pause)) in plans.into_iter().enumerate() {
-        let r = Rc::new(lx + 34.0 + i as f32 * 58.0, CY - 15.0, 52.0, 30.0);
-        let on = work == chosen && (!pomodoro || pause == rest);
-        let k = flip(a, 10 + i as i32, on);
-        let h = if live { btn(a, r, 0.06) } else { 0.0 };
-        a.gfx.fill_rrect(r, 15.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
-        a.gfx.stroke_rrect(r, 15.0, 1.5, RED, k);
-        let tone = (mix(0xE0E0E2, RED, k), mix(0xE0E0E2, RED, k));
-        swap_text(a, r, 13.5, 600, tone, Align::C, (&work.to_string(), &format!("{work}/{pause}")), mode);
-        a.gfx.unzoom();
-        if live {
-            hit(a, r, if pomodoro { Act::PomoPlan(work, pause) } else { Act::PomoMinutes(work) });
+        // The lengths: three set ones, and "···" for the wheel, which shows any other choice.
+        let (chosen, rest) = (a.settings.pomo_work, a.settings.pomo_rest);
+        let plans: [(u32, u32); 3] = [(25, 5), (50, 10), (90, 15)];
+        const CHIP: f32 = 34.0;
+        let mut set = false;
+        for (i, (work, pause)) in plans.into_iter().enumerate() {
+            let r = Rc::new(lx + 212.0 + i as f32 * (CHIP + 4.0), 82.0, CHIP, 28.0);
+            let on = work == chosen && (!pomodoro || pause == rest);
+            set |= on;
+            let words = if pomodoro { format!("{work}/{pause}") } else { work.to_string() };
+            focus_chip(a, r, 10 + i as i32, on, &words, live, if pomodoro { Act::PomoPlan(work, pause) } else { Act::PomoMinutes(work) });
         }
+        let r = Rc::new(lx + 212.0 + 3.0 * (CHIP + 4.0), 82.0, CHIP, 28.0);
+        let other = if pomodoro { format!("×{}", a.settings.pomo_rounds) } else if set { "···".to_string() } else { chosen.to_string() };
+        focus_chip(a, r, 13, !pomodoro && !set, &other, live, Act::FocusPick(true));
+        // Start, red with a soft glow behind it.
+        let (gx, gy) = (lx + FOCUS_GO.0, FOCUS_GO.1);
+        a.gfx.glow_ellipse(gx, gy, 26.0, 26.0, RED, 0.16);
+        labelled(a, gx, gy, "Start", live, Act::PomoToggle, |g, x, y| icon::play(g, x + 1.0, y, 12.0, RED, 1.0));
+        a.gfx.offset(off.0, off.1);
     }
-    divider(a, lx + 216.0, 48.0, 112.0);
-    let area = Rc::new(lx + 224.0, 36.0, 96.0, 90.0);
-    if pomodoro {
-        let rounds: Vec<String> = (1..=8).map(|n| if n == 1 { "1 round".to_string() } else { format!("{n} rounds") }).collect();
-        wheel_sized(a, WheelId::Rounds, area, &rounds, 18.0);
-    } else {
-        let lengths: Vec<String> = (0..FOCUS_STEPS).map(|i| format!("{} min", focus_minutes(i))).collect();
-        wheel_sized(a, WheelId::FocusMinutes, area, &lengths, 20.0);
+    if pick > 0.01 {
+        let live = live && a.focus_pick;
+        a.gfx.alpha = base * pick;
+        a.gfx.offset(off.0 + 30.0 * (1.0 - pick), off.1);
+        let area = Rc::new(lx + 222.0, 30.0, 110.0, 96.0);
+        if pomodoro {
+            let rounds: Vec<String> = (1..=8).map(|n| if n == 1 { "1 round".to_string() } else { format!("{n} rounds") }).collect();
+            wheel_sized(a, WheelId::Rounds, area, &rounds, 18.0, RED);
+        } else {
+            let lengths: Vec<String> = (0..FOCUS_STEPS).map(|i| format!("{} min", focus_minutes(i))).collect();
+            wheel_sized(a, WheelId::FocusMinutes, area, &lengths, 20.0, RED);
+        }
+        if !live {
+            // Only the wheel in use takes the pointer.
+            a.hits.retain(|(_, act)| !matches!(act, Act::Wheel(WheelId::Rounds | WheelId::FocusMinutes)));
+        }
+        labelled(a, lx + FOCUS_GO.0, FOCUS_GO.1, "Done", live, Act::FocusPick(false), |g, x, y| icon::tick(g, x, y, RED, 1.0));
+        a.gfx.offset(off.0, off.1);
     }
-    divider(a, lx + 328.0, 48.0, 112.0);
-    labelled(a, lx + 368.0, 72.0, "Start", live, Act::PomoToggle, |g, x, y| icon::play(g, x + 1.0, y, 12.0, RED, 1.0));
+    a.gfx.alpha = base;
+}
+
+/// One length chip on the Focus page: outlined red when it is the one chosen.
+#[allow(clippy::too_many_arguments)]
+fn focus_chip(a: &mut App, r: Rc, key: i32, on: bool, words: &str, live: bool, act: Act) {
+    let k = flip(a, key, on);
+    let h = if live { btn(a, r, 0.06) } else { 0.0 };
+    a.gfx.fill_rrect(r, 14.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
+    a.gfx.stroke_rrect(r, 14.0, 1.5, RED, k);
+    let size = if words.chars().count() > 3 { 11.5 } else { 13.0 };
+    a.gfx.ui(words, r, size, 600, mix(0xE0E0E2, RED, k), 1.0, Align::C);
+    a.gfx.unzoom();
+    if live {
+        hit(a, r, act);
+    }
 }
 
 fn focus_running(a: &mut App, lx: f32, live: bool) {
-    let (left_s, total_s, running, phase) = a.pomo_view();
-    let left = (left_s / total_s).clamp(0.0, 1.0) as f32;
-    sun_slices(a, lx + 104.0, left, running);
+    let (left_s, _, running, phase) = a.pomo_view();
     pic(a, "ic_focus", lx + 217.0, 58.0, 15.0, RED, 1.0);
     a.gfx.ui(&phase, Rc::new(lx + 230.0, 48.0, 76.0, 20.0), SMALL, 400, 0xB8B8BC, 1.0, Align::L);
     a.gfx.ui(&clock_text(left_s), Rc::new(lx + 208.0, 68.0, 96.0, 38.0), 28.0, 600, WHITE, 1.0, Align::L);
@@ -3136,9 +3190,9 @@ fn goal(a: &mut App, lx: f32) {
     let goals: Vec<String> = model::GOALS.iter().map(|g| format!("{:.1} L", *g as f32 / 1000.0)).collect();
     let (base, k) = (a.gfx.alpha, a.pick_mix.x.clamp(0.0, 1.0));
     a.gfx.alpha = base * (1.0 - 0.72 * k);
-    wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 36.0, 140.0, 92.0), &cups, 20.0);
+    wheel_sized(a, WheelId::Cup, Rc::new(lx + 60.0, 36.0, 140.0, 92.0), &cups, 20.0, WATER);
     a.gfx.alpha = base * (0.28 + 0.72 * k);
-    wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 36.0, 130.0, 92.0), &goals, 20.0);
+    wheel_sized(a, WheelId::Goal, Rc::new(lx + 210.0, 36.0, 130.0, 92.0), &goals, 20.0, WATER);
     a.gfx.alpha = base;
     form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
@@ -3147,9 +3201,9 @@ fn bed(a: &mut App, lx: f32) {
     back_title(a, lx, "Bedtime", Act::View(View::Care(Tile::Sleep)));
     let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
     let quarters: Vec<String> = (0..4).map(|q| format!("{:02}", q * 15)).collect();
-    wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 36.0, 76.0, 92.0), &hours, 28.0);
+    wheel_sized(a, WheelId::BedHour, Rc::new(lx + 118.0, 36.0, 76.0, 92.0), &hours, 28.0, WHITE);
     a.gfx.ui(":", Rc::new(lx + 198.0, 60.0, 24.0, 40.0), 26.0, 600, WHITE, 1.0, Align::C);
-    wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 36.0, 76.0, 92.0), &quarters, 28.0);
+    wheel_sized(a, WheelId::BedMinute, Rc::new(lx + 226.0, 36.0, 76.0, 92.0), &quarters, 28.0, WHITE);
     form_button(a, lx + 376.0, 82.0, FormButton::Done, Act::SaveWheels);
 }
 
@@ -3194,10 +3248,21 @@ fn back_title(a: &mut App, lx: f32, title: &str, act: Act) {
 }
 
 /// A rolling picker: the value in the middle is the choice, the others lean back and fade.
-fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
+/// The chosen value is lit in the page's own colour (`tint`), held between two hairlines that
+/// fade out at both ends like the Focus sun's horizon; they flash as a value rolls past.
+fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32, tint: u32) {
     let row = a.wheels[id as usize].row;
     let pos = a.wheels[id as usize].pos;
+    let flash = (1.0 - a.wheels[id as usize].since_tick / 0.25).clamp(0.0, 1.0);
     a.gfx.push_clip(r);
+    let cy = r.cy();
+    {
+        let (dy, alpha, half) = (big * 0.78, 0.55 + 0.4 * flash, r.w / 2.0 - 4.0);
+        for y in [cy - dy, cy + dy] {
+            a.gfx.fill_rrect_hgrad(Rc::new(r.cx() - half, y - 0.6, half, 1.2), 0.0, (tint, 0.0), (tint, alpha));
+            a.gfx.fill_rrect_hgrad(Rc::new(r.cx(), y - 0.6, half, 1.2), 0.0, (tint, alpha), (tint, 0.0));
+        }
+    }
     let first = (pos.floor() as i32 - 2).max(0);
     for i in first..(pos.ceil() as i32 + 3).min(labels.len() as i32) {
         let d = i as f32 - pos;
@@ -3208,7 +3273,7 @@ fn wheel_sized(a: &mut App, id: WheelId, r: Rc, labels: &[String], big: f32) {
         let y = r.cy() + row * 1.2 * (d * 0.85).sin() / 0.85;
         let near = (1.0 - d.abs()).clamp(0.0, 1.0);
         let size = big * (0.52 + 0.48 * near);
-        let tone = mix(0x6A6A6A, WHITE, near);
+        let tone = mix(0x6A6A6A, tint, near);
         let alpha = (1.05 - 0.5 * d.abs()).clamp(0.0, 1.0);
         a.gfx.ui(&labels[i as usize], Rc::new(r.x, y - big, r.w, big * 2.0), size, if near > 0.5 { 600 } else { 400 }, tone, alpha, Align::C);
     }
@@ -3728,9 +3793,9 @@ fn form(a: &mut App, lx: f32) {
             let cx = lx + 210.0 + 50.0 * (1.0 - to_time);
             let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
             let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 36.0, 76.0, 92.0), &hours, big);
+            wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 36.0, 76.0, 92.0), &hours, big, WHITE);
             a.gfx.ui(":", Rc::new(cx - 12.0, CY - 22.0, 24.0, 40.0), big, 600, WHITE, 1.0, Align::C);
-            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 36.0, 76.0, 92.0), &minutes, big);
+            wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 36.0, 76.0, 92.0), &minutes, big, WHITE);
         } else {
             // The same numbers flying up to the corner.
             let k = to_days;

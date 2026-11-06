@@ -18,6 +18,9 @@ pub struct Wheel {
     speed: f32,
     target: Option<f32>,
     drag: Option<Drag>,
+    /// Seconds since it last passed from one value to the next: the picker's lines flash then.
+    pub since_tick: f32,
+    passing: i32,
 }
 
 struct Drag {
@@ -29,7 +32,7 @@ struct Drag {
 
 impl Wheel {
     pub fn new(len: usize, index: usize) -> Self {
-        Wheel { pos: index as f32, row: ROW, len, speed: 0.0, target: None, drag: None }
+        Wheel { pos: index as f32, row: ROW, len, speed: 0.0, target: None, drag: None, since_tick: 9.0, passing: index as i32 }
     }
 
     pub fn tall(mut self, row: f32) -> Self {
@@ -44,6 +47,8 @@ impl Wheel {
 
     pub fn set(&mut self, index: usize) {
         self.pos = index.min(self.len.saturating_sub(1)) as f32;
+        // Set from outside: no flash for it.
+        self.passing = self.pos as i32;
         self.speed = 0.0;
         self.target = None;
     }
@@ -96,6 +101,12 @@ impl Wheel {
 
     /// Moves on by `dt`; returns whether it is still moving.
     pub fn step(&mut self, dt: f32) -> bool {
+        self.since_tick += dt;
+        let passing = self.pos.round() as i32;
+        if passing != self.passing {
+            self.passing = passing;
+            self.since_tick = 0.0;
+        }
         if self.drag.is_some() {
             return true;
         }
@@ -184,6 +195,19 @@ mod tests {
         assert!(!w.held());
         settle(&mut w);
         assert_eq!(w.pos, w.pos.round());
+    }
+
+    #[test]
+    fn passing_a_value_is_noticed() {
+        let mut w = Wheel::new(10, 5);
+        settle(&mut w);
+        assert!(w.since_tick > 1.0);
+        w.turn(1.0);
+        for _ in 0..60 {
+            w.step(1.0 / 60.0);
+        }
+        assert_eq!(w.index(), 4);
+        assert!(w.since_tick < 1.0, "it passed 5 -> 4 within the last second");
     }
 
     #[test]

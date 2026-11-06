@@ -780,6 +780,8 @@ pub struct App {
     pub drag_over: bool,
     /// How many files the drag in progress carries.
     pub drag_count: usize,
+    /// The Focus page has its wheel of lengths out.
+    pub focus_pick: bool,
     /// The last drop the Shelf could not take all of: when, how many it took, how many it turned away.
     pub shelf_note: Option<(Instant, usize, usize)>,
     /// A file is being dragged over the notch's window but not onto the notch yet: since when.
@@ -1057,6 +1059,7 @@ impl App {
             shelf: Shelf::load(),
             drag_over: false,
             drag_count: 0,
+            focus_pick: false,
             shelf_note: None,
             drag_near: None,
             dragging_out: false,
@@ -1650,6 +1653,7 @@ impl App {
             self.view = ui::View::Page;
             self.view_mix.x = 0.0;
             self.brief = None;
+            self.focus_pick = false;
         }
         if m == Mode::Expanded {
             self.sync_wheels();
@@ -1989,7 +1993,7 @@ impl App {
             moving |= self.month_mix.step(0.0, sub);
             moving |= self.gone_mix.step(0.0, sub);
             moving |= self.swipe_mix.step(if self.swiped.is_some() { 1.0 } else { 0.0 }, sub);
-            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Bed | ui::View::Calendar | ui::View::Form | ui::View::Guide)
+            let lit = matches!(self.view, ui::View::Care(_) | ui::View::Bed | ui::View::Goal | ui::View::Calendar | ui::View::Form | ui::View::Guide)
                 || self.brief.as_ref().is_some_and(|b| b.date.as_ref().is_some_and(|d| d.1 == 0));
             moving |= self.glow_mix.step(if lit { 1.0 } else { 0.0 }, sub);
             moving |= self.focus_mix.step(if self.brain.focus.is_some() { 1.0 } else { 0.0 }, sub);
@@ -2629,7 +2633,7 @@ impl App {
             self.catch_all = want;
             self.render();
         }
-        if !down && !self.drag_over && !self.mouse_in && self.expanded() && self.form.is_none() && (self.ripple.is_some() || self.shelf_note.is_some()) {
+        if !down && !self.drag_over && !self.mouse_in && self.expanded() && !self.editing() && (self.ripple.is_some() || self.shelf_note.is_some()) {
             let (cx, w) = self.notch_geometry();
             let ux = (pt.x - wx) as f32 / s;
             let uy = (pt.y - wy) as f32 / s;
@@ -3489,6 +3493,7 @@ impl App {
         match v {
             V::Care(t) => self.glow = t.colour(),
             V::Bed => self.glow = ui::Tile::Sleep.colour(),
+            V::Goal => self.glow = ui::WATER,
             V::Calendar => self.glow = ui::EVENING,
             V::Form => self.glow = if self.form.as_ref().is_some_and(|f| f.date.is_some()) { ui::EVENING } else { ui::CALM },
             _ => {}
@@ -3542,6 +3547,7 @@ impl App {
                 self.media_cmd(Cmd::Seek(secs));
             }
             Act::PomoToggle => {
+                self.focus_pick = false;
                 let now = chrono::Local::now();
                 if self.brain.focus.is_some() {
                     self.brain.toggle_pause(now);
@@ -3664,6 +3670,12 @@ impl App {
                 self.month.0 = y;
                 self.cal = ui::Cal::Months;
                 self.month_turn(0.0);
+            }
+            Act::FocusPick(on) => {
+                self.focus_pick = on;
+                if !on {
+                    self.apply_wheels();
+                }
             }
             Act::FocusMode(on) => {
                 self.settings.pomodoro = on;
@@ -4021,7 +4033,7 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), T_HOVER);
         }
-        if self.form.is_none() && !self.drag_over {
+        if !self.editing() && !self.drag_over {
             self.set_mode(Mode::Compact);
         }
         if self.toast_open {
@@ -4033,6 +4045,12 @@ impl App {
         }
         self.kick();
         self.render();
+    }
+
+    /// Something is being set (a reminder, the water goal, bedtime, a focus length): the notch
+    /// stays open when the pointer leaves, and closes from its own Back or Done.
+    fn editing(&self) -> bool {
+        self.form.is_some() || matches!(self.view, ui::View::Goal | ui::View::Bed) || self.focus_pick
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Act> {
@@ -4785,6 +4803,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.glow = match a.view {
             ui::View::Care(t) => t.colour(),
             ui::View::Bed => ui::Tile::Sleep.colour(),
+            ui::View::Goal => ui::WATER,
             _ => ui::EVENING,
         };
         let now = chrono::Local::now();
@@ -4797,6 +4816,7 @@ fn demo_setup(a: &mut App, spec: &str) {
         a.focus_mix.x = 1.0;
     }
     a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
+    a.focus_pick = kv.get("pick") == Some(&"1");
     if let Some(v) = kv.get("brief") {
         let now = chrono::Local::now();
         let day = |d: i64| (now + chrono::TimeDelta::days(d)).format("%Y-%m-%d").to_string();
