@@ -1,5 +1,5 @@
 //! What is playing, heard for real: a loopback capture of the default output, cut by an FFT into
-//! five bands from bass to treble, for the equalizer bars, the notch's breathing and the eyes'
+//! five bands from bass to treble, for the equalizer bars and the eyes'
 //! beat. It only listens while something needs it; otherwise the capture is let go.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,12 +26,10 @@ const BEAT_GAP: u32 = 8;
 
 static WANT: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
-static SHARED: Mutex<Shared> = Mutex::new(Shared { bands: None, pulse_at: None });
+static SHARED: Mutex<Shared> = Mutex::new(Shared { bands: None });
 
 struct Shared {
     bands: Option<[f32; 5]>,
-    /// When the last bass beat was heard.
-    pulse_at: Option<Instant>,
 }
 
 /// Ask for the sound to be listened to (true) or let go (false). Cheap to call every frame.
@@ -52,11 +50,6 @@ pub fn bands() -> Option<[f32; 5]> {
     SHARED.lock().ok()?.bands
 }
 
-/// 1 on a bass beat, falling to 0 over a fifth of a second.
-pub fn pulse() -> f32 {
-    let at = SHARED.lock().ok().and_then(|s| s.pulse_at);
-    at.map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / 0.2).clamp(0.0, 1.0))
-}
 
 fn run() {
     unsafe {
@@ -116,12 +109,9 @@ fn listen() -> windows::core::Result<()> {
                 got = true;
             }
             while mono.len() >= N {
-                let (bands, beat) = an.step(&mono[..N]);
+                let (bands, _) = an.step(&mono[..N]);
                 if let Ok(mut s) = SHARED.lock() {
                     s.bands = Some(bands);
-                    if beat {
-                        s.pulse_at = Some(Instant::now());
-                    }
                 }
                 mono.drain(..HOP);
             }

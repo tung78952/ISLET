@@ -1376,16 +1376,6 @@ impl App {
     /// pulls the outer toast edge as well as the level bar: zero extends left,
     /// full volume extends right.  Keeping the opposite edge fixed makes the
     /// spring feel anchored to the endpoint that was hit.
-    /// How much wider the notch's black outline is drawn just now: the open music page breathes
-    /// with the bass. Only the outline; what is inside, and where it can be pressed, stay put.
-    pub fn breath(&self) -> f32 {
-        if self.mode == Mode::Expanded && self.page == Page::Music && self.view == ui::View::Page && self.playing() {
-            (if self.lyrics_view() { 3.0 } else { 5.0 }) * spectrum::pulse()
-        } else {
-            0.0
-        }
-    }
-
     pub fn notch_geometry(&self) -> (f32, f32) {
         let mut cx = WIN_W / 2.0;
         let mut w = self.sw.x;
@@ -2223,7 +2213,6 @@ impl App {
         let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| t.elapsed() < Duration::from_millis(ms));
         let effects = recent(self.lyr_anim.map(|x| x.0), 1100)
             || recent(self.drank_at, 1700)
-            || (self.expanded() && self.page == Page::Music && spectrum::pulse() > 0.0)
             || recent(self.pill_prev.as_ref().map(|x| x.0), 450)
             // Cards animate as they arrive (ripples, count-up, a few shakes); one left waiting for
             // an answer then holds still instead of redrawing 60 times a second. The heads-up

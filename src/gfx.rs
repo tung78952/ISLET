@@ -871,13 +871,22 @@ impl Gfx {
         }
     }
 
-    /// The notch's outline stroked with a gradient from its top-left to its bottom-right.
+    /// The notch's outline lit like glass: `bright` toward its top-left and bottom-right corners,
+    /// `faint` in between (two gradients meeting in the middle).
     #[allow(clippy::too_many_arguments)]
-    pub fn stroke_notch_diag(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, width: f32, tl: (u32, f32), br: (u32, f32)) {
+    pub fn stroke_notch_lit(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, width: f32, bright: f32, faint: f32) {
         let Some(g) = self.notch_geom(cx, w, h, r, ear) else { return };
-        let Some(brush) = self.linear((cx - w / 2.0, 0.0), (cx + w / 2.0, h), tl, br) else { return };
-        unsafe { self.rt.DrawGeometry(&g, &brush, width, None) };
+        let (tl, mid, br) = ((cx - w / 2.0, 0.0), (cx, h / 2.0), (cx + w / 2.0, h));
+        unsafe {
+            if let Some(b) = self.linear(tl, mid, (0xFFFFFF, bright), (0xFFFFFF, faint / 2.0)) {
+                self.rt.DrawGeometry(&g, &b, width, None);
+            }
+            if let Some(b) = self.linear(mid, br, (0xFFFFFF, faint / 2.0), (0xFFFFFF, bright)) {
+                self.rt.DrawGeometry(&g, &b, width, None);
+            }
+        }
     }
+
 
     /// Draws a bitmap keeping its aspect ratio: `cover` fills `r` (cropping), otherwise it fits
     /// inside `r`, centred.
