@@ -2068,16 +2068,6 @@ fn flip(a: &mut App, key: i32, on: bool) -> f32 {
     k
 }
 
-/// Two words in one place: as `k` goes from 0 to 1 the first drifts up and out, the second comes in.
-#[allow(clippy::too_many_arguments)]
-fn swap_text(a: &mut App, r: Rc, size: f32, weight: u32, hex: (u32, u32), align: Align, words: (&str, &str), k: f32) {
-    if k < 0.99 {
-        a.gfx.ui(words.0, Rc::new(r.x, r.y - 5.0 * k, r.w, r.h), size, weight, hex.0, 1.0 - k, align);
-    }
-    if k > 0.01 {
-        a.gfx.ui(words.1, Rc::new(r.x, r.y + 5.0 * (1.0 - k), r.w, r.h), size, weight, hex.1, k, align);
-    }
-}
 
 /// Notification history: newest first, three rows at a time, the wheel scrolls.
 fn history(a: &mut App, lx: f32) {
@@ -2159,7 +2149,8 @@ fn expanded(a: &mut App, lx: f32) {
     a.gfx.alpha = base;
     // The open pages have moving parts of their own: a frame always redraws all of it.
     a.loop_rect = None;
-    if view == View::Page && lyr < 0.99 {
+    // While the Focus wheel is out, no page arrows to hit by mistake (as on the setting screens).
+    if view == View::Page && lyr < 0.99 && !a.focus_pick {
         a.gfx.alpha = base * (1.0 - lyr) * (1.0 - s);
         chevrons(a, lx);
         dots(a, lx);
@@ -3082,28 +3073,116 @@ fn days_grid(a: &mut App, x0: f32, col: f32, (year, month): (i32, u32), today: c
 // ---------------------------------------------------------------- care
 
 /// Water large on the left, the other reminders as tiles beside it.
+/// The water on the Care page: a drop made of lit lines, like the eyes and the Focus sun. The
+/// lines below the water's level are lit blue, the ones above grey; a cup just drunk (`since`
+/// seconds ago) rocks the surface into a wave and throws a few short lines out to the sides.
+/// Full, the whole drop glows. Under it, a few hairlines of reflection.
+fn water_drop(a: &mut App, cx: f32, level: f32, since: f32, hot: f32) {
+    // The shape: a point at the top, a round body below (tangent to the two straight sides).
+    const TIP: f32 = 36.0;
+    const C: f32 = 78.0;
+    const R: f32 = 26.0;
+    let bottom = C + R;
+    let swell = 1.0 + 0.04 * a.water_pulse.x.clamp(-1.0, 2.0);
+    let d = C - TIP;
+    let touch = C - R * R / d;
+    let touch_half = R * (1.0 - (R / d).powi(2)).sqrt();
+    let half_at = |y: f32| -> f32 {
+        let h = if y <= TIP {
+            0.0
+        } else if y < touch {
+            touch_half * (y - TIP) / (touch - TIP)
+        } else {
+            (R * R - (y - C).powi(2)).max(0.0).sqrt()
+        };
+        h * swell
+    };
+    let surface = bottom - level * (bottom - TIP);
+    // A cup just drunk: the surface rocks, settling over a second.
+    let amp = if since < 1.2 { 3.2 * (1.0 - since / 1.2).powf(1.5) } else { 0.0 };
+    let wave = |x: f32| surface + amp * ((x - cx) * 0.26 - since * 10.0).sin();
+    let g = &a.gfx;
+    if level > 0.999 {
+        let beat = if since < 1.6 { (1.0 - since / 1.6) * 0.25 } else { 0.0 };
+        g.glow_ellipse(cx, C - 6.0, R * 1.5, R * 1.9, WATER, 0.2 + beat);
+    } else if level > 0.01 {
+        g.glow_ellipse(cx, (surface + bottom) / 2.0, R * 1.2, (bottom - surface) * 0.7 + 4.0, WATER, 0.08);
+    }
+    const PITCH: f32 = 4.4;
+    const BAR: f32 = 2.4;
+    let lit_tone = |y: f32| mix(WATER, 0x9AF0FA, (1.0 - (y - surface) / 30.0).clamp(0.0, 1.0) * 0.55);
+    let dim = |y: f32| (0.3 + 0.45 * ((y - TIP) / (bottom - TIP))).clamp(0.0, 1.0) + 0.18 * hot;
+    let mut y = TIP + 3.0;
+    while y < bottom {
+        let h = half_at(y);
+        if h > 1.0 {
+            if amp < 0.05 || (y - surface).abs() > amp + BAR {
+                if y > surface {
+                    g.fill_rrect(Rc::new(cx - h, y - BAR / 2.0, 2.0 * h, BAR), BAR / 2.0, lit_tone(y), 1.0);
+                } else {
+                    g.fill_rrect(Rc::new(cx - h, y - BAR / 2.0, 2.0 * h, BAR), BAR / 2.0, 0x4A4A4E, dim(y));
+                }
+            } else {
+                // Where the wave passes, the line is lit in pieces: under the wave lit, over it grey.
+                const PIECES: usize = 8;
+                let step = 2.0 * h / PIECES as f32;
+                for i in 0..PIECES {
+                    let x = cx - h + step * i as f32;
+                    let piece = Rc::new(x, y - BAR / 2.0, step + 0.3, BAR);
+                    if y > wave(x + step / 2.0) {
+                        g.fill_rrect(piece, 0.6, lit_tone(y), 1.0);
+                    } else {
+                        g.fill_rrect(piece, 0.6, 0x4A4A4E, dim(y));
+                    }
+                }
+            }
+        }
+        y += PITCH;
+    }
+    // The splash: three short lines thrown out on each side, arcing up and away.
+    if since < 0.9 && level > 0.01 {
+        let e = since / 0.9;
+        let edge = half_at(surface.clamp(TIP + 6.0, bottom - 2.0));
+        for side in [-1.0f32, 1.0] {
+            for j in 0..3 {
+                let k = j as f32;
+                let x = cx + side * (edge + 3.0 + (10.0 + 6.0 * k) * e);
+                let y = surface - (14.0 - 3.0 * k) * (std::f32::consts::PI * e).sin() + 4.0 * e * e - k * 2.5;
+                let len = 8.0 - 2.0 * k;
+                g.fill_rrect(Rc::new(x - len / 2.0, y - 1.3, len, 2.6), 1.3, 0x9AF0FA, (1.0 - e * e) * (1.0 - 0.15 * k));
+            }
+        }
+    }
+    // The reflection: hairlines under the drop, fading out at both ends.
+    let tint = if level > 0.01 { WATER } else { 0x6A6A6E };
+    for (i, (dy, reach, alpha)) in [(3.6, 34.0, 0.7), (6.8, 24.0, 0.4)].into_iter().enumerate() {
+        let y = bottom + dy;
+        let alpha = alpha * if level > 0.01 { 0.5 + 0.5 * level } else { 0.6 };
+        let reach = reach + 2.0 * (since * 3.0 + i as f32).sin() * (amp / 3.2);
+        g.fill_rrect_hgrad(Rc::new(cx - reach, y - 0.6, reach, 1.2), 0.0, (tint, 0.0), (tint, alpha));
+        g.fill_rrect_hgrad(Rc::new(cx, y - 0.6, reach, 1.2), 0.0, (tint, alpha), (tint, 0.0));
+    }
+}
+
 fn care(a: &mut App, lx: f32) {
-    use std::f32::consts::{FRAC_PI_2, TAU};
     title(a, lx, "Care");
     let cfg = &a.brain.cfg;
     let goal = cfg.water_goal * cfg.cup_ml;
-    let (cx, cy, r) = (lx + 72.0, 84.0, 40.0 + 1.5 * a.water_pulse.x.clamp(-1.0, 2.0));
-    let ring = Rc::new(cx - 44.0, cy - 44.0, 88.0, 88.0);
+    let cx = lx + 72.0;
+    let ring = Rc::new(cx - 36.0, 36.0, 72.0, 94.0);
     // Pointing at it shows it can be set.
     let hot = btn(a, ring, 0.02).clamp(0.0, 1.0);
     a.gfx.unzoom();
-    let width = 4.5 + 1.5 * hot;
-    a.gfx.stroke_circle(cx, cy, r, width, WHITE, 0.1 + 0.08 * hot);
-    let tint = (WATER, 1.0);
-    let done = a.ring.x.clamp(0.0, 1.0);
-    if done > 0.999 {
-        a.gfx.stroke_circle_diag(cx, cy, r, width, tint, tint);
-    } else if done > 0.001 {
-        a.gfx.arc_diag(cx, cy, r, -FRAC_PI_2, -FRAC_PI_2 + TAU * done, width, tint, tint);
-    }
-    pic(a, "ic_water", cx, cy - 13.0, 22.0, WATER, 1.0);
-    let text = format!("{:.1} / {:.1} L", a.ring.x.max(0.0) * goal as f32 / 1000.0, goal as f32 / 1000.0);
-    swap_text(a, Rc::new(cx - 38.0, cy + 2.0, 76.0, 18.0), SMALL, 600, (WHITE, WHITE), Align::C, (&text, "Set goal"), hot);
+    let since = a.drank_at.map_or(9.0, |t| std::time::Instant::now().saturating_duration_since(t).as_secs_f32());
+    water_drop(a, cx, a.ring.x.clamp(0.0, 1.0), since, hot);
+    // The amount under it, the goal in grey; pointing turns it into "Set goal".
+    let (have, of) = (format!("{:.1}", a.ring.x.max(0.0) * goal as f32 / 1000.0), format!(" / {:.1} L", goal as f32 / 1000.0));
+    let (w0, w1) = (a.gfx.measure(&have, SMALL, 700), a.gfx.measure(&of, SMALL, 500));
+    let x0 = cx - (w0 + w1) / 2.0;
+    let line = Rc::new(x0, 113.0, w0 + w1, 16.0);
+    a.gfx.ui(&have, Rc::new(x0, line.y, w0 + 2.0, line.h), SMALL, 700, WHITE, 1.0 - hot, Align::L);
+    a.gfx.ui(&of, Rc::new(x0 + w0, line.y, w1 + 2.0, line.h), SMALL, 500, 0x8E8E93, 1.0 - hot, Align::L);
+    a.gfx.ui("Set goal", Rc::new(cx - 40.0, line.y, 80.0, line.h), SMALL, 600, WHITE, hot, Align::C);
     hit(a, ring, Act::View(View::Goal));
     head_button(a, Rc::new(lx + 124.0, 49.0, 32.0, 32.0), Act::Drank, |g, x, y| icon::plus(g, x, y, 6.0, 1.9, WHITE, 1.0));
     head_button(a, Rc::new(lx + 124.0, 87.0, 32.0, 32.0), Act::WaterReset, |g, x, y| icon::reset(g, x, y, 5.6, WHITE, 1.0));

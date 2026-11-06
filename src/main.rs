@@ -740,6 +740,8 @@ pub struct App {
     /// "Later" answers in a row.
     later_row: u32,
     last_drink: Instant,
+    /// When a cup was last drunk from the notch: the drop on the Care page splashes for it.
+    pub drank_at: Option<Instant>,
     last_song: String,
     /// Preview run (ISLET_DEMO "sample=tour|eyes|jam|battery|0..11"): start and what it shows.
     sample: Option<(Instant, String)>,
@@ -1035,6 +1037,7 @@ impl App {
             card_after: None,
             later_row: 0,
             last_drink: Instant::now(),
+            drank_at: None,
             last_song: String::new(),
             sample: None,
             device_kind: devices::DeviceKind::Other,
@@ -2060,6 +2063,7 @@ impl App {
         let fresh = |t: &Toast| t.until.saturating_duration_since(Instant::now()) > Duration::from_millis(1300) && t.born.elapsed() < Duration::from_secs(3);
         let recent = |t: Option<Instant>, ms: u64| t.is_some_and(|t| t.elapsed() < Duration::from_millis(ms));
         let effects = recent(self.lyr_anim.map(|x| x.0), 1100)
+            || recent(self.drank_at, 1700)
             || recent(self.pill_prev.as_ref().map(|x| x.0), 450)
             // Cards animate as they arrive (ripples, count-up, a few shakes); one left waiting for
             // an answer then holds still instead of redrawing 60 times a second. The heads-up
@@ -3045,6 +3049,7 @@ impl App {
         }
         if water && outcome == Outcome::Done {
             self.last_drink = Instant::now();
+            self.drank_at = Some(Instant::now());
             self.water_pulse.v += 7.5;
             if !goal_was && self.brain.stats.water >= self.brain.cfg.water_goal {
                 self.goal_toast();
@@ -3266,7 +3271,7 @@ impl App {
 
     /// Two fingers sideways on a touchpad: the strip of pages follows them.
     fn swipe_by(&mut self, delta: f32) {
-        if !self.expanded() || self.view != ui::View::Page || self.drag_over {
+        if !self.expanded() || self.view != ui::View::Page || self.drag_over || self.focus_pick {
             return;
         }
         self.step_swipe();
@@ -3578,6 +3583,7 @@ impl App {
                     self.goal_toast();
                 }
                 self.last_drink = Instant::now();
+                self.drank_at = Some(Instant::now());
                 self.water_pulse.v += 7.5;
                 self.kick();
             }
@@ -4817,6 +4823,10 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
     a.focus_pick = kv.get("pick") == Some(&"1");
+    if let Some(ms) = kv.get("drank").and_then(|v| v.parse::<u64>().ok()) {
+        // The splash, caught `ms` after launch.
+        a.drank_at = Some(Instant::now() + Duration::from_millis(ms));
+    }
     if let Some(v) = kv.get("brief") {
         let now = chrono::Local::now();
         let day = |d: i64| (now + chrono::TimeDelta::days(d)).format("%Y-%m-%d").to_string();
