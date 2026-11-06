@@ -796,8 +796,6 @@ pub struct App {
     pub drag_count: usize,
     /// The Focus page has its wheel of lengths out.
     pub focus_pick: bool,
-    /// The reminder chosen to be the big one on the Reminders page (by id).
-    pub rem_pick: Option<String>,
     /// The last drop the Shelf could not take all of: when, how many it took, how many it turned away.
     pub shelf_note: Option<(Instant, usize, usize)>,
     /// A file is being dragged over the notch's window but not onto the notch yet: since when.
@@ -1080,7 +1078,6 @@ impl App {
             drag_over: false,
             drag_count: 0,
             focus_pick: false,
-            rem_pick: None,
             shelf_note: None,
             drag_near: None,
             dragging_out: false,
@@ -2337,18 +2334,9 @@ impl App {
             return;
         }
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
-            if self.view == ui::View::OldNotes {
-                let rows = self.todo.tasks.len();
-                self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
-            } else {
-                // The wheel moves the big one along the reminders.
-                let rows = self.reminders();
-                if let Some(at) = self.hero_reminder(&rows, chrono::Local::now()) {
-                    let to = (at as i32 - notches.signum() as i32).clamp(0, rows.len() as i32 - 1) as usize;
-                    self.rem_pick = Some(rows[to].id.clone());
-                    self.swiped = None;
-                }
-            }
+            let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.reminders().len() + (!self.todo.tasks.is_empty()) as usize };
+            self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
+            self.swiped = None;
             self.kick();
             return;
         }
@@ -3199,19 +3187,6 @@ impl App {
     }
 
     /// The user's own reminders, by time of day.
-    /// Which reminder is the big one: the one picked, else the one that rings soonest, else the
-    /// first.
-    pub fn hero_reminder(&self, rows: &[luma::config::CustomReminder], now: chrono::DateTime<chrono::Local>) -> Option<usize> {
-        if rows.is_empty() {
-            return None;
-        }
-        if let Some(i) = self.rem_pick.as_ref().and_then(|id| rows.iter().position(|r| &r.id == id)) {
-            return Some(i);
-        }
-        let soonest = rows.iter().enumerate().filter_map(|(i, r)| self.brain.reminder_in(&r.id, now).map(|s| (s, i))).min();
-        Some(soonest.map_or(0, |(_, i)| i))
-    }
-
     pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
         let mut v = self.brain.cfg.custom.clone();
         v.sort_by(|a, b| a.time.cmp(&b.time));
@@ -3765,14 +3740,10 @@ impl App {
                     self.settings.save();
                 }
             }
-            Act::FormCycle => {
+            Act::FormRepeat(i) => {
                 if let Some(f) = self.form.as_mut() {
-                    f.days = ui::next_repeat(f.days);
+                    f.days = ui::REPEATS[i as usize % ui::REPEATS.len()];
                 }
-            }
-            Act::ReminderPick(i) => {
-                self.rem_pick = self.reminders().get(i).map(|r| r.id.clone());
-                self.swiped = None;
             }
             Act::RowCancel => self.swiped = None,
             Act::DoNow(tile) => {
@@ -3839,14 +3810,6 @@ impl App {
             Act::FormClear => {
                 if let Some(form) = self.form.as_mut() {
                     form.title.clear();
-                }
-            }
-            Act::FormDelete => {
-                // Back to the list, with the row open for the same confirmation.
-                let key = self.form.as_ref().and_then(|f| f.id.clone().map(|id| format!("{}:{id}", if f.date.is_some() { "d" } else { "r" })));
-                self.close_form(false);
-                if let Some(key) = key {
-                    self.reveal_delete(key);
                 }
             }
             Act::ShelfOpen(i) => {
