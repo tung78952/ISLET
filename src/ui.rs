@@ -3293,7 +3293,7 @@ fn bed(a: &mut App, lx: f32) {
 /// The iOS-style band behind the chosen row of one or more wheels side by side: from `x0` to
 /// `x1`, centred on `cy`, `h` tall.
 fn pick_band(a: &mut App, x0: f32, x1: f32, cy: f32, h: f32) {
-    a.gfx.fill_rrect(Rc::new(x0, cy - h / 2.0, x1 - x0, h), 9.0, 0xFFFFFF, 0.1);
+    a.gfx.fill_rrect(Rc::new(x0, cy - h / 2.0, x1 - x0, h), 14.0, 0xFFFFFF, 0.1);
 }
 
 /// What a rolling picker sets.
