@@ -21,7 +21,7 @@ const CYAN: u32 = 0x66DBFF;
 pub const WATER: u32 = 0x35D6E8;
 pub const EVENING: u32 = 0xFF8A2A;
 /// The colour rising behind the reminder form.
-pub const CALM: u32 = 0x3E7BFF;
+pub const CALM: u32 = 0xA78BFA;
 /// The Reminders page's own colour: what is on, chosen or to be set.
 const REMIND: u32 = CALM;
 /// On: switches, chosen days.
@@ -3994,7 +3994,7 @@ fn hero(a: &mut App, lx: f32, cy: f32, r: &crate::luma::config::CustomReminder, 
 /// The switch and the trash of reminder `i`, the trash centred on `x`.
 fn reminder_buttons(a: &mut App, x: f32, cy: f32, i: usize, r: &crate::luma::config::CustomReminder) {
     let id = (1, r.id.bytes().fold(7i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32)));
-    toggle(a, Rc::new(x - 48.0 - SWITCH.0 / 2.0, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), id, r.enabled, Act::ReminderSwitch(i), (REMIND, 0x5A92FF));
+    toggle(a, Rc::new(x - 48.0 - SWITCH.0 / 2.0, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), id, r.enabled, Act::ReminderSwitch(i), (REMIND, 0xC4B0FF));
     head_button(a, Rc::new(x - 14.0, cy - 14.0, 28.0, 28.0), Act::RowTrash(0, i), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
 }
 
@@ -4229,7 +4229,7 @@ fn form(a: &mut App, lx: f32) {
     if a.settings.glass {
         liquid(a, save, 18.0, h, Some(if ready { REMIND } else { 0x3A3A3E }));
     } else {
-        a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0x5A92FF, h) } else { 0x3A3A3E }, 1.0);
+        a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0xC4B0FF, h) } else { 0x3A3A3E }, 1.0);
     }
     a.gfx.ui("Save", save, BODY, 600, if ready { WHITE } else { 0x8E8E93 }, 1.0, Align::C);
     a.gfx.unzoom();
