@@ -2916,11 +2916,14 @@ impl App {
         }
     }
 
-    /// The notification behind the current toast; it also goes into the history.
-    fn keep_notice(&mut self, info: NoticeInfo) {
+    /// The notification behind the current toast; it also goes into the history, unread only
+    /// when it could not be seen as it came (the bell is nudged for those).
+    fn keep_notice(&mut self, info: NoticeInfo, seen: bool) {
         self.history.push_front(info.clone());
         self.history.truncate(HISTORY_MAX);
-        self.history_unread += 1;
+        if !seen {
+            self.history_unread += 1;
+        }
         self.notice = Some(info);
     }
 
@@ -4830,7 +4833,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Notice, &body, &n.title, None);
             }
-            a.keep_notice(info);
+            // Shown on a notch nobody could see: hidden, or behind something full screen or busy.
+            let seen = a.demo.is_none() && !a.hidden && !sys::busy() && sys::foreground_covers(a.monitor, a.hwnd) != Some(true);
+            sys::timelog(&format!("notice seen={seen}"));
+            a.keep_notice(info, seen);
         }
         WM_BLUETOOTH => {
             let c = Box::from_raw(lp.0 as *mut bt::Change);
@@ -5129,7 +5135,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     // "phone=Zalo|Minh Anh|Text": a phone notification; "history=1": some past notifications.
     let demo_notice = |a: &mut App, app: &str, title: &str, body: &str| {
         let n = notify::Notice { app: "Phone Link".into(), title: title.into(), body: body.into(), aumid: "Microsoft.YourPhone_8wekyb3d8bbwe!App".into(), source: None, site: None, id: 0, phone_app: Some(app.into()) };
-        a.keep_notice(NoticeInfo::of(&n));
+        a.keep_notice(NoticeInfo::of(&n), false);
     };
     if kv.get("history") == Some(&"1") {
         for (app, title, body) in [("Shopee", "Order", "Your order is on its way"), ("YouTube", "A channel", "uploaded a new video"), ("Messenger", "Denis", "Dinner tonight?"), ("Zalo", "Minh Anh", "What time is the meeting tomorrow?")] {
