@@ -2062,6 +2062,20 @@ fn glass(g: &Gfx, r: Rc, rad: f32, h: f32) {
     g.stroke_rrect_diag(rim, (rad - 0.5).max(0.0), 1.0, (WHITE, 0.42 + 0.2 * h.min(1.0)), (WHITE, 0.05));
 }
 
+/// Frosted glass for cards on the glass notch: denser than the glass behind it and lifted off it,
+/// with a soft shadow below, a whiter fill, a sheen from the top and light along its top rim.
+fn frost_card(g: &Gfx, r: Rc, rad: f32, h: f32) {
+    let h = h.clamp(0.0, 1.0);
+    for (i, a) in [0.16f32, 0.10, 0.05].into_iter().enumerate() {
+        let grow = 1.0 + i as f32 * 1.5;
+        g.fill_rrect(Rc::new(r.x - grow + 1.0, r.y + 2.5 + grow, r.w + 2.0 * grow - 2.0, r.h), rad + grow, 0x000000, a);
+    }
+    g.fill_rrect(r, rad, WHITE, 0.18 + 0.06 * h);
+    g.fill_rrect_vgrad(r, rad, (WHITE, 0.10), (WHITE, 0.0));
+    let rim = Rc::new(r.x + 0.4, r.y + 0.4, r.w - 0.8, r.h - 0.8);
+    g.stroke_rrect_lit(rim, (rad - 0.4).max(0.0), 0.8, 0.42, 0.06);
+}
+
 /// A liquid glass button (after Kyant0's LiquidButton): the screen behind bent at its rim, then a
 /// clear white surface (or the page's colour for a main button), and light caught at its rim;
 /// brighter while pressed. Without the screen behind (glass not open) it is the light glass.
@@ -3354,8 +3368,11 @@ fn care(a: &mut App, lx: f32) {
         };
         let h = btn(a, r, 0.03);
         const CARD: u32 = 0x18181A;
-        let bg = mix(CARD, 0x2C2C2E, h);
-        a.gfx.fill_rrect(r, 11.0, bg, 1.0);
+        if a.settings.glass {
+            frost_card(&a.gfx, r, 11.0, h);
+        } else {
+            a.gfx.fill_rrect(r, 11.0, mix(CARD, 0x2C2C2E, h), 1.0);
+        }
         let dim = if on { 1.0 } else { 0.4 };
         pic(a, tile.picture(), r.x + 18.0, r.cy(), 20.0, WHITE, dim);
         if on {
@@ -3936,8 +3953,13 @@ fn hero(a: &mut App, lx: f32, cy: f32, r: &crate::luma::config::CustomReminder, 
     let asking = swipe_of(a, &format!("r:{}", r.id));
     let near = hovering(a, band) || asking > 0.05;
     let k = flip(a, 50, near);
+    if a.settings.glass {
+        frost_card(&a.gfx, band, 18.0, k);
+    }
     if k > 0.01 {
-        a.gfx.fill_rrect(band, 18.0, 0xFFFFFF, 0.06 * k);
+        if !a.settings.glass {
+            a.gfx.fill_rrect(band, 18.0, 0xFFFFFF, 0.06 * k);
+        }
     }
     let on = r.enabled;
     let (soon, days) = reminder_when(a, r, now);
@@ -4027,7 +4049,9 @@ fn reminder_list(a: &mut App, lx: f32, rows: &[crate::luma::config::CustomRemind
         let near = shown && (hovering(a, band) || asking > 0.05);
         let key = 70 + (r.id.bytes().fold(7i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32)) & 0xFFFF);
         let k = flip(a, key, near);
-        if k > 0.01 {
+        if a.settings.glass {
+            frost_card(&a.gfx, band, 13.0, k);
+        } else if k > 0.01 {
             a.gfx.fill_rrect(band, 13.0, 0xFFFFFF, 0.06 * k);
         }
         let lit = flip(a, key + 0x10000, r.enabled);
@@ -4151,8 +4175,12 @@ fn form(a: &mut App, lx: f32) {
     back_title(a, lx, &heading, Act::FormBack);
     // Three columns, 20 apart: the name and its repeat, the time, Save.
     let tf = if date.is_some() { Rc::new(lx + 24.0, 62.0, 296.0, 36.0) } else { Rc::new(lx + 24.0, 42.0, 172.0, 34.0) };
-    a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
-    a.gfx.stroke_rrect(tf, 14.0, 1.0, 0x3A3A3E, 1.0);
+    if a.settings.glass {
+        frost_card(&a.gfx, tf, 14.0, 0.0);
+    } else {
+        a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
+        a.gfx.stroke_rrect(tf, 14.0, 1.0, 0x3A3A3E, 1.0);
+    }
     let inner = Rc::new(tf.x + 14.0, tf.y, tf.w - 40.0, tf.h);
     if text.is_empty() {
         a.gfx.ui(if date.is_some() { "What is this day?" } else { "What should I remind you?" }, inner, SMALL, 400, GREY, 1.0, Align::L);
