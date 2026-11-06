@@ -2295,7 +2295,20 @@ fn transport(a: &mut App, quote: (f32, f32), xs: [f32; 3], cy: f32, playing: boo
 
 fn art(a: &mut App, r: Rc) {
     if let Some((_, bmp, _)) = a.art.clone() {
-        a.gfx.image(&bmp, r, 6.0, 1.0);
+        // Liquid glass: the cover as a piece of thick glass, its rim bending the picture, lit from
+        // the top left.
+        let size = unsafe { bmp.GetSize() };
+        let (w, h) = (size.width.round() as u32, size.height.round() as u32);
+        let glassy = a.settings.glass && w > 8 && h > 8 && {
+            let amount = w.min(h) as f32 * 0.06;
+            a.glass_map(w, h).is_some_and(|map| a.gfx.image_glass(&bmp, &map, r, 6.0, amount, 1.0))
+        };
+        if glassy {
+            let rim = Rc::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0);
+            a.gfx.stroke_rrect_diag(rim, 5.5, 1.2, (WHITE, 0.55), (WHITE, 0.06));
+        } else {
+            a.gfx.image(&bmp, r, 6.0, 1.0);
+        }
     } else {
         a.gfx.fill_rrect(r, 6.0, 0x2A2A2A, 1.0);
         icon::note(&a.gfx, r.cx(), r.cy(), 0x6A6A6A, 1.0);

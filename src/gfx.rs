@@ -92,6 +92,9 @@ pub struct Gfx {
     layers: std::cell::RefCell<Vec<ID2D1Layer>>,
     depth: std::cell::Cell<usize>,
     widths: HashMap<(String, u32, u32), f32>,
+    /// Liquid glass: three displacements (one per colour, a little apart), their colour picks,
+    /// and the sum. Made once, on first use.
+    glass_fx: std::cell::RefCell<Option<([ID2D1Effect; 3], [ID2D1Effect; 3], ID2D1Effect)>>,
     icon_family: HSTRING,
     pub w: i32,
     pub h: i32,
@@ -193,6 +196,7 @@ impl Gfx {
             layers: Default::default(),
             depth: Default::default(),
             widths: HashMap::new(),
+            glass_fx: std::cell::RefCell::new(None),
             icon_family,
             w: 0,
             h: 0,
@@ -706,6 +710,84 @@ impl Gfx {
             brush.SetOpacity((a * self.alpha).clamp(0.0, 1.0));
             let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
             self.rt.FillRoundedRectangle(&rr, &brush);
+        }
+    }
+
+    /// Draws `bmp` in the rounded rectangle `r` as a piece of thick glass: near its rim the picture
+    /// bends inward by up to `amount` bitmap px, as read from `map` (made by `glass::map` at the
+    /// bitmap's own size), with the colours parting very slightly. Returns false if it could not
+    /// (the caller then draws it plainly).
+    pub fn image_glass(&self, bmp: &ID2D1Bitmap, map: &ID2D1Bitmap, r: Rc, rad: f32, amount: f32, a: f32) -> bool {
+        unsafe {
+            let mut fx = self.glass_fx.borrow_mut();
+            if fx.is_none() {
+                let make = |id: &windows::core::GUID| self.dc.CreateEffect(id).ok();
+                let (Some(d0), Some(d1), Some(d2), Some(c0), Some(c1), Some(c2), Some(sum)) = (
+                    make(&CLSID_D2D1DisplacementMap),
+                    make(&CLSID_D2D1DisplacementMap),
+                    make(&CLSID_D2D1DisplacementMap),
+                    make(&CLSID_D2D1ColorMatrix),
+                    make(&CLSID_D2D1ColorMatrix),
+                    make(&CLSID_D2D1ColorMatrix),
+                    make(&CLSID_D2D1Composite),
+                ) else {
+                    return false;
+                };
+                let picks = [&c0, &c1, &c2];
+                for (i, c) in picks.iter().enumerate() {
+                    // Keep one colour channel (and full alpha); the three are added back together.
+                    let mut m = [0.0f32; 20];
+                    m[i * 4 + i] = 1.0;
+                    m[15] = 1.0;
+                    let bytes: Vec<u8> = m.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let _ = c.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, &bytes);
+                }
+                for d in [&d0, &d1, &d2] {
+                    let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_R.0 as u32).to_le_bytes());
+                    let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_G.0 as u32).to_le_bytes());
+                }
+                let _ = sum.SetInputCount(3);
+                let _ = sum.SetValue(D2D1_COMPOSITE_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_COMPOSITE_MODE_PLUS.0 as u32).to_le_bytes());
+                *fx = Some(([d0, d1, d2], [c0, c1, c2], sum));
+            }
+            let Some((disp, pick, sum)) = fx.as_ref() else { return false };
+            let (Ok(src), Ok(field)) = (windows::core::Interface::cast::<ID2D1Image>(bmp), windows::core::Interface::cast::<ID2D1Image>(map)) else { return false };
+            for i in 0..3 {
+                disp[i].SetInput(0, &src, true);
+                disp[i].SetInput(1, &field, true);
+                // DisplacementMap moves by scale·(value − 0.5): a full map swing is 2·amount.
+                let scale = 2.0 * amount * (1.0 + 0.07 * i as f32);
+                let _ = disp[i].SetValue(D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &scale.to_le_bytes());
+                let Ok(out) = disp[i].GetOutput() else { return false };
+                pick[i].SetInput(0, &out, true);
+                let Ok(one) = pick[i].GetOutput() else { return false };
+                sum.SetInput(i as u32, &one, true);
+            }
+            let Ok(image) = sum.GetOutput() else { return false };
+            // Clipped to the rounded rectangle, at the right opacity.
+            let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
+            let Ok(shape) = self.factory.CreateRoundedRectangleGeometry(&rr) else { return false };
+            let Ok(mask) = windows::core::Interface::cast::<ID2D1Geometry>(&shape) else { return false };
+            let Some(layer) = self.next_layer() else { return false };
+            let mut params = D2D1_LAYER_PARAMETERS {
+                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
+                geometricMask: std::mem::ManuallyDrop::new(Some(mask)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: (a * self.alpha).clamp(0.0, 1.0),
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.rt.PushLayer(&params, &layer);
+            std::mem::ManuallyDrop::drop(&mut params.geometricMask);
+            let size = bmp.GetSize();
+            let mut was = Matrix3x2::identity();
+            self.rt.GetTransform(&mut was);
+            self.rt.SetTransform(&(Matrix3x2::scale(r.w / size.width, r.h / size.height) * Matrix3x2::translation(r.x, r.y) * was));
+            self.dc.DrawImage(&image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            self.rt.SetTransform(&was);
+            self.pop_layer();
+            true
         }
     }
 

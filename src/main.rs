@@ -7,6 +7,7 @@ mod devices;
 mod drop;
 mod eyes;
 mod gfx;
+mod glass;
 mod guide;
 mod luma;
 mod media;
@@ -758,6 +759,8 @@ pub struct App {
     pub eq_mix: Spring,
     /// The equalizer bars as drawn: they rise quickly to the sound and fall back more slowly.
     pub eq_bars: [f32; 5],
+    /// Liquid glass refraction maps, by bitmap size (made once per size).
+    pub glass_maps: std::collections::HashMap<(u32, u32), Option<ID2D1Bitmap>>,
     last_playing: Instant,
     meter_on: bool,
     mini_busy: bool,
@@ -1065,6 +1068,7 @@ impl App {
             pics: std::collections::HashMap::new(),
             eq_mix: Spring::new(0.0, 170.0, 24.0),
             eq_bars: [0.0; 5],
+            glass_maps: std::collections::HashMap::new(),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
@@ -1490,6 +1494,18 @@ impl App {
             self.gfx.bitmap(art.w, art.h, &out)
         });
         self.pics.insert((name, px, tint), bmp.clone());
+        bmp
+    }
+
+    /// The refraction map for a picture `w`×`h` px (rim and bend scale with its size).
+    pub fn glass_map(&mut self, w: u32, h: u32) -> Option<ID2D1Bitmap> {
+        if let Some(m) = self.glass_maps.get(&(w, h)) {
+            return m.clone();
+        }
+        let s = w.min(h) as f32;
+        let px = glass::map(w, h, s * 0.16, s * 0.14, s * 0.06);
+        let bmp = self.gfx.bitmap(w, h, &px);
+        self.glass_maps.insert((w, h), bmp.clone());
         bmp
     }
 
