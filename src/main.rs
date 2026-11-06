@@ -1442,10 +1442,12 @@ impl App {
         let bmp = ui::prop_bytes(name).and_then(|bytes| media::decode_square(bytes, px).ok()).and_then(|art| {
             let mut out = art.px.clone();
             let (r, g, b) = (tint >> 16 & 255, tint >> 8 & 255, tint & 255);
+            // By brightness: a picture drawn in colour takes the tint just as a white one does.
             for p in out.chunks_exact_mut(4) {
-                p[0] = (p[0] as u32 * b / 255) as u8;
-                p[1] = (p[1] as u32 * g / 255) as u8;
-                p[2] = (p[2] as u32 * r / 255) as u8;
+                let l = (p[0].max(p[1]).max(p[2])) as u32;
+                p[0] = (l * b / 255) as u8;
+                p[1] = (l * g / 255) as u8;
+                p[2] = (l * r / 255) as u8;
             }
             self.gfx.bitmap(art.w, art.h, &out)
         });
@@ -3769,17 +3771,23 @@ impl App {
                 self.go_view(if on { ui::View::OldNotes } else { ui::View::Page });
                 self.reminder_top = 0;
             }
+            // On the form's main screen this saves; with a picker open it goes back to that screen.
             Act::FormNext => {
                 match self.form.as_mut() {
-                    Some(f) if f.step == 2 || f.date.is_some() => self.close_form(true),
-                    Some(f) if !f.title.trim().is_empty() => f.step += 1,
+                    Some(f) if f.step > 0 => f.step = 0,
+                    Some(f) if !f.title.trim().is_empty() => self.close_form(true),
                     _ => {}
                 }
             }
             Act::FormBack => {
                 match self.form.as_mut() {
-                    Some(f) if f.step > 0 => f.step -= 1,
+                    Some(f) if f.step > 0 => f.step = 0,
                     _ => self.close_form(false),
+                }
+            }
+            Act::FormOpen(step) => {
+                if let Some(f) = self.form.as_mut() {
+                    f.step = step;
                 }
             }
             Act::FormDay(d) => {
@@ -4334,12 +4342,12 @@ impl App {
     fn on_char(&mut self, c: u32) {
         let Some(f) = self.form.as_mut() else { return };
         match c {
-            8 => {
+            8 if f.step == 0 => {
                 f.title.pop();
             }
             13 => return self.act(Act::FormNext),
             27 => return self.act(Act::FormBack),
-            c if c >= 32 => {
+            c if c >= 32 && f.step == 0 => {
                 if let Some(ch) = char::from_u32(c).filter(|_| f.title.chars().count() < 60) {
                     f.title.push(ch);
                 }
@@ -4873,6 +4881,24 @@ fn demo_setup(a: &mut App, spec: &str) {
             f.step = step;
         }
         a.form_anim.x = step as f32;
+    }
+    // "rems=Listening@13:15@01234~Gym@18:30@135!": reminders for screenshots, in memory only;
+    // a trailing "!" makes it off.
+    if let Some(list) = kv.get("rems") {
+        a.brain.cfg.custom.clear();
+        for (i, item) in list.split('~').enumerate() {
+            let mut it = item.split('@');
+            let (title, time, days) = (it.next().unwrap_or(""), it.next().unwrap_or("09:00"), it.next().unwrap_or(""));
+            let off = days.ends_with('!');
+            a.brain.cfg.custom.push(luma::config::CustomReminder {
+                id: format!("demo-{i}"),
+                enabled: !off,
+                title: title.into(),
+                time: time.into(),
+                days: days.trim_end_matches('!').bytes().filter(|b| b.is_ascii_digit()).map(|b| b - b'0').collect(),
+                ..Default::default()
+            });
+        }
     }
     // "todos=go@16:54-00:00~Read~Gym@18:00-19:30": tasks for screenshots.
     if let Some(list) = kv.get("todos") {
