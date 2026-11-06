@@ -243,12 +243,15 @@ pub enum Act {
     GuideBack,
     ShutdownCancel,
     FocusMode(bool),
-    /// The reminder form: open its time (1) or days (2) picker.
-    FormOpen(u8),
+    /// The reminder form's repeat chip: on to the next of Every day, Weekdays, Weekends, Once.
+    FormCycle,
+    /// Reminders: make this one (by its place in the list) the big one.
+    ReminderPick(usize),
+    /// Reminders: the delete question was answered "Cancel".
+    RowCancel,
     /// The Focus page's wheel of lengths: slide it in (true) or put it away.
     FocusPick(bool),
     PomoPlan(u32, u32),
-    FormPreset(u8),
     DoNow(Tile),
     Drank,
     /// A rolling picker: it is dragged, turned and tapped, not clicked.
@@ -259,7 +262,6 @@ pub enum Act {
     ReminderSwitch(usize),
     OldNotes(bool),
     WaterReset,
-    FormDay(u8),
     FormDelete,
     FormNext,
     FormBack,
@@ -2513,6 +2515,16 @@ mod layout_tests {
     }
 
     #[test]
+    fn the_repeat_chip_steps_round() {
+        let every = PRESETS[0];
+        assert_eq!(next_repeat(every), PRESETS[1]);
+        assert_eq!(next_repeat(PRESETS[1]), PRESETS[2]);
+        assert_eq!(next_repeat(PRESETS[2]), [false; 7]);
+        assert_eq!(next_repeat([false; 7]), every);
+        assert_eq!(next_repeat([true, false, true, false, false, false, false]), every);
+    }
+
+    #[test]
     fn the_wash_rises_without_a_jump_and_fades_away() {
         assert_eq!(wash_curve(0.0, 0.0), 0.0);
         assert!(wash_curve(0.05, 0.0) < 0.1);
@@ -3257,7 +3269,7 @@ fn care_detail(a: &mut App, lx: f32, tile: Tile) {
     } else {
         a.gfx.ui(&text, line, SMALL, 400, 0xD8D8DA, 1.0, Align::L);
     }
-    toggle(a, Rc::new(lx + 354.0, 46.0, SWITCH.0, SWITCH.1), (0, tile as i32), on, Act::Set(tile.key()));
+    toggle(a, Rc::new(lx + 354.0, 46.0, SWITCH.0, SWITCH.1), (0, tile as i32), on, Act::Set(tile.key()), SWITCH_GREEN);
     let now = Rc::new(lx + 284.0, 88.0, 108.0, 28.0);
     let h = btn(a, now, 0.05);
     a.gfx.fill_rrect(now, 14.0, 0xFFFFFF, 0.14 + 0.1 * h);
@@ -3692,13 +3704,16 @@ fn drop_wave(a: &mut App) {
 
 /// A switch: the knob glides and the track warms to green. `key` names what it switches, so it
 /// keeps its motion wherever a list has moved it to.
-fn toggle(a: &mut App, r: Rc, key: (i32, i32), on: bool, act: Act) {
+/// The lit colour of a switch: Care's green, and its brighter self under the pointer.
+const SWITCH_GREEN: (u32, u32) = (0x2F8F63, 0x3FB27E);
+
+fn toggle(a: &mut App, r: Rc, key: (i32, i32), on: bool, act: Act, tint: (u32, u32)) {
     let entry = a.switches.entry(key).or_insert((crate::Spring::new(if on { 1.0 } else { 0.0 }, 300.0, 30.0), on));
     entry.1 = on;
     let k = entry.0.x.clamp(0.0, 1.0);
     let h = btn(a, r, 0.04).clamp(0.0, 1.0);
     let off = mix(0x2C2C2F, 0x48484C, h);
-    let lit = mix(0x2F8F63, 0x3FB27E, h);
+    let lit = mix(tint.0, tint.1, h);
     a.gfx.fill_rrect(r, r.h / 2.0, mix(off, lit, k), 1.0);
     let knob = r.x + r.h / 2.0 + (r.w - r.h) * k;
     let radius = r.h / 2.0 - 3.0;
@@ -3729,97 +3744,154 @@ fn todo(a: &mut App, lx: f32) {
     title(a, lx, "Reminders");
     head_button(a, Rc::new(lx + SLOT_ADD.0, 7.0, 24.0, 24.0), Act::ReminderAdd, |g, x, y| icon::plus(g, x, y, 5.0, 1.8, WHITE, 1.0));
     let old = a.todo.tasks.len();
-    let top = a.reminder_top;
     let rows = a.reminders();
     if rows.is_empty() && old == 0 {
-        a.gfx.ui("No reminders yet", Rc::new(lx, 66.0, 420.0, 22.0), BODY, 400, 0x6D6D6D, 1.0, Align::C);
+        pic(a, "t_todo", lx + 210.0, 70.0, 30.0, REMIND, 1.0);
+        a.gfx.ui("No reminders yet · Press + to add one", Rc::new(lx, 92.0, 420.0, 20.0), BODY, 400, 0xB8B8BC, 1.0, Align::C);
         return;
     }
-    let pos = a.list_pos.x;
-    // A single reminder sits in the middle rather than at the top of an empty page.
-    let first_y = if rows.len() == 1 && old == 0 { 80.0 } else { LIST_Y };
-    a.gfx.push_clip(Rc::new(lx, 38.0, 420.0, 84.0));
-    // Old notes come after the last reminder.
-    if old > 0 {
-        let cy = first_y + (rows.len() as f32 - pos) * LIST_GAP;
-        let row = Rc::new(lx + 24.0, cy - 16.0, 356.0, 32.0);
-        a.gfx.ui(&format!("Old notes ({old})"), Rc::new(lx + 30.0, row.y, 260.0, row.h), BODY, 400, 0x8A8A8A, 1.0, Align::L);
-        if rows.len() >= top && rows.len() - top < LIST_ROWS {
-            hit(a, row, Act::OldNotes(true));
-        }
-    }
-    // The row just deleted slides off and the ones below close the gap.
-    let gone = a.gone.clone().filter(|_| a.gone_mix.x > 0.01);
-    let k = a.gone_mix.x.clamp(0.0, 1.0);
-    if let Some((at, name, time)) = &gone {
-        let cy = first_y + (*at as f32 - pos) * LIST_GAP;
-        let dx = -70.0 * (1.0 - k);
-        a.gfx.ui(time, Rc::new(lx + 30.0 + dx, cy - 13.0, 64.0, 26.0), 20.0, 600, 0x5A5A5E, k, Align::L);
-        a.gfx.ui(name, Rc::new(lx + 104.0 + dx, cy - 13.0, 240.0, 18.0), BODY, 500, WHITE, k, Align::L);
-    }
-    // A single reminder is centred across the page; a list keeps its left edge.
-    let single = if rows.len() == 1 && old == 0 {
-        let r = &rows[0];
-        let mut on = [false; 7];
-        for d in &r.days {
-            on[*d as usize % 7] = true;
-        }
-        let text = a.gfx.measure(&r.title, BODY, 500).max(a.gfx.measure(&days_label(&on), 11.0, 400)).min(280.0);
-        let width = a.gfx.measure(&r.time, 20.0, 600) + 14.0 + text;
-        (210.0 - width / 2.0 - 30.0).max(0.0)
+    let now = chrono::Local::now();
+    let pick = a.hero_reminder(&rows, now);
+    let chips = rows.len() > 1 || old > 0;
+    let cy = if chips { 64.0 } else { 82.0 };
+    if let Some(i) = pick {
+        hero(a, lx, cy, i, &rows[i], now);
     } else {
-        0.0
+        a.gfx.ui(&format!("Old notes ({old})"), Rc::new(lx, cy - 11.0, 420.0, 22.0), BODY, 500, 0xB8B8BC, 1.0, Align::C);
+    }
+    if chips {
+        reminder_chips(a, lx, &rows, pick, old);
+    }
+}
+
+/// The reminder in the middle of the page: its time large, its name, and when it rings next.
+/// Pointing at it brings out its switch and a trash; the trash asks first.
+fn hero(a: &mut App, lx: f32, cy: f32, i: usize, r: &crate::luma::config::CustomReminder, now: chrono::DateTime<chrono::Local>) {
+    let band = Rc::new(lx + 24.0, cy - 29.0, 372.0, 58.0);
+    let key = format!("r:{}", r.id);
+    let asking = swipe_of(a, &key);
+    let near = hovering(a, band) || asking > 0.05;
+    let k = flip(a, 50, near);
+    // A deleted one fades out where it was, while the next one comes in.
+    let gone = a.gone.clone().filter(|_| a.gone_mix.x > 0.01);
+    let base = a.gfx.alpha;
+    if let Some((_, name, time)) = &gone {
+        let g = a.gone_mix.x.clamp(0.0, 1.0);
+        a.gfx.alpha = base * g;
+        a.gfx.ui(time, Rc::new(lx + 24.0, cy - 24.0, 372.0, 48.0), 40.0, 600, 0x5A5A5E, 1.0, Align::C);
+        let _ = name;
+        a.gfx.alpha = base * (1.0 - g);
+    }
+    if k > 0.01 {
+        a.gfx.fill_rrect(band, 18.0, 0xFFFFFF, 0.06 * k);
+    }
+    // The group, centred; it makes room for the buttons while pointed at.
+    let on = r.enabled;
+    let days = days_of(r);
+    let when = match (on, a.brain.reminder_in(&r.id, now)) {
+        (true, Some(s)) => format!("{} · {}", in_words(s), days_label(&days)),
+        (true, None) => days_label(&days),
+        (false, _) => format!("Off · {}", days_label(&days)),
     };
-    for (n, r) in rows.iter().enumerate() {
-        let shift = gone.as_ref().map_or(0.0, |g| if n >= g.0 { k } else { 0.0 });
-        let cy = first_y + (n as f32 + shift - pos) * LIST_GAP;
-        if !(20.0..150.0).contains(&cy) {
-            continue;
-        }
-        let slid = swipe_of(a, &format!("r:{}", r.id));
-        let shown = (top..top + LIST_ROWS).contains(&n) && slid < 0.05;
-        let base = a.gfx.alpha;
-        a.gfx.alpha = base * (1.0 - slid);
-        let dx = -36.0 * slid + single;
-        // The time is the switch: lit blue while on, grey while off.
-        let clock = Rc::new(lx + 24.0 + dx, cy - 16.0, a.gfx.measure(&r.time, 20.0, 600) + 12.0, 32.0);
-        let hc = if shown { btn(a, clock, 0.04) } else { 0.0 };
-        if hc > 0.0 {
-            a.gfx.fill_rrect(clock, 12.0, REMIND, 0.14 * hc.min(1.0));
-        }
-        let tone = if r.enabled { REMIND } else { 0x5A5A5E };
-        a.gfx.ui(&r.time, Rc::new(clock.x + 6.0, cy - 13.0, 64.0, 26.0), 20.0, 600, tone, 1.0, Align::L);
+    let tw = a.gfx.measure(&r.time, 40.0, 600);
+    let text = a.gfx.measure(&r.title, 17.0, 600).max(a.gfx.measure(&when, SMALL, 400)).min(230.0 - 60.0 * k);
+    let width = tw + 28.0 + text;
+    let x0 = lx + 210.0 - 50.0 * k - width / 2.0;
+    a.gfx.alpha *= 1.0 - 0.55 * asking;
+    a.gfx.ui(&r.time, Rc::new(x0, cy - 24.0, tw + 4.0, 48.0), 40.0, 600, if on { REMIND } else { 0x5A5A5E }, 1.0, Align::L);
+    a.gfx.line(x0 + tw + 14.0, cy - 15.0, x0 + tw + 14.0, cy + 15.0, 1.0, 0x5A5A5E, 0.9);
+    let tx = x0 + tw + 28.0;
+    a.gfx.ui(&r.title, Rc::new(tx, cy - 20.0, text + 2.0, 22.0), 17.0, 600, if on { WHITE } else { 0x8A8A8E }, 1.0, Align::L);
+    a.gfx.ui(&when, Rc::new(tx, cy + 3.0, text + 2.0, 16.0), SMALL, 400, 0x8E8E93, 1.0, Align::L);
+    a.gfx.alpha = base;
+    hit(a, band, Act::ReminderEdit(i));
+    if k > 0.01 && asking < 0.05 {
+        a.gfx.alpha = base * k;
+        let id = (1, r.id.bytes().fold(7i32, |h, b| h.wrapping_mul(31).wrapping_add(b as i32)));
+        toggle(a, Rc::new(lx + 308.0, cy - SWITCH.1 / 2.0, SWITCH.0, SWITCH.1), id, on, Act::ReminderSwitch(i), (REMIND, 0x5A92FF));
+        head_button(a, Rc::new(lx + 356.0, cy - 15.0, 30.0, 30.0), Act::RowTrash(0, i), |g, x, y| icon::trash(g, x, y, WHITE, 1.0));
+        a.gfx.alpha = base;
+    }
+    // "Delete?": the right of the band asks, Cancel or a red Delete.
+    if asking > 0.01 {
+        a.gfx.alpha = base * asking;
+        let panel = Rc::new(lx + 236.0, cy - 27.0, 158.0, 54.0);
+        a.gfx.fill_rrect(panel, 16.0, 0x1C1C1E, 1.0);
+        a.gfx.ui("Delete?", Rc::new(panel.x, panel.y + 3.0, panel.w, 18.0), SMALL, 600, WHITE, 1.0, Align::C);
+        let cancel = Rc::new(panel.x + 8.0, panel.y + 24.0, 68.0, 24.0);
+        let del = Rc::new(panel.x + 82.0, panel.y + 24.0, 68.0, 24.0);
+        let (hc, hd) = (btn(a, cancel, 0.06), btn(a, del, 0.06));
+        a.gfx.fill_rrect(cancel, 12.0, mix(0x3A3A3E, 0x4A4A4E, hc), 1.0);
+        a.gfx.ui("Cancel", cancel, SMALL, 500, WHITE, 1.0, Align::C);
         a.gfx.unzoom();
-        // The name and when it repeats; pressing it opens the form.
-        // Names line up down a list; a lone one sits right after its time.
-        let tw = if single > 0.0 { a.gfx.measure(&r.time, 20.0, 600) } else { 62.0 };
-        let row = Rc::new(lx + 30.0 + tw + 8.0 + dx, cy - 16.0, (366.0 - tw - single).max(120.0), 32.0);
-        let h = if shown { btn(a, row, 0.04) } else { 0.0 };
-        a.gfx.fill_rrect(row, 12.0, 0xFFFFFF, 0.05 * h.min(1.0));
-        a.gfx.ui(&r.title, Rc::new(row.x + 6.0, cy - 15.0, 280.0, 18.0), BODY, 500, if r.enabled { WHITE } else { 0x8A8A8E }, 1.0, Align::L);
-        let mut on = [false; 7];
-        for d in &r.days {
-            on[*d as usize % 7] = true;
-        }
-        a.gfx.ui(&days_label(&on), Rc::new(row.x + 6.0, cy + 2.0, 280.0, 14.0), 11.0, 400, 0x8E8E93, if r.enabled { 1.0 } else { 0.6 }, Align::L);
+        a.gfx.fill_rrect(del, 12.0, mix(0xFF453A, 0xFF6B60, hd), 1.0);
+        a.gfx.ui("Delete", del, SMALL, 600, WHITE, 1.0, Align::C);
         a.gfx.unzoom();
         a.gfx.alpha = base;
-        if shown {
-            hit(a, clock, Act::ReminderSwitch(n));
-            hit(a, row, Act::ReminderEdit(n));
-        }
-        // A hairline between rows, fading out at both ends like the horizon.
-        if n + 1 < rows.len() || old > 0 {
-            let (y, half) = (cy + LIST_GAP / 2.0, 170.0);
-            a.gfx.fill_rrect_hgrad(Rc::new(lx + 210.0 - half, y - 0.5, half, 1.0), 0.0, (0x8E8E8E, 0.0), (0x8E8E8E, 0.22));
-            a.gfx.fill_rrect_hgrad(Rc::new(lx + 210.0, y - 0.5, half, 1.0), 0.0, (0x8E8E8E, 0.22), (0x8E8E8E, 0.0));
-        }
-        if slid > 0.01 {
-            delete_button(a, lx + LIST_RIGHT, cy, 72.0, slid);
+        if asking > 0.5 {
+            hit(a, panel, Act::None);
+            hit(a, cancel, Act::RowCancel);
+            hit(a, del, Act::RowDelete);
         }
     }
-    a.gfx.pop_clip();
-    scrollbar(a, lx, top, rows.len() + (old > 0) as usize);
+}
+
+/// The other reminders, one small chip each under the big one; the big one's chip is lit.
+fn reminder_chips(a: &mut App, lx: f32, rows: &[crate::luma::config::CustomReminder], pick: Option<usize>, old: usize) {
+    const SHOWN: usize = 4;
+    const GAP: f32 = 8.0;
+    let total = rows.len() + (old > 0) as usize;
+    let start = pick.map_or(0, |p| p.saturating_sub(SHOWN - 1)).min(total.saturating_sub(SHOWN));
+    let count = total.min(SHOWN);
+    let w = (372.0 - GAP * (count as f32 - 1.0)) / count as f32;
+    for slot in 0..count {
+        let n = start + slot;
+        let r = Rc::new(lx + 24.0 + slot as f32 * (w + GAP), 94.0, w, 32.0);
+        let (name, sub, on, chosen, act) = match rows.get(n) {
+            Some(x) => (x.title.clone(), if x.enabled { x.time.clone() } else { "Off".to_string() }, x.enabled, pick == Some(n), Act::ReminderPick(n)),
+            None => ("Old notes".to_string(), format!("{old}"), true, false, Act::OldNotes(true)),
+        };
+        let h = btn(a, r, 0.05);
+        if chosen {
+            a.gfx.fill_rrect(r, 14.0, REMIND, 0.14);
+            a.gfx.stroke_rrect(r, 14.0, 1.4, REMIND, 1.0);
+        } else {
+            a.gfx.fill_rrect(r, 14.0, mix(0x1A1A1C, 0x2A2A2E, h), 1.0);
+        }
+        let alpha = if on { 1.0 } else { 0.5 };
+        a.gfx.ui(&name, Rc::new(r.x + 8.0, r.y + 3.0, r.w - 16.0, 15.0), 12.0, 600, WHITE, alpha, Align::C);
+        a.gfx.ui(&sub, Rc::new(r.x + 8.0, r.y + 17.0, r.w - 16.0, 13.0), 11.0, 400, if chosen { REMIND } else { 0x8E8E93 }, alpha, Align::C);
+        a.gfx.unzoom();
+        hit(a, r, act);
+    }
+}
+
+/// A reminder's weekdays, Monday first.
+fn days_of(r: &crate::luma::config::CustomReminder) -> [bool; 7] {
+    let mut on = [false; 7];
+    for d in &r.days {
+        on[*d as usize % 7] = true;
+    }
+    on
+}
+
+/// "in 5 min", "in 2 h 10 min", "in 3 days".
+fn in_words(secs: i64) -> String {
+    match secs {
+        s if s >= 2 * 86_400 => format!("in {} days", s / 86_400),
+        s if s >= 3600 => format!("in {} h {} min", s / 3600, s % 3600 / 60),
+        s => format!("in {} min", (s / 60).max(1)),
+    }
+}
+
+/// The repeat chip on the form: Every day, Weekdays, Weekends, Once, and round again; any other
+/// set of days goes back to Every day.
+pub fn next_repeat(days: [bool; 7]) -> [bool; 7] {
+    match PRESETS.iter().position(|p| *p == days) {
+        Some(i) if i + 1 < PRESETS.len() => PRESETS[i + 1],
+        Some(_) => [false; 7],
+        None => PRESETS[0],
+    }
 }
 
 /// When a reminder repeats, in a few words.
@@ -3858,13 +3930,13 @@ enum FormButton {
     Done,
 }
 
-/// The reminder form on one screen: the name, and under it a chip for the time and one for the
-/// days. A chip slides the controls away and its picker in, with a Done to come back, as the
-/// Focus page does with its wheel. An important day has only its name.
+/// The reminder form on one screen, done in three moves: type the name, roll the time, Save.
+/// The repeat is one chip that steps through Every day, Weekdays, Weekends and Once. An
+/// important day has only its name.
 fn form(a: &mut App, lx: f32) {
-    let (text, days, editing, step, date) = {
+    let (text, days, editing, date) = {
         let f = a.form.as_ref().unwrap();
-        (f.title.clone(), f.days, f.id.is_some(), f.step, f.date.clone())
+        (f.title.clone(), f.days, f.id.is_some(), f.date.clone())
     };
     let heading = match &date {
         Some(d) => format!("Day: {d}"),
@@ -3872,118 +3944,55 @@ fn form(a: &mut App, lx: f32) {
         None => "New reminder".to_string(),
     };
     back_title(a, lx, &heading, Act::FormBack);
-    if editing && step == 0 {
+    if editing {
         head_button(a, Rc::new(lx + 340.0, 7.0, 24.0, 24.0), Act::FormDelete, |g, x, y| icon::trash(g, x, y, 0xFF6B6B, 1.0));
     }
-    let (hour, minute) = (a.wheels[WheelId::FormHour as usize].index(), a.wheels[WheelId::FormMinute as usize].index());
-    let base = a.gfx.alpha;
-    let off = a.gfx.off;
-    // Each part slides out to the left and in from the right, as on the Focus page.
-    let parts = [flip(a, 60, step == 0), flip(a, 61, step == 1), flip(a, 62, step == 2)];
-    if parts[0] > 0.01 {
-        let live = step == 0;
-        a.gfx.alpha = base * parts[0];
-        a.gfx.offset(off.0 - 26.0 * (1.0 - parts[0]), off.1);
-        let tf = Rc::new(lx + 24.0, if date.is_some() { 62.0 } else { 44.0 }, 300.0, 34.0);
-        a.gfx.fill_rrect(tf, 12.0, 0x1A1A1C, 1.0);
-        let inner = Rc::new(tf.x + 14.0, tf.y, tf.w - 40.0, tf.h);
-        if text.is_empty() {
-            a.gfx.ui(if date.is_some() { "What is this day?" } else { "Reminder name" }, inner, BODY, 400, GREY, 1.0, Align::L);
-        } else {
-            a.gfx.ui(&text, inner, BODY, 500, WHITE, 1.0, Align::L);
-            icon::x_circle(&a.gfx, tf.x + tf.w - 18.0, tf.cy(), 7.0, 0xDADADA, 0x1A1A1C, 1.0);
-            if live {
-                hit(a, Rc::new(tf.x + tf.w - 30.0, tf.y, 28.0, tf.h), Act::FormClear);
-            }
-        }
-        if live && (a.born.elapsed().as_millis() / 530) % 2 == 0 {
-            let cw = a.gfx.measure(&text, BODY, 500).min(inner.w);
-            a.gfx.line(inner.x + cw + 1.0, tf.y + 9.0, inner.x + cw + 1.0, tf.y + tf.h - 9.0, 1.3, REMIND, 1.0);
-        }
-        if date.is_none() {
-            let clock = format!("{hour:02}:{minute:02}");
-            let w = a.gfx.measure(&clock, 13.0, 600) + 26.0;
-            form_chip(a, Rc::new(lx + 24.0, 88.0, w, 28.0), &clock, live, Act::FormOpen(1));
-            let when = days_label(&days);
-            let w2 = a.gfx.measure(&when, 13.0, 600) + 26.0;
-            form_chip(a, Rc::new(lx + 30.0 + w, 88.0, w2, 28.0), &when, live, Act::FormOpen(2));
-        }
-        form_done(a, lx, "Save", live && !text.trim().is_empty());
-        a.gfx.offset(off.0, off.1);
+    let tf = if date.is_some() { Rc::new(lx + 24.0, 62.0, 296.0, 36.0) } else { Rc::new(lx + 24.0, 42.0, 196.0, 36.0) };
+    a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
+    a.gfx.stroke_rrect(tf, 14.0, 1.0, 0x3A3A3E, 1.0);
+    let inner = Rc::new(tf.x + 14.0, tf.y, tf.w - 40.0, tf.h);
+    if text.is_empty() {
+        a.gfx.ui(if date.is_some() { "What is this day?" } else { "What should I remind you?" }, inner, SMALL, 400, GREY, 1.0, Align::L);
+    } else {
+        a.gfx.ui(&text, inner, BODY, 500, WHITE, 1.0, Align::L);
+        icon::x_circle(&a.gfx, tf.x + tf.w - 18.0, tf.cy(), 7.0, 0xDADADA, 0x1A1A1C, 1.0);
+        hit(a, Rc::new(tf.x + tf.w - 30.0, tf.y, 28.0, tf.h), Act::FormClear);
     }
-    if parts[1] > 0.01 && date.is_none() {
-        let live = step == 1;
-        a.gfx.alpha = base * parts[1];
-        a.gfx.offset(off.0 + 30.0 * (1.0 - parts[1]), off.1);
-        let cx = lx + 196.0;
+    if (a.born.elapsed().as_millis() / 530) % 2 == 0 {
+        let cw = a.gfx.measure(&text, BODY, 500).min(inner.w);
+        a.gfx.line(inner.x + cw + 1.0, tf.y + 9.0, inner.x + cw + 1.0, tf.y + tf.h - 9.0, 1.3, REMIND, 1.0);
+    }
+    if date.is_none() {
+        // The repeat: one chip, pressed to step on.
+        let when = days_label(&days);
+        let w = a.gfx.measure(&when, 13.0, 500) + 46.0;
+        let chip = Rc::new(lx + 24.0, 88.0, w, 30.0);
+        let h = btn(a, chip, 0.05);
+        a.gfx.fill_rrect(chip, 15.0, mix(0x1A1A1C, 0x2A2A2E, h), 1.0);
+        a.gfx.stroke_rrect(chip, 15.0, 1.0, 0x3A3A3E, 1.0);
+        icon::reset(&a.gfx, chip.x + 17.0, chip.cy(), 5.6, WHITE, 1.0);
+        a.gfx.ui(&when, Rc::new(chip.x + 30.0, chip.y, chip.w - 36.0, chip.h), 13.0, 500, WHITE, 1.0, Align::L);
+        a.gfx.unzoom();
+        hit(a, chip, Act::FormCycle);
+        // The time, always there.
+        let cx = lx + 276.0;
         let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
         let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-        pick_band(a, cx - 92.0, cx + 92.0, 82.0, 40.0);
-        wheel_sized(a, WheelId::FormHour, Rc::new(cx - 92.0, 36.0, 76.0, 92.0), &hours, 30.0, REMIND);
-        a.gfx.ui(":", Rc::new(cx - 12.0, 60.0, 24.0, 40.0), 30.0, 600, REMIND, 1.0, Align::C);
-        wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 16.0, 36.0, 76.0, 92.0), &minutes, 30.0, REMIND);
-        if !live {
-            a.hits.retain(|(_, act)| !matches!(act, Act::Wheel(WheelId::FormHour | WheelId::FormMinute)));
-        }
-        form_done(a, lx, "Done", live);
-        a.gfx.offset(off.0, off.1);
+        pick_band(a, cx - 56.0, cx + 56.0, 82.0, 38.0);
+        wheel_sized(a, WheelId::FormHour, Rc::new(cx - 56.0, 36.0, 46.0, 92.0), &hours, 26.0, REMIND);
+        a.gfx.ui(":", Rc::new(cx - 10.0, 62.0, 20.0, 36.0), 26.0, 600, WHITE, 1.0, Align::C);
+        wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 10.0, 36.0, 46.0, 92.0), &minutes, 26.0, REMIND);
     }
-    if parts[2] > 0.01 && date.is_none() {
-        let live = step == 2;
-        a.gfx.alpha = base * parts[2];
-        a.gfx.offset(off.0 + 30.0 * (1.0 - parts[2]), off.1);
-        let chosen = PRESETS.iter().position(|p| *p == days);
-        let mut x = lx + 40.0;
-        for (i, (name, w)) in [("Every day", 78.0), ("Weekdays", 78.0), ("Weekends", 78.0)].into_iter().enumerate() {
-            let r = Rc::new(x, 42.0, w, 28.0);
-            let on = chosen == Some(i);
-            let h = if live { btn(a, r, 0.04) } else { 0.0 };
-            if on {
-                a.gfx.fill_rrect(r, 14.0, REMIND, 0.16);
-                a.gfx.stroke_rrect(r, 14.0, 1.3, REMIND, 1.0);
-            } else {
-                a.gfx.fill_rrect(r, 14.0, mix(0x1E1E20, 0x303034, h.clamp(0.0, 1.0)), 1.0);
-            }
-            a.gfx.ui(name, r, SMALL, 500, if on { WHITE } else { 0xB0B0B4 }, 1.0, Align::C);
-            a.gfx.unzoom();
-            if live {
-                hit(a, r, Act::FormPreset(i as u8));
-            }
-            x += w + 6.0;
-        }
-        for (i, name) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].into_iter().enumerate() {
-            let r = Rc::new(lx + 40.0 + i as f32 * 40.0, 78.0, 36.0, 44.0);
-            let on = days[i];
-            let h = if live { btn(a, r, 0.06) } else { 0.0 };
-            a.gfx.ui(name, Rc::new(r.x, r.y + 2.0, r.w, 22.0), BODY, if on { 600 } else { 400 }, mix(if on { WHITE } else { 0x8A8A8E }, WHITE, h.clamp(0.0, 1.0)), 1.0, Align::C);
-            a.gfx.fill_circle(r.cx(), r.y + 32.0, 3.0, 3.0, if on { REMIND } else { 0x3A3A3E }, 1.0);
-            a.gfx.unzoom();
-            if live {
-                hit(a, r, Act::FormDay(i as u8));
-            }
-        }
-        form_done(a, lx, "Done", live);
-        a.gfx.offset(off.0, off.1);
-    }
-    a.gfx.alpha = base;
-}
-
-/// A chip on the form showing a choice; pressing it opens that choice.
-fn form_chip(a: &mut App, r: Rc, words: &str, live: bool, act: Act) {
-    let h = if live { btn(a, r, 0.06) } else { 0.0 };
-    a.gfx.fill_rrect(r, 14.0, mix(BUTTON, 0x3A3A3E, h), 1.0);
-    a.gfx.stroke_rrect(r, 14.0, 1.2, REMIND, 0.55 + 0.45 * h.clamp(0.0, 1.0));
-    a.gfx.ui(words, r, 13.0, 600, WHITE, 1.0, Align::C);
+    // Save: blue once there is a name.
+    let ready = !text.trim().is_empty();
+    let save = Rc::new(lx + 340.0, 64.0, 62.0, 36.0);
+    let h = if ready { btn(a, save, 0.06) } else { 0.0 };
+    a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0x5A92FF, h) } else { 0x3A3A3E }, 1.0);
+    a.gfx.ui("Save", save, BODY, 600, if ready { WHITE } else { 0x8E8E93 }, 1.0, Align::C);
     a.gfx.unzoom();
-    if live {
-        hit(a, r, act);
+    if ready {
+        hit(a, save, Act::FormNext);
     }
-}
-
-/// The round button on the right of the form: saves on the main screen, closes a picker.
-fn form_done(a: &mut App, lx: f32, label: &str, live: bool) {
-    let (cx, cy) = (lx + 376.0, 72.0);
-    labelled(a, cx, cy, label, live, Act::FormNext, |g, x, y| icon::tick(g, x, y, REMIND, 1.0));
 }
 
 

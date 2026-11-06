@@ -343,6 +343,18 @@ impl Scheduler {
             .min_by_key(|(_, d)| *d)
     }
 
+    /// How long until the user-made reminder `c` fires next (None while it is off).
+    pub fn custom_in(&self, c: &CustomReminder, now: DateTime<Local>, fired: &[String]) -> Option<TimeDelta> {
+        if !c.enabled {
+            return None;
+        }
+        let at = match self.custom_snooze.get(&c.id) {
+            Some(at) => *at,
+            None => next_custom_time(c, now, fired.contains(&c.id))?,
+        };
+        Some(at - now)
+    }
+
     /// The popup for `kind` was closed with `outcome`.
     pub fn finish(&mut self, kind: Kind, outcome: Outcome, cfg: &Config, now: DateTime<Local>) {
         self.last_closed = Some(now);

@@ -346,6 +346,12 @@ impl Brain {
     }
 
     /// Seconds until a reminder, if it is on.
+    /// Seconds until the user's reminder `id` rings next; None while it is off (or unknown).
+    pub fn reminder_in(&self, id: &str, now: DateTime<Local>) -> Option<i64> {
+        let c = self.cfg.custom.iter().find(|c| c.id == id)?;
+        self.sched.custom_in(c, now, &self.stats.fired).map(|d| d.num_seconds().max(0))
+    }
+
     pub fn next_in(&self, kind: Kind, now: DateTime<Local>) -> Option<i64> {
         self.sched.next_in(&self.cfg, now).into_iter().find(|(k, _)| *k == kind).map(|(_, s)| s)
     }

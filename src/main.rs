@@ -796,6 +796,8 @@ pub struct App {
     pub drag_count: usize,
     /// The Focus page has its wheel of lengths out.
     pub focus_pick: bool,
+    /// The reminder chosen to be the big one on the Reminders page (by id).
+    pub rem_pick: Option<String>,
     /// The last drop the Shelf could not take all of: when, how many it took, how many it turned away.
     pub shelf_note: Option<(Instant, usize, usize)>,
     /// A file is being dragged over the notch's window but not onto the notch yet: since when.
@@ -1078,6 +1080,7 @@ impl App {
             drag_over: false,
             drag_count: 0,
             focus_pick: false,
+            rem_pick: None,
             shelf_note: None,
             drag_near: None,
             dragging_out: false,
@@ -2334,8 +2337,18 @@ impl App {
             return;
         }
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
-            let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.reminders().len() + (!self.todo.tasks.is_empty()) as usize };
-            self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
+            if self.view == ui::View::OldNotes {
+                let rows = self.todo.tasks.len();
+                self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
+            } else {
+                // The wheel moves the big one along the reminders.
+                let rows = self.reminders();
+                if let Some(at) = self.hero_reminder(&rows, chrono::Local::now()) {
+                    let to = (at as i32 - notches.signum() as i32).clamp(0, rows.len() as i32 - 1) as usize;
+                    self.rem_pick = Some(rows[to].id.clone());
+                    self.swiped = None;
+                }
+            }
             self.kick();
             return;
         }
@@ -3186,6 +3199,19 @@ impl App {
     }
 
     /// The user's own reminders, by time of day.
+    /// Which reminder is the big one: the one picked, else the one that rings soonest, else the
+    /// first.
+    pub fn hero_reminder(&self, rows: &[luma::config::CustomReminder], now: chrono::DateTime<chrono::Local>) -> Option<usize> {
+        if rows.is_empty() {
+            return None;
+        }
+        if let Some(i) = self.rem_pick.as_ref().and_then(|id| rows.iter().position(|r| &r.id == id)) {
+            return Some(i);
+        }
+        let soonest = rows.iter().enumerate().filter_map(|(i, r)| self.brain.reminder_in(&r.id, now).map(|s| (s, i))).min();
+        Some(soonest.map_or(0, |(_, i)| i))
+    }
+
     pub fn reminders(&self) -> Vec<luma::config::CustomReminder> {
         let mut v = self.brain.cfg.custom.clone();
         v.sort_by(|a, b| a.time.cmp(&b.time));
@@ -3739,11 +3765,16 @@ impl App {
                     self.settings.save();
                 }
             }
-            Act::FormPreset(p) => {
+            Act::FormCycle => {
                 if let Some(f) = self.form.as_mut() {
-                    f.days = ui::PRESETS[p as usize];
+                    f.days = ui::next_repeat(f.days);
                 }
             }
+            Act::ReminderPick(i) => {
+                self.rem_pick = self.reminders().get(i).map(|r| r.id.clone());
+                self.swiped = None;
+            }
+            Act::RowCancel => self.swiped = None,
             Act::DoNow(tile) => {
                 use luma::Showing;
                 if self.brain.showing.is_none() {
@@ -3798,30 +3829,13 @@ impl App {
                 self.go_view(if on { ui::View::OldNotes } else { ui::View::Page });
                 self.reminder_top = 0;
             }
-            // On the form's main screen this saves; with a picker open it goes back to that screen.
+            // Save, once there is a name.
             Act::FormNext => {
-                match self.form.as_mut() {
-                    Some(f) if f.step > 0 => f.step = 0,
-                    Some(f) if !f.title.trim().is_empty() => self.close_form(true),
-                    _ => {}
+                if self.form.as_ref().is_some_and(|f| !f.title.trim().is_empty()) {
+                    self.close_form(true);
                 }
             }
-            Act::FormBack => {
-                match self.form.as_mut() {
-                    Some(f) if f.step > 0 => f.step = 0,
-                    _ => self.close_form(false),
-                }
-            }
-            Act::FormOpen(step) => {
-                if let Some(f) = self.form.as_mut() {
-                    f.step = step;
-                }
-            }
-            Act::FormDay(d) => {
-                if let Some(form) = self.form.as_mut() {
-                    form.days[d as usize] ^= true;
-                }
-            }
+            Act::FormBack => self.close_form(false),
             Act::FormClear => {
                 if let Some(form) = self.form.as_mut() {
                     form.title.clear();
@@ -4369,12 +4383,12 @@ impl App {
     fn on_char(&mut self, c: u32) {
         let Some(f) = self.form.as_mut() else { return };
         match c {
-            8 if f.step == 0 => {
+            8 => {
                 f.title.pop();
             }
             13 => return self.act(Act::FormNext),
             27 => return self.act(Act::FormBack),
-            c if c >= 32 && f.step == 0 => {
+            c if c >= 32 => {
                 if let Some(ch) = char::from_u32(c).filter(|_| f.title.chars().count() < 60) {
                     f.title.push(ch);
                 }
@@ -4913,7 +4927,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     // a trailing "!" makes it off.
     if let Some(list) = kv.get("rems") {
         a.brain.cfg.custom.clear();
-        for (i, item) in list.split('~').enumerate() {
+        for (i, item) in list.split('~').filter(|s| !s.is_empty()).enumerate() {
             let mut it = item.split('@');
             let (title, time, days) = (it.next().unwrap_or(""), it.next().unwrap_or("09:00"), it.next().unwrap_or(""));
             let off = days.ends_with('!');
