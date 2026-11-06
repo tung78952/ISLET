@@ -605,7 +605,9 @@ pub fn draw(a: &mut App) {
     a.gfx.alpha = na;
     // Only the black outline breathes; everything on it keeps its place.
     let breath = a.breath();
-    a.gfx.notch(cx, w + breath, h + 0.4 * breath, radius, ear, 0x000000, 1.0);
+    // The outline as drawn (breathing); the colour layers on it follow it, the content does not.
+    let (bw, bh) = (w + breath, h + 0.4 * breath);
+    a.gfx.notch(cx, bw, bh, radius, ear, 0x000000, 1.0);
     let left = cx - w / 2.0;
 
     // The drop light sits behind everything on the panel, header included.
@@ -625,11 +627,11 @@ pub fn draw(a: &mut App) {
     let seat = a.eye_seat();
     let lm = a.lyr_mix.x.clamp(0.0, 1.0);
     if a.page == Page::Music && lm > 0.01 && a.fade.x > 0.01 {
-        lyrics_backdrop(a, left, w, h, radius, lm);
+        lyrics_backdrop(a, cx - bw / 2.0, bw, bh, radius, lm);
     }
     if a.glow_mix.x > 0.01 || a.wash > 0.01 || a.focus_mix.x > 0.01 {
-        let clipped = a.gfx.push_notch_clip(cx, w, h, radius, ear);
-        ambient(a, left, w, h);
+        let clipped = a.gfx.push_notch_clip(cx, bw, bh, radius, ear);
+        ambient(a, cx - bw / 2.0, bw, bh);
         if clipped {
             a.gfx.pop_layer();
         }
