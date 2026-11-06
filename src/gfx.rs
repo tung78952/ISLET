@@ -838,6 +838,13 @@ impl Gfx {
         unsafe { self.rt.DrawEllipse(&e, &brush, width, None) };
     }
 
+    /// Rounded-rectangle stroke with a linear gradient from its top-left to its bottom-right.
+    pub fn stroke_rrect_diag(&self, r: Rc, rad: f32, width: f32, tl: (u32, f32), br: (u32, f32)) {
+        let Some(brush) = self.linear((r.x, r.y), (r.x + r.w, r.y + r.h), tl, br) else { return };
+        let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
+        unsafe { self.rt.DrawRoundedRectangle(&rr, &brush, width, None) };
+    }
+
     pub fn stroke_rrect_dashed(&self, r: Rc, rad: f32, width: f32, dash: f32, gap: f32, hex: u32, a: f32) {
         unsafe {
             let dashes = [dash / width, gap / width];

@@ -293,8 +293,15 @@ fn btn(a: &mut App, r: Rc, grow: f32) -> f32 {
     let key = ((r.x * 4.0).round() as i32, (r.y * 4.0).round() as i32);
     let hot = hovering(a, r);
     let pressed = hot && a.down.is_some_and(|(x, y, _)| r.contains(x, y));
-    let target = if pressed { -0.6 } else if hot { 1.0 } else { 0.0 };
+    // Liquid glass: pressed, it swells instead of sinking, and springs back with a little bounce.
+    let glass = a.settings.glass;
+    let target = if pressed { if glass { 1.8 } else { -0.6 } } else if hot { 1.0 } else { 0.0 };
     let e = a.hover.entry(key).or_insert((crate::Spring::new(0.0, 320.0, 24.0), 0.0));
+    if glass {
+        e.0.tune(360.0, 15.0);
+    } else {
+        e.0.tune(320.0, 24.0);
+    }
     let changed = e.1 != target;
     e.1 = target;
     let h = e.0.x;
@@ -1995,9 +2002,23 @@ fn short_date() -> String {
 }
 
 /// A round button in the header row with a line icon: the back button and its kin.
+/// Light liquid glass on `r`: a clear fill that lets the colour behind show, a sheen from the
+/// top, and a rim lit from the top left that fades toward the bottom right.
+fn glass(g: &Gfx, r: Rc, rad: f32, h: f32) {
+    let h = h.clamp(0.0, 1.5);
+    g.fill_rrect(r, rad, WHITE, 0.10 + 0.06 * h);
+    g.fill_rrect_vgrad(r, rad, (WHITE, 0.08), (WHITE, 0.0));
+    let rim = Rc::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0);
+    g.stroke_rrect_diag(rim, (rad - 0.5).max(0.0), 1.0, (WHITE, 0.42 + 0.2 * h.min(1.0)), (WHITE, 0.05));
+}
+
 fn head_button(a: &mut App, r: Rc, act: Act, draw: impl FnOnce(&Gfx, f32, f32)) {
     let h = btn(a, r, 0.15);
-    a.gfx.fill_circle(r.cx(), r.cy(), r.w / 2.0, r.w / 2.0, 0xFFFFFF, 0.1 + 0.12 * h);
+    if a.settings.glass {
+        glass(&a.gfx, r, r.w / 2.0, h);
+    } else {
+        a.gfx.fill_circle(r.cx(), r.cy(), r.w / 2.0, r.w / 2.0, 0xFFFFFF, 0.1 + 0.12 * h);
+    }
     draw(&a.gfx, r.cx(), r.cy());
     a.gfx.unzoom();
     hit(a, r, act);
@@ -2615,7 +2636,11 @@ fn labelled_hot(a: &mut App, cx: f32, cy: f32, label: &str, live: bool, hot: u32
     let r = Rc::new(cx - R, cy - R, 2.0 * R, 2.0 * R);
     let h = if live { btn(a, r, 0.08) } else { 0.0 };
     let y = cy - 1.5 * h.clamp(0.0, 1.0);
-    a.gfx.fill_circle(cx, y, R, R, mix(BUTTON, hot, h.clamp(0.0, 1.0)), 1.0);
+    if a.settings.glass {
+        glass(&a.gfx, Rc::new(cx - R, y - R, 2.0 * R, 2.0 * R), R, h);
+    } else {
+        a.gfx.fill_circle(cx, y, R, R, mix(BUTTON, hot, h.clamp(0.0, 1.0)), 1.0);
+    }
     draw(&a.gfx, cx, y);
     a.gfx.unzoom();
     a.gfx.ui(label, Rc::new(cx - 34.0, cy + R + 2.0, 68.0, 16.0), SMALL, 500, 0xE0E0E2, 1.0, Align::C);
@@ -2702,7 +2727,14 @@ fn focus_idle(a: &mut App, lx: f32, live: bool) {
 fn focus_chip(a: &mut App, r: Rc, key: i32, on: bool, words: &str, live: bool, act: Act) {
     let k = flip(a, key, on);
     let h = if live { btn(a, r, 0.06) } else { 0.0 };
-    a.gfx.fill_rrect(r, 14.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
+    if a.settings.glass {
+        let base = a.gfx.alpha;
+        a.gfx.alpha = base * (1.0 - k);
+        glass(&a.gfx, r, 14.0, h);
+        a.gfx.alpha = base;
+    } else {
+        a.gfx.fill_rrect(r, 14.0, mix(BUTTON, 0x48484C, h), 1.0 - k);
+    }
     a.gfx.stroke_rrect(r, 14.0, 1.5, RED, k);
     let size = if words.chars().count() > 3 { 11.5 } else { 13.0 };
     a.gfx.ui(words, r, size, 600, mix(0xE0E0E2, RED, k), 1.0, Align::C);
@@ -3344,6 +3376,7 @@ pub enum SetKey {
     Jam,
     Autostart,
     Minimal,
+    Glass,
     Stretch,
     RestEyes,
     Breathe,
@@ -3725,7 +3758,18 @@ fn toggle(a: &mut App, r: Rc, key: (i32, i32), on: bool, act: Act, tint: (u32, u
     a.gfx.fill_rrect(r, r.h / 2.0, mix(off, lit, k), 1.0);
     let knob = r.x + r.h / 2.0 + (r.w - r.h) * k;
     let radius = r.h / 2.0 - 3.0;
-    a.gfx.fill_circle(knob, r.cy(), radius, radius, mix(0xB4B4B8, 0xF2F2F6, k), 1.0);
+    let tone = mix(0xB4B4B8, 0xF2F2F6, k);
+    if a.settings.glass {
+        // Liquid glass: the knob widens while pressed and stretches as it slides.
+        let speed = a.switches.get(&key).map_or(0.0, |e| e.0.v.abs());
+        let pressed = hovering(a, r) && a.down.is_some_and(|(x, y, _)| r.contains(x, y));
+        let wide = radius * (1.0 + if pressed { 0.4 } else { 0.0 } + (speed * 0.05).min(0.25));
+        let half = (r.w / 2.0 - 3.0).min(wide);
+        let at = knob.clamp(r.x + 3.0 + half, r.x + r.w - 3.0 - half);
+        a.gfx.fill_rrect(Rc::new(at - half, r.cy() - radius, 2.0 * half, 2.0 * radius), radius, tone, 1.0);
+    } else {
+        a.gfx.fill_circle(knob, r.cy(), radius, radius, tone, 1.0);
+    }
     a.gfx.unzoom();
     hit(a, r, act);
 }
@@ -4013,7 +4057,11 @@ fn form(a: &mut App, lx: f32) {
         // The repeat: three plain choices side by side, the one in use lit.
         let chosen = repeat_choice(days);
         let group = Rc::new(lx + 24.0, 88.0, 172.0, 30.0);
-        a.gfx.fill_rrect(group, 15.0, 0x1A1A1C, 1.0);
+        if a.settings.glass {
+            glass(&a.gfx, group, 15.0, 0.0);
+        } else {
+            a.gfx.fill_rrect(group, 15.0, 0x1A1A1C, 1.0);
+        }
         let w = group.w / 3.0;
         for (i, name) in ["Daily", "Mon–Fri", "Once"].into_iter().enumerate() {
             let r = Rc::new(group.x + i as f32 * w + 2.0, group.y + 2.0, w - 4.0, group.h - 4.0);

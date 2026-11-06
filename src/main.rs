@@ -4152,6 +4152,7 @@ impl App {
                 self.jam.gap = if self.settings.jam_mode == 2 { 180.0 } else { 60.0 };
             }
             K::Autostart => sys::set_autostart(!sys::autostart_enabled()),
+            K::Glass => self.settings.glass = !self.settings.glass,
             K::Minimal => {
                 self.settings.minimal = !self.settings.minimal;
                 self.minimal_armed = true;
@@ -4380,6 +4381,7 @@ impl App {
         let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
         let s = &self.settings;
         let _ = AppendMenuW(m, check(s.pet), 23, w!("Show eyes"));
+        let _ = AppendMenuW(m, check(s.glass), 27, w!("Liquid glass"));
         let _ = AppendMenuW(m, check(self.lyrics_on), 22, w!("Show lyrics"));
         let _ = AppendMenuW(m, check(s.minimal), 24, w!("Small notch"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
@@ -4417,6 +4419,7 @@ impl App {
             21 => self.change_setting(ui::SetKey::Text),
             22 => self.change_setting(ui::SetKey::Lyrics),
             23 => self.change_setting(ui::SetKey::Eyes),
+            27 => self.change_setting(ui::SetKey::Glass),
             24 => self.change_setting(ui::SetKey::Minimal),
             25 => self.change_setting(ui::SetKey::Autostart),
             26 => self.brain.configure(|c| c.reminders.sleep.shutdown ^= true, chrono::Local::now()),
@@ -4863,6 +4866,7 @@ fn demo_setup(a: &mut App, spec: &str) {
     }
     a.settings.pomodoro |= kv.get("pomodoro") == Some(&"1");
     a.focus_pick = kv.get("pick") == Some(&"1");
+    a.settings.glass = kv.get("glass") == Some(&"1");
     if let Some(ms) = kv.get("drank").and_then(|v| v.parse::<u64>().ok()) {
         // The splash, caught `ms` after launch.
         a.drank_at = Some(Instant::now() + Duration::from_millis(ms));
