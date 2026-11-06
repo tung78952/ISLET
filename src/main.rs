@@ -77,7 +77,6 @@ const T_CAPS: usize = 11;
 const T_PHONE: usize = 12;
 /// How long after the last press Windows is asked what Caps Lock really is.
 const CAPS_SETTLE_MS: u32 = 250;
-const SWIPE_TIME: Duration = Duration::from_secs(4);
 /// A file on its way to the notch: the eyes start, wonder "what's that?" with a "?" for a
 /// moment, then just follow it (seconds since it came over the window).
 pub const CURIOUS_FROM: f32 = 0.45;
@@ -702,7 +701,6 @@ pub struct App {
     sample_mood: Option<eyes::Look>,
     pub swipe_last: String,
     pub swipe_mix: Spring,
-    swipe_until: Instant,
     /// The row that just left its list, sliding away (1 → 0), with what it said.
     pub gone: Option<(usize, String, String)>,
     pub gone_mix: Spring,
@@ -1016,7 +1014,6 @@ impl App {
             sample_mood: None,
             swipe_last: String::new(),
             swipe_mix: Spring::new(0.0, 260.0, 28.0),
-            swipe_until: Instant::now(),
             gone: None,
             gone_mix: Spring::new(0.0, 220.0, 26.0),
             wash_from: None,
@@ -1674,6 +1671,7 @@ impl App {
             self.view_mix.x = 0.0;
             self.brief = None;
             self.focus_pick = false;
+            self.swiped = None;
         }
         if m == Mode::Expanded {
             self.sync_wheels();
@@ -2336,7 +2334,6 @@ impl App {
         if self.expanded() && self.page == Page::Todo && self.form.is_none() {
             let rows = if self.view == ui::View::OldNotes { self.todo.tasks.len() } else { self.reminders().len() + (!self.todo.tasks.is_empty()) as usize };
             self.reminder_top = (self.reminder_top as i32 - notches.signum() as i32).clamp(0, rows.saturating_sub(2) as i32) as usize;
-            self.swiped = None;
             self.kick();
             return;
         }
@@ -3491,7 +3488,6 @@ impl App {
     fn reveal_delete(&mut self, key: String) {
         self.swipe_last = key.clone();
         self.swiped = Some(key);
-        self.swipe_until = Instant::now() + SWIPE_TIME;
         self.kick();
     }
 
@@ -3560,9 +3556,7 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
-        if !matches!(a, Act::RowTrash(..) | Act::RowDelete) {
-            self.swiped = None;
-        }
+        // "Delete?" stays until it is answered (Cancel or Delete), or the notch closes.
         match a {
             Act::PagePrev => self.go_page(self.page.prev()),
             Act::PageNext => self.go_page(self.page.next()),
@@ -3875,10 +3869,6 @@ impl App {
         }
         self.watch_shutdown();
         self.watch_brief();
-        if self.swiped.is_some() && Instant::now() >= self.swipe_until {
-            self.swiped = None;
-            self.kick();
-        }
         // Waiting device cards play once the current card is done (or the widgets closed).
         let device_done = match &self.toast {
             Some(t) if matches!(t.kind, ToastKind::Bluetooth(_) | ToastKind::Device(_)) => Instant::now() >= t.until,
@@ -4256,9 +4246,6 @@ impl App {
 
     fn on_down(&mut self, x: f32, y: f32) {
         let act = self.hit(x, y);
-        if act.is_none() && self.swiped.take().is_some() {
-            self.kick();
-        }
         if let Some(Act::Wheel(id)) = act {
             self.pick_wheel(id);
             let t = self.eye_time();

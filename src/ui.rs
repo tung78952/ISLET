@@ -3935,7 +3935,7 @@ pub fn repeat_choice(days: [bool; 7]) -> Option<usize> {
 fn days_label(days: &[bool; 7]) -> String {
     const NAMES: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
     match days {
-        [true, true, true, true, true, true, true] => "Every day".into(),
+        [true, true, true, true, true, true, true] => "Daily".into(),
         [true, true, true, true, true, false, false] => "Mon–Fri".into(),
         [false, false, false, false, false, true, true] => "Sat–Sun".into(),
         _ if !days.contains(&true) => "Once".into(),
@@ -3981,7 +3981,8 @@ fn form(a: &mut App, lx: f32) {
         None => "New reminder".to_string(),
     };
     back_title(a, lx, &heading, Act::FormBack);
-    let tf = if date.is_some() { Rc::new(lx + 24.0, 62.0, 296.0, 36.0) } else { Rc::new(lx + 24.0, 40.0, 198.0, 36.0) };
+    // Three columns, 20 apart: the name and its repeat, the time, Save.
+    let tf = if date.is_some() { Rc::new(lx + 24.0, 62.0, 296.0, 36.0) } else { Rc::new(lx + 24.0, 42.0, 172.0, 34.0) };
     a.gfx.fill_rrect(tf, 14.0, 0x1A1A1C, 1.0);
     a.gfx.stroke_rrect(tf, 14.0, 1.0, 0x3A3A3E, 1.0);
     let inner = Rc::new(tf.x + 14.0, tf.y, tf.w - 40.0, tf.h);
@@ -3999,10 +4000,10 @@ fn form(a: &mut App, lx: f32) {
     if date.is_none() {
         // The repeat: three plain choices side by side, the one in use lit.
         let chosen = repeat_choice(days);
-        let group = Rc::new(lx + 24.0, 90.0, 198.0, 30.0);
+        let group = Rc::new(lx + 24.0, 88.0, 172.0, 30.0);
         a.gfx.fill_rrect(group, 15.0, 0x1A1A1C, 1.0);
         let w = group.w / 3.0;
-        for (i, name) in ["Every day", "Mon–Fri", "Once"].into_iter().enumerate() {
+        for (i, name) in ["Daily", "Mon–Fri", "Once"].into_iter().enumerate() {
             let r = Rc::new(group.x + i as f32 * w + 2.0, group.y + 2.0, w - 4.0, group.h - 4.0);
             let k = flip(a, 55 + i as i32, chosen == Some(i));
             let h = btn(a, r, 0.05);
@@ -4013,17 +4014,17 @@ fn form(a: &mut App, lx: f32) {
             hit(a, r, Act::FormRepeat(i as u8));
         }
         // The time, always there.
-        let cx = lx + 276.0;
+        let cx = lx + 268.0;
         let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
         let minutes: Vec<String> = (0..60).map(|m| format!("{m:02}")).collect();
-        pick_band(a, cx - 56.0, cx + 56.0, 82.0, 38.0);
-        wheel_sized(a, WheelId::FormHour, Rc::new(cx - 56.0, 36.0, 46.0, 92.0), &hours, 26.0, REMIND);
-        a.gfx.ui(":", Rc::new(cx - 10.0, 62.0, 20.0, 36.0), 26.0, 600, WHITE, 1.0, Align::C);
-        wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 10.0, 36.0, 46.0, 92.0), &minutes, 26.0, REMIND);
+        pick_band(a, cx - 52.0, cx + 52.0, 81.0, 38.0);
+        wheel_sized(a, WheelId::FormHour, Rc::new(cx - 52.0, 35.0, 44.0, 92.0), &hours, 26.0, REMIND);
+        a.gfx.ui(":", Rc::new(cx - 10.0, 61.0, 20.0, 36.0), 26.0, 600, WHITE, 1.0, Align::C);
+        wheel_sized(a, WheelId::FormMinute, Rc::new(cx + 8.0, 35.0, 44.0, 92.0), &minutes, 26.0, REMIND);
     }
     // Save: blue once there is a name.
     let ready = !text.trim().is_empty();
-    let save = Rc::new(lx + 340.0, 64.0, 62.0, 36.0);
+    let save = Rc::new(lx + 340.0, 63.0, 62.0, 36.0);
     let h = if ready { btn(a, save, 0.06) } else { 0.0 };
     a.gfx.fill_rrect(save, 18.0, if ready { mix(REMIND, 0x5A92FF, h) } else { 0x3A3A3E }, 1.0);
     a.gfx.ui("Save", save, BODY, 600, if ready { WHITE } else { 0x8E8E93 }, 1.0, Align::C);
