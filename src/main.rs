@@ -84,6 +84,13 @@ pub const CURIOUS_FROM: f32 = 0.45;
 pub const CURIOUS_UNTIL: f32 = 2.4;
 /// How long a face may wait for the eyes to be free before it no longer fits the moment.
 const MOOD_WAIT: Duration = Duration::from_secs(30);
+/// A new song shows its card only if the one before played this long: scrolling through short
+/// videos changes the "song" every few seconds, and a card for each would never stop.
+const SONG_SETTLE: Duration = Duration::from_secs(20);
+
+fn song_worth_showing(prev_lasted: Duration) -> bool {
+    prev_lasted >= SONG_SETTLE
+}
 /// How long the Shelf keeps saying how much of a drop did not fit.
 pub const SHELF_NOTE: Duration = Duration::from_secs(4);
 /// At the PC this long without a five-minute break: sleepy, and again this often after.
@@ -743,6 +750,8 @@ pub struct App {
     /// When a cup was last drunk from the notch: the drop on the Care page splashes for it.
     pub drank_at: Option<Instant>,
     last_song: String,
+    /// When the title now playing came on.
+    song_since: Instant,
     /// Preview run (ISLET_DEMO "sample=tour|eyes|jam|battery|0..11"): start and what it shows.
     sample: Option<(Instant, String)>,
     /// What the current Bluetooth/Device card is about (its icon), and a drive it can open.
@@ -1039,6 +1048,7 @@ impl App {
             last_drink: Instant::now(),
             drank_at: None,
             last_song: String::new(),
+            song_since: Instant::now(),
             sample: None,
             device_kind: devices::DeviceKind::Other,
             device_root: None,
@@ -2489,9 +2499,13 @@ impl App {
         // A new song passes by once, unless something else has the notch.
         if playing && song != self.last_song {
             let quiet = self.toast.is_none() && !self.expanded() && !self.yielded && !self.hidden && t > 5.0;
-            if quiet {
+            let settled = song_worth_showing(self.song_since.elapsed());
+            if quiet && settled {
                 self.toast(ToastKind::Song, &song, &artist, None);
+            } else if quiet {
+                sys::timelog("song card skipped: changing fast");
             }
+            self.song_since = Instant::now();
             self.last_song = song;
             self.meter_on = false;
         }
@@ -5204,6 +5218,17 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod song_tests {
+    use super::*;
+
+    #[test]
+    fn scrolling_short_videos_does_not_show_a_card_for_each() {
+        assert!(!song_worth_showing(Duration::from_secs(5)));
+        assert!(song_worth_showing(Duration::from_secs(25)));
     }
 }
 
