@@ -2578,7 +2578,8 @@ impl App {
             self.meter_on = false;
         }
         // Plugging in ends the battery scene at once.
-        let plugged = self.eye_feel.battery && self.power.is_some_and(|p| p.ac);
+        // Only the battery scene itself: the look at the bell borrows it, and must not be cut short.
+        let plugged = self.eye_feel.battery && !self.nudging_bell && self.power.is_some_and(|p| p.ac);
         let blocked = self.eyes_blocked() || plugged;
         let sense = eyes::Sense {
             t,
@@ -2925,6 +2926,7 @@ impl App {
         if self.history_unread > 0 && self.bell_nudged.elapsed() > BELL_NUDGE && !self.eyes_blocked() && sys::key_idle_ms() > 5000 && !self.eye_feel.battery {
             self.bell_nudged = Instant::now();
             self.nudging_bell = true;
+            sys::timelog("bell nudge");
             let t = self.eye_time();
             self.eyes.mind.ask(eyes::Peek::Battery, t);
         }
