@@ -48,11 +48,18 @@ pub fn offset_at(p: (f32, f32), w: f32, h: f32, radius: f32, depth: f32, amount:
 /// The displacement map for a `w`×`h` px picture, as premultiplied BGRA: red carries the shift
 /// across, green the shift down, both centred on 128 for `amount` px either way.
 pub fn map(w: u32, h: u32, radius: f32, depth: f32, amount: f32) -> Vec<u8> {
+    map_in(w, h, (0.0, 0.0, w as f32, h as f32), radius, depth, amount)
+}
+
+/// The same for a glass shape `shape` (x, y, w, h in px) inside a `w`×`h` px picture: outside the
+/// shape nothing moves. The shape may reach past the picture (the notch's top is off screen).
+pub fn map_in(w: u32, h: u32, shape: (f32, f32, f32, f32), radius: f32, depth: f32, amount: f32) -> Vec<u8> {
+    let (sx, sy, sw, sh) = shape;
     let mut px = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {
-            let p = (x as f32 + 0.5 - w as f32 / 2.0, y as f32 + 0.5 - h as f32 / 2.0);
-            let (ox, oy) = offset_at(p, w as f32, h as f32, radius, depth, amount);
+            let p = (x as f32 + 0.5 - (sx + sw / 2.0), y as f32 + 0.5 - (sy + sh / 2.0));
+            let (ox, oy) = offset_at(p, sw, sh, radius, depth, amount);
             let enc = |v: f32| (128.0 + 127.0 * (v / amount.max(1e-6)).clamp(-1.0, 1.0)).round() as u8;
             let i = ((y * w + x) * 4) as usize;
             px[i] = 128; // blue: unused

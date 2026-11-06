@@ -8,6 +8,7 @@ mod drop;
 mod eyes;
 mod gfx;
 mod glass;
+mod backdrop;
 mod guide;
 mod luma;
 mod media;
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
+use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap, ID2D1Bitmap1};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, RevokeDragDrop};
@@ -761,6 +762,12 @@ pub struct App {
     pub eq_bars: [f32; 5],
     /// Liquid glass refraction maps, by bitmap size (made once per size).
     pub glass_maps: std::collections::HashMap<(u32, u32), Option<ID2D1Bitmap>>,
+    /// Liquid glass behind the open notch: the screen capture while it runs, the refraction map
+    /// for the notch's size, when to try again after a failed start, and how far the glass shows.
+    pub backdrop: Option<backdrop::Backdrop>,
+    bg_map: Option<((u32, u32, u32), Option<ID2D1Bitmap>)>,
+    backdrop_retry: Option<Instant>,
+    pub glass_mix: Spring,
     last_playing: Instant,
     meter_on: bool,
     mini_busy: bool,
@@ -1069,6 +1076,10 @@ impl App {
             eq_mix: Spring::new(0.0, 170.0, 24.0),
             eq_bars: [0.0; 5],
             glass_maps: std::collections::HashMap::new(),
+            backdrop: None,
+            bg_map: None,
+            backdrop_retry: None,
+            glass_mix: Spring::new(0.0, 200.0, 26.0),
             last_playing: Instant::now() - Duration::from_secs(60),
             meter_on: false,
             mini_busy: false,
@@ -1507,6 +1518,52 @@ impl App {
         let bmp = self.gfx.bitmap(w, h, &px);
         self.glass_maps.insert((w, h), bmp.clone());
         bmp
+    }
+
+    /// Liquid glass is open: the notch is out and the glass may show the screen behind it.
+    fn glass_open(&self) -> bool {
+        self.settings.glass && self.mode == Mode::Expanded && !self.hidden && !self.minimal()
+    }
+
+    /// Starts or stops the screen capture behind the open notch, as the glass needs it.
+    fn watch_backdrop(&mut self) {
+        let want = self.glass_open();
+        if want && self.backdrop.is_none() && self.backdrop_retry.is_none_or(|t| Instant::now() >= t) {
+            match backdrop::Backdrop::start(self.hwnd, self.gfx.d3d()) {
+                Ok(b) => {
+                    sys::timelog("backdrop start");
+                    self.backdrop = Some(b);
+                }
+                Err(e) => {
+                    sys::timelog(&format!("backdrop failed: {e}"));
+                    self.backdrop_retry = Some(Instant::now() + Duration::from_secs(10));
+                }
+            }
+        } else if !want && self.backdrop.is_some() {
+            sys::timelog("backdrop stop");
+            self.backdrop = None;
+        }
+    }
+
+    /// The glass for the open notch (centre `cx`, `w`×`h`, corner `radius`, window units): the
+    /// screen behind it, the refraction map, where the picture's corner goes, and units per pixel.
+    pub fn backdrop_frame(&mut self, cx: f32, w: f32, h: f32, radius: f32) -> Option<(ID2D1Bitmap1, ID2D1Bitmap, (f32, f32), f32)> {
+        const MARGIN: f32 = 24.0;
+        let s = self.gfx.scale;
+        let (x0, ww, hh) = (cx - w / 2.0 - MARGIN, w + 2.0 * MARGIN, h + MARGIN);
+        let area = (self.pos.0 + (x0 * s).round() as i32, self.pos.1, (ww * s).round() as u32, (hh * s).round() as u32);
+        let bmp = self.backdrop.as_mut()?.latest(&self.gfx, area)?;
+        let key = (area.2, area.3, (radius * s).round() as u32);
+        if self.bg_map.as_ref().is_none_or(|m| m.0 != key) {
+            // The notch inside the picture; its top runs up past the screen edge, so only the
+            // sides and the rounded bottom bend.
+            let (m, r) = (MARGIN * s, radius * s);
+            let shape = (m, -r, area.2 as f32 - 2.0 * m, area.3 as f32 - m + r);
+            let px = glass::map_in(area.2, area.3, shape, r, 18.0 * s, 10.0 * s);
+            self.bg_map = Some((key, self.gfx.bitmap(area.2, area.3, &px)));
+        }
+        let map = self.bg_map.as_ref()?.1.clone()?;
+        Some((bmp, map, (x0, 0.0), 1.0 / s))
     }
 
     /// A prop's picture, `tinted` for the part in the character's colour.
@@ -2015,6 +2072,10 @@ impl App {
                 *bar += (to - *bar) * (1.0 - (-rate * dt).exp());
             }
         }
+        self.watch_backdrop();
+        let [tw, th] = t;
+        let settled = (self.sw.x - tw).abs() < 2.0 && (self.sh.x - th).abs() < 2.0;
+        let glass_to = if self.backdrop.is_some() && settled && self.fade.x > 0.9 { 1.0 } else { 0.0 };
         let ears = self.playing() && !self.hidden && (self.eq_mix.x > 0.01 || self.jam_show || (self.expanded() && self.page == Page::Music));
         spectrum::want(ears);
         if self.eye_feel.show != self.logged_eyes {
@@ -2052,6 +2113,7 @@ impl App {
             moving |= self.vol_stretch.step(0.0, sub);
             moving |= self.refuse.step(0.0, sub);
             moving |= self.lean.step(self.lean_to.0, sub);
+            moving |= self.glass_mix.step(glass_to, sub);
             moving |= self.lean_w.step(self.lean_to.1, sub);
             self.shelf_scroll_to = self.shelf_scroll_to.clamp(0.0, ui::shelf_scroll_max(self.shelf.items.len()));
             moving |= self.shelf_scroll.step(self.shelf_scroll_to, sub);
@@ -2133,6 +2195,8 @@ impl App {
     /// Looping visuals (the equalizer) that need frames even when no spring moves.
     fn continuous(&self) -> bool {
         self.effects()
+            // The screen behind the glass may be moving.
+            || self.backdrop.is_some()
             || self.sample.is_some()
             || self.mini_busy
             || self.wheels_moving
@@ -2172,7 +2236,9 @@ impl App {
 
     /// Looping visuals are capped near 60 fps; spring motion runs at the display rate.
     fn frame_due(&self) -> bool {
-        self.springs_moving || self.effects() || self.last_frame.elapsed() >= Duration::from_micros(15_500)
+        // With only the glass to follow the screen behind, 20 frames a second are plenty.
+        let every = if self.backdrop.is_some() && !self.springs_moving && !self.effects() { 50_000 } else { 15_500 };
+        self.springs_moving || self.effects() || self.last_frame.elapsed() >= Duration::from_micros(every)
     }
 
     pub fn render(&mut self) {
@@ -2212,6 +2278,9 @@ impl App {
         unsafe {
             let _ = self.gfx.attach(self.hwnd);
         }
+        self.backdrop = None;
+        self.bg_map = None;
+        self.glass_maps.clear();
         self.props.clear();
         self.pics.clear();
         self.shelf_icons.clear();
@@ -2777,7 +2846,8 @@ impl App {
         if message {
             self.private_until = Some(Instant::now() + Duration::from_millis(300));
         }
-        let showing = message || self.private_until.is_some_and(|t| Instant::now() < t);
+        // The glass looks at the screen: it must not see itself.
+        let showing = message || self.private_until.is_some_and(|t| Instant::now() < t) || self.backdrop.is_some();
         if showing != self.private && (self.demo.is_none() || self.storm.is_some()) {
             self.private = showing;
             let mode = if showing { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };

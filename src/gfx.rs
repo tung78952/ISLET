@@ -69,6 +69,13 @@ impl Rc {
     }
 }
 
+/// Three displacements (one per colour, a little apart), their colour picks, and their sum.
+struct GlassChain {
+    disp: [ID2D1Effect; 3],
+    pick: [ID2D1Effect; 3],
+    sum: ID2D1Effect,
+}
+
 pub struct Gfx {
     inter: Option<IDWriteFontCollection>,
     factory: ID2D1Factory,
@@ -92,9 +99,13 @@ pub struct Gfx {
     layers: std::cell::RefCell<Vec<ID2D1Layer>>,
     depth: std::cell::Cell<usize>,
     widths: HashMap<(String, u32, u32), f32>,
-    /// Liquid glass: three displacements (one per colour, a little apart), their colour picks,
-    /// and the sum. Made once, on first use.
-    glass_fx: std::cell::RefCell<Option<([ID2D1Effect; 3], [ID2D1Effect; 3], ID2D1Effect)>>,
+    /// Liquid glass: the refraction for pictures (the cover), and for the screen behind the open
+    /// notch (with its blur and saturation first). Made once, on first use.
+    glass_fx: std::cell::RefCell<Option<GlassChain>>,
+    glass_bg: std::cell::RefCell<Option<(ID2D1Effect, ID2D1Effect, GlassChain)>>,
+    /// What the backdrop chain was last wired to (picture, map, blur, bend): wiring it again
+    /// every frame cost far more than drawing it.
+    glass_bg_wired: std::cell::Cell<(usize, usize, u32, u32)>,
     icon_family: HSTRING,
     pub w: i32,
     pub h: i32,
@@ -197,6 +208,8 @@ impl Gfx {
             depth: Default::default(),
             widths: HashMap::new(),
             glass_fx: std::cell::RefCell::new(None),
+            glass_bg: std::cell::RefCell::new(None),
+            glass_bg_wired: std::cell::Cell::new((0, 0, 0, 0)),
             icon_family,
             w: 0,
             h: 0,
@@ -713,6 +726,83 @@ impl Gfx {
         }
     }
 
+    /// The Direct3D device under Direct2D (the backdrop capture copies frames on it).
+    pub fn d3d(&self) -> &ID3D11Device {
+        &self.d3d
+    }
+
+    /// Direct2D's view of a Direct3D texture (BGRA), for drawing it.
+    pub fn bitmap_from_texture(&self, tex: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D) -> Option<ID2D1Bitmap1> {
+        unsafe {
+            let surface: IDXGISurface = windows::core::Interface::cast(tex).ok()?;
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            self.dc.CreateBitmapFromDxgiSurface(&surface, Some(&props)).ok()
+        }
+    }
+
+    fn effect(&self, id: &windows::core::GUID) -> Option<ID2D1Effect> {
+        unsafe { self.dc.CreateEffect(id).ok() }
+    }
+
+    fn glass_chain(&self) -> Option<GlassChain> {
+        unsafe {
+            let disp = [self.effect(&CLSID_D2D1DisplacementMap)?, self.effect(&CLSID_D2D1DisplacementMap)?, self.effect(&CLSID_D2D1DisplacementMap)?];
+            let pick = [self.effect(&CLSID_D2D1ColorMatrix)?, self.effect(&CLSID_D2D1ColorMatrix)?, self.effect(&CLSID_D2D1ColorMatrix)?];
+            let sum = self.effect(&CLSID_D2D1Composite)?;
+            for (i, c) in pick.iter().enumerate() {
+                // Keep one colour channel (and full alpha); the three are added back together.
+                let mut m = [0.0f32; 20];
+                m[i * 4 + i] = 1.0;
+                m[15] = 1.0;
+                let bytes: Vec<u8> = m.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let _ = c.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, &bytes);
+            }
+            for d in &disp {
+                let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_R.0 as u32).to_le_bytes());
+                let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_G.0 as u32).to_le_bytes());
+            }
+            let _ = sum.SetInputCount(3);
+            let _ = sum.SetValue(D2D1_COMPOSITE_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_COMPOSITE_MODE_PLUS.0 as u32).to_le_bytes());
+            Some(GlassChain { disp, pick, sum })
+        }
+    }
+
+    /// `src` bent by `map` (up to `amount` px, the three colours a little apart).
+    fn refract(chain: &GlassChain, src: &ID2D1Image, map: &ID2D1Image, amount: f32) -> Option<ID2D1Image> {
+        unsafe {
+            for i in 0..3 {
+                chain.disp[i].SetInput(0, src, true);
+                chain.disp[i].SetInput(1, map, true);
+                // DisplacementMap moves by scale·(value − 0.5): a full map swing is 2·amount.
+                let scale = 2.0 * amount * (1.0 + 0.07 * i as f32);
+                let _ = chain.disp[i].SetValue(D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &scale.to_le_bytes());
+                let out = chain.disp[i].GetOutput().ok()?;
+                chain.pick[i].SetInput(0, &out, true);
+                let one = chain.pick[i].GetOutput().ok()?;
+                chain.sum.SetInput(i as u32, &one, true);
+            }
+            chain.sum.GetOutput().ok()
+        }
+    }
+
+    /// Draws `image` with its pixel (0,0) at `at`, `k` window units per pixel, under the current
+    /// transform.
+    fn draw_scaled(&self, image: &ID2D1Image, at: (f32, f32), kx: f32, ky: f32) {
+        unsafe {
+            let mut was = Matrix3x2::identity();
+            self.rt.GetTransform(&mut was);
+            self.rt.SetTransform(&(Matrix3x2::scale(kx, ky) * Matrix3x2::translation(at.0, at.1) * was));
+            self.dc.DrawImage(image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            self.rt.SetTransform(&was);
+        }
+    }
+
     /// Draws `bmp` in the rounded rectangle `r` as a piece of thick glass: near its rim the picture
     /// bends inward by up to `amount` bitmap px, as read from `map` (made by `glass::map` at the
     /// bitmap's own size), with the colours parting very slightly. Returns false if it could not
@@ -721,49 +811,11 @@ impl Gfx {
         unsafe {
             let mut fx = self.glass_fx.borrow_mut();
             if fx.is_none() {
-                let make = |id: &windows::core::GUID| self.dc.CreateEffect(id).ok();
-                let (Some(d0), Some(d1), Some(d2), Some(c0), Some(c1), Some(c2), Some(sum)) = (
-                    make(&CLSID_D2D1DisplacementMap),
-                    make(&CLSID_D2D1DisplacementMap),
-                    make(&CLSID_D2D1DisplacementMap),
-                    make(&CLSID_D2D1ColorMatrix),
-                    make(&CLSID_D2D1ColorMatrix),
-                    make(&CLSID_D2D1ColorMatrix),
-                    make(&CLSID_D2D1Composite),
-                ) else {
-                    return false;
-                };
-                let picks = [&c0, &c1, &c2];
-                for (i, c) in picks.iter().enumerate() {
-                    // Keep one colour channel (and full alpha); the three are added back together.
-                    let mut m = [0.0f32; 20];
-                    m[i * 4 + i] = 1.0;
-                    m[15] = 1.0;
-                    let bytes: Vec<u8> = m.iter().flat_map(|v| v.to_le_bytes()).collect();
-                    let _ = c.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, &bytes);
-                }
-                for d in [&d0, &d1, &d2] {
-                    let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_R.0 as u32).to_le_bytes());
-                    let _ = d.SetValue(D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_G.0 as u32).to_le_bytes());
-                }
-                let _ = sum.SetInputCount(3);
-                let _ = sum.SetValue(D2D1_COMPOSITE_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_COMPOSITE_MODE_PLUS.0 as u32).to_le_bytes());
-                *fx = Some(([d0, d1, d2], [c0, c1, c2], sum));
+                *fx = self.glass_chain();
             }
-            let Some((disp, pick, sum)) = fx.as_ref() else { return false };
+            let Some(chain) = fx.as_ref() else { return false };
             let (Ok(src), Ok(field)) = (windows::core::Interface::cast::<ID2D1Image>(bmp), windows::core::Interface::cast::<ID2D1Image>(map)) else { return false };
-            for i in 0..3 {
-                disp[i].SetInput(0, &src, true);
-                disp[i].SetInput(1, &field, true);
-                // DisplacementMap moves by scale·(value − 0.5): a full map swing is 2·amount.
-                let scale = 2.0 * amount * (1.0 + 0.07 * i as f32);
-                let _ = disp[i].SetValue(D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &scale.to_le_bytes());
-                let Ok(out) = disp[i].GetOutput() else { return false };
-                pick[i].SetInput(0, &out, true);
-                let Ok(one) = pick[i].GetOutput() else { return false };
-                sum.SetInput(i as u32, &one, true);
-            }
-            let Ok(image) = sum.GetOutput() else { return false };
+            let Some(image) = Self::refract(chain, &src, &field, amount) else { return false };
             // Clipped to the rounded rectangle, at the right opacity.
             let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: rad, radiusY: rad };
             let Ok(shape) = self.factory.CreateRoundedRectangleGeometry(&rr) else { return false };
@@ -781,14 +833,50 @@ impl Gfx {
             self.rt.PushLayer(&params, &layer);
             std::mem::ManuallyDrop::drop(&mut params.geometricMask);
             let size = bmp.GetSize();
-            let mut was = Matrix3x2::identity();
-            self.rt.GetTransform(&mut was);
-            self.rt.SetTransform(&(Matrix3x2::scale(r.w / size.width, r.h / size.height) * Matrix3x2::translation(r.x, r.y) * was));
-            self.dc.DrawImage(&image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-            self.rt.SetTransform(&was);
+            self.draw_scaled(&image, (r.x, r.y), r.w / size.width, r.h / size.height);
             self.pop_layer();
             true
         }
+    }
+
+    /// The screen behind the open notch as glass: `bmp` (captured pixels, its top-left at `at`,
+    /// `k` window units per pixel) blurred by `blur` px, its colours lifted, and bent near the rim
+    /// by `map` up to `amount` px. The caller clips to the notch.
+    pub fn backdrop_glass(&self, bmp: &ID2D1Bitmap1, map: &ID2D1Bitmap, at: (f32, f32), k: f32, amount: f32, blur: f32) -> bool {
+        unsafe {
+            let mut fx = self.glass_bg.borrow_mut();
+            if fx.is_none() {
+                let (Some(b), Some(s), Some(chain)) = (self.effect(&CLSID_D2D1GaussianBlur), self.effect(&CLSID_D2D1Saturation), self.glass_chain()) else { return false };
+                let _ = b.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_le_bytes());
+                let _ = s.SetValue(D2D1_SATURATION_PROP_SATURATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &1.4f32.to_le_bytes());
+                *fx = Some((b, s, chain));
+            }
+            let Some((b, s, chain)) = fx.as_ref() else { return false };
+            let wiring = (windows::core::Interface::as_raw(bmp) as usize, windows::core::Interface::as_raw(map) as usize, blur.to_bits(), amount.to_bits());
+            if self.glass_bg_wired.get() != wiring {
+                let (Ok(src), Ok(field)) = (windows::core::Interface::cast::<ID2D1Image>(bmp), windows::core::Interface::cast::<ID2D1Image>(map)) else { return false };
+                let _ = b.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_le_bytes());
+                b.SetInput(0, &src, true);
+                let Ok(soft) = b.GetOutput() else { return false };
+                s.SetInput(0, &soft, true);
+                let Ok(vivid) = s.GetOutput() else { return false };
+                if Self::refract(chain, &vivid, &field, amount).is_none() {
+                    return false;
+                }
+                self.glass_bg_wired.set(wiring);
+            }
+            let Ok(image) = chain.sum.GetOutput() else { return false };
+            self.draw_scaled(&image, at, k, k);
+            true
+        }
+    }
+
+    /// The notch's outline stroked with a gradient from its top-left to its bottom-right.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_notch_diag(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, width: f32, tl: (u32, f32), br: (u32, f32)) {
+        let Some(g) = self.notch_geom(cx, w, h, r, ear) else { return };
+        let Some(brush) = self.linear((cx - w / 2.0, 0.0), (cx + w / 2.0, h), tl, br) else { return };
+        unsafe { self.rt.DrawGeometry(&g, &brush, width, None) };
     }
 
     /// Draws a bitmap keeping its aspect ratio: `cover` fills `r` (cropping), otherwise it fits

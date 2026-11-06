@@ -616,7 +616,25 @@ pub fn draw(a: &mut App) {
     let (bw, bh) = (w + breath, h + 0.4 * breath);
     // Liquid glass: closed, the outline leans toward a pointer nearby; what is on it stays.
     let (lean, lean_w) = (a.lean.x, a.lean_w.x.max(0.0));
-    a.gfx.notch(cx + lean, bw + lean_w, bh, radius, ear, 0x000000, 1.0);
+    // Liquid glass, open: the screen behind shows through the notch, blurred, brighter in colour
+    // and bent at the rim; a thin black still lies over it so the words stay readable.
+    let glass_k = a.glass_mix.x.clamp(0.0, 1.0);
+    if glass_k > 0.01 {
+        if let Some((bmp, map, at, k)) = a.backdrop_frame(cx, bw, bh, radius) {
+            let clipped = a.gfx.push_notch_clip(cx, bw, bh, radius, ear);
+            let base = a.gfx.alpha;
+            a.gfx.alpha = base * glass_k;
+            a.gfx.backdrop_glass(&bmp, &map, at, k, 10.0 * a.gfx.scale, 10.0 * a.gfx.scale);
+            a.gfx.alpha = base;
+            if clipped {
+                a.gfx.pop_layer();
+            }
+        }
+    }
+    a.gfx.notch(cx + lean, bw + lean_w, bh, radius, ear, 0x000000, 1.0 - 0.7 * glass_k);
+    if glass_k > 0.01 {
+        a.gfx.stroke_notch_diag(cx, bw - 1.0, bh - 0.5, radius, ear, 1.2, (WHITE, 0.5 * glass_k), (WHITE, 0.05 * glass_k));
+    }
     let left = cx - w / 2.0;
 
     // The drop light sits behind everything on the panel, header included.
