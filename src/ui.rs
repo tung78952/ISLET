@@ -2657,6 +2657,19 @@ mod layout_tests {
     }
 
     #[test]
+    fn when_a_reminder_rings_reads_as_a_countdown_today_else_a_day() {
+        use chrono::TimeZone;
+        let t = |d: u32, h: u32, m: u32, s: u32| chrono::Local.with_ymd_and_hms(2026, 11, d, h, m, s).single().unwrap();
+        let now = t(7, 12, 0, 30);
+        assert_eq!(when_words(t(7, 12, 25, 0), now), "in 25 min");
+        assert_eq!(when_words(t(7, 14, 0, 0), now), "in 2 h");
+        assert_eq!(when_words(t(7, 15, 10, 0), now), "in 3 h 10 min");
+        assert_eq!(when_words(t(7, 12, 0, 40), now), "in 1 min");
+        assert_eq!(when_words(t(8, 9, 0, 0), now), "Tomorrow");
+        assert_eq!(when_words(t(9, 13, 56, 0), now), "Monday");
+    }
+
+    #[test]
     fn the_repeat_is_one_of_three_or_none() {
         assert_eq!(repeat_choice([true; 7]), Some(0));
         assert_eq!(repeat_choice(REPEATS[1]), Some(1));
@@ -3942,7 +3955,7 @@ fn todo(a: &mut App, lx: f32) {
 /// What a reminder says about when it rings: "in 2 h 10 min · Mon–Fri", or "Off · Mon–Fri".
 fn reminder_when(a: &App, r: &crate::luma::config::CustomReminder, now: chrono::DateTime<chrono::Local>) -> (String, String) {
     let days = days_label(&days_of(r));
-    let soon = a.brain.reminder_in(&r.id, now).map(in_words);
+    let soon = a.brain.reminder_in(&r.id, now).map(|s| when_words(now + chrono::TimeDelta::seconds(s), now));
     (if r.enabled { soon.unwrap_or_default() } else { "Off".to_string() }, days)
 }
 
@@ -4105,14 +4118,24 @@ fn days_of(r: &crate::luma::config::CustomReminder) -> [bool; 7] {
     on
 }
 
-/// "in 5 min", "in 2 h 10 min", "in 1 day", "in 3 days".
-fn in_words(secs: i64) -> String {
-    match secs {
-        s if s >= 2 * 86_400 => format!("in {} days", s / 86_400),
-        s if s >= 86_400 => "in 1 day".to_string(),
-        s if s >= 3600 => format!("in {} h {} min", s / 3600, s % 3600 / 60),
-        s => format!("in {} min", (s / 60).max(1)),
+/// When a reminder rings next, in a few words: a countdown today ("in 5 min", "in 2 h 10 min",
+/// minutes rounded up), else "Tomorrow" or the weekday; its time is shown beside it already.
+pub fn when_words(at: chrono::DateTime<chrono::Local>, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::Datelike;
+    let days = (at.date_naive() - now.date_naive()).num_days();
+    if days <= 0 {
+        let mins = ((at - now).num_seconds().max(0) + 59) / 60;
+        return match mins {
+            m if m >= 60 && m % 60 == 0 => format!("in {} h", m / 60),
+            m if m >= 60 => format!("in {} h {} min", m / 60, m % 60),
+            m => format!("in {} min", m.max(1)),
+        };
     }
+    if days == 1 {
+        return "Tomorrow".into();
+    }
+    const NAMES: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    NAMES[at.weekday().num_days_from_monday() as usize].into()
 }
 
 /// The form's three repeats: Every day, Mon–Fri, Once (no days).

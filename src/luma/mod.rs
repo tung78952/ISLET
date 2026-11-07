@@ -207,9 +207,11 @@ impl Brain {
         if let Some(due) = due {
             self.sched.opened(now);
             if heads_up {
+                crate::sys::timelog(&format!("reminder heads-up {due:?} {secs}s"));
                 self.showing = Some(Showing { due: due.clone(), heads_up_until: Some(now + TimeDelta::seconds(secs as i64)), card_at: None });
                 out.push(Event::HeadsUp(due, secs));
             } else {
+                crate::sys::timelog(&format!("reminder due {due:?}"));
                 self.showing = Some(Showing { due: due.clone(), heads_up_until: None, card_at: None });
                 out.push(Event::Show(due));
             }
@@ -253,6 +255,7 @@ impl Brain {
     pub fn answer(&mut self, outcome: Outcome, timed_out: bool, now: DateTime<Local>) -> Option<(u32, String)> {
         let s = self.showing.take()?;
         let answer = if timed_out { "timeout".to_string() } else { format!("{outcome:?}").to_lowercase() };
+        crate::sys::timelog(&format!("reminder answered {:?} {answer}", s.due));
         // Left unanswered by someone who was not there (music on, away from the PC): not a skip.
         let away = timed_out && self.live.idle() as i64 >= scheduler::minutes(self.cfg.idle_reset_minutes).num_seconds();
         match &s.due {
@@ -501,8 +504,26 @@ impl Brain {
         }
         let old = self.cfg.clone();
         self.cfg.custom.push(c);
-        self.sched.rearm_custom(&old, &self.cfg, now);
+        let (ahead, past) = self.sched.rearm_custom(&old, &self.cfg, now);
+        self.rearmed(ahead, past);
         self.save_config();
+    }
+
+    /// Reminders whose time, days or switch just changed: one now set for later today rings
+    /// then, even if it already rang today; one set for a time already gone today waits for its
+    /// next day instead of ringing at once.
+    fn rearmed(&mut self, ahead: Vec<String>, past: Vec<String>) {
+        if ahead.is_empty() && past.is_empty() {
+            return;
+        }
+        crate::sys::timelog(&format!("reminders rearmed ahead={ahead:?} past={past:?}"));
+        self.stats.fired.retain(|f| !ahead.contains(f));
+        for id in past {
+            if !self.stats.fired.contains(&id) {
+                self.stats.fired.push(id);
+            }
+        }
+        self.save_stats();
     }
 
     /// Ticked off (or back) on the To-do page.
@@ -524,7 +545,9 @@ impl Brain {
             }
             None => return,
         }
-        self.sched.rearm_custom(&old, &self.cfg, now);
+        crate::sys::timelog(&format!("reminder saved id={id:?} time={time}"));
+        let (ahead, past) = self.sched.rearm_custom(&old, &self.cfg, now);
+        self.rearmed(ahead, past);
         self.save_config();
     }
 
@@ -533,7 +556,8 @@ impl Brain {
         if let Some(c) = self.cfg.custom.iter_mut().find(|c| c.id == id) {
             c.enabled = on;
         }
-        self.sched.rearm_custom(&old, &self.cfg, now);
+        let (ahead, past) = self.sched.rearm_custom(&old, &self.cfg, now);
+        self.rearmed(ahead, past);
         self.save_config();
     }
 
@@ -564,4 +588,36 @@ impl Brain {
         self.cfg.custom.iter().find(|c| c.id == id)
     }
 
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(h: u32, m: u32) -> DateTime<Local> {
+        // A Saturday.
+        Local.with_ymd_and_hms(2026, 11, 7, h, m, 0).single().unwrap()
+    }
+
+    #[test]
+    fn a_reminder_moved_later_after_ringing_rings_again_today() {
+        let mut b = Brain::demo(at(13, 0));
+        b.save_reminder(None, "Listen", "13:25", (0..7).collect(), at(13, 0));
+        let id = b.cfg.custom[0].id.clone();
+        // It rang at 13:25 and was left.
+        b.stats.fired.push(id.clone());
+        assert!(b.reminder_in(&id, at(13, 30)).unwrap() > 20 * 3600);
+        b.save_reminder(Some(&id), "Listen", "13:56", (0..7).collect(), at(13, 30));
+        assert_eq!(b.reminder_in(&id, at(13, 30)), Some(26 * 60));
+    }
+
+    #[test]
+    fn a_reminder_moved_to_a_time_gone_today_waits_for_its_next_day() {
+        let mut b = Brain::demo(at(14, 0));
+        b.save_reminder(None, "Listen", "13:50", (0..7).collect(), at(14, 0));
+        let id = b.cfg.custom[0].id.clone();
+        assert!(b.stats.fired.contains(&id));
+        assert_eq!(b.reminder_in(&id, at(14, 0)), Some(23 * 3600 + 50 * 60));
+    }
 }

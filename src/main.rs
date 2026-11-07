@@ -3183,8 +3183,10 @@ impl App {
             Due::Focus(min) => (ToastKind::Focus, "Focus time's up!".into(), format!("{min} min · great work")),
         };
         if self.mode == Mode::Expanded {
+            sys::timelog(&format!("reminder card waits: notch open {due:?}"));
             return;
         }
+        sys::timelog(&format!("reminder card shown {due:?}"));
         // Back from being covered: no second ring, and the act is over.
         let back = self.brain.showing.as_ref().is_some_and(|s| s.card_at.is_some());
         if !back {
@@ -3212,8 +3214,10 @@ impl App {
             Due::Focus(_) => "Focus".to_string(),
         };
         if self.mode == Mode::Expanded {
+            sys::timelog(&format!("reminder heads-up waits: notch open {due:?}"));
             return;
         }
+        sys::timelog(&format!("reminder heads-up shown {due:?} {secs}s"));
         self.toast(ToastKind::HeadsUp, &what, "Coming up", None);
         if let Some(t) = self.toast.as_mut().filter(|t| t.kind == ToastKind::HeadsUp) {
             t.until = Instant::now() + Duration::from_secs(secs as u64 + 2);
