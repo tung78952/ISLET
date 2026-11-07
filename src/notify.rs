@@ -234,9 +234,86 @@ pub fn spawn(hwnd: HWND) {
     });
 }
 
+/// Words that say a message carries a one-time code.
+const CODE_WORDS: [&str; 16] = [
+    "otp", "code", "mã", "ma xac", "ma otp", "xác thực", "xac thuc", "xác nhận", "xac nhan", "verification", "passcode", "pin", "验证码", "認証", "mật khẩu", "mat khau",
+];
+
+/// The one-time code in a message ("Mã OTP của bạn là 482913"), if it has one: a run of 4 to 8
+/// digits (or equal groups like "482 913") nearest a word that names a code. Amounts, times,
+/// dates and phone numbers are not codes.
+pub fn otp_code(text: &str) -> Option<String> {
+    let low = text.to_lowercase();
+    let keys: Vec<usize> = CODE_WORDS.iter().flat_map(|k| low.match_indices(k).map(|(i, _)| i)).collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let b = low.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let mut best: Option<(usize, String)> = None;
+    let mut i = 0;
+    while i < b.len() {
+        if !digit(i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        // Groups of digits joined by one space or dash.
+        let mut groups = Vec::new();
+        let mut j = i;
+        loop {
+            let g0 = j;
+            while digit(j) {
+                j += 1;
+            }
+            groups.push(&low[g0..j]);
+            if matches!(b.get(j), Some(b' ' | b'-')) && digit(j + 1) {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        i = j;
+        // Only equal groups (482 913, 1234-5678) make one code; otherwise the first group alone.
+        let same = groups.len() > 1 && groups.iter().all(|g| g.len() == groups[0].len() && g.len() >= 2);
+        let (code, end) = if same { (groups.concat(), j) } else { (groups[0].to_string(), start + groups[0].len()) };
+        let before = start.checked_sub(1).map(|k| b[k]);
+        let after = b.get(end).copied();
+        let rest = low[end..].trim_start();
+        let money = ["đ", "d ", "vnd", "vnđ", "usd", "$", "%", "k ", "tr"].iter().any(|m| rest.starts_with(m));
+        let glued = |c: Option<u8>| c.is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'.' | b',' | b':' | b'/' | b'+'));
+        let glued_after = |c: Option<u8>| c.is_some_and(|c| c.is_ascii_alphabetic()) || matches!(c, Some(b'.' | b',' | b':' | b'/')) && digit(end + 1);
+        if (4..=8).contains(&code.len()) && !money && !glued(before) && !glued_after(after) && !low[..start].ends_with('$') {
+            let dist = keys.iter().map(|&k| k.abs_diff(start)).min().unwrap_or(usize::MAX);
+            if best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                best = Some((dist, code));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_time_code_is_found_in_the_message() {
+        assert_eq!(otp_code("Ma OTP cua Quy khach la 482913. Tuyet doi khong chia se ma nay.").as_deref(), Some("482913"));
+        assert_eq!(otp_code("Your verification code is 482 913").as_deref(), Some("482913"));
+        assert_eq!(otp_code("123456 là mã xác thực Zalo của bạn. Không chia sẻ mã.").as_deref(), Some("123456"));
+        assert_eq!(otp_code("Mã xác nhận Shopee: 7391. Hết hạn sau 15 phút.").as_deref(), Some("7391"));
+        assert_eq!(otp_code("G-582014 is your Google verification code.").as_deref(), Some("582014"));
+        assert_eq!(otp_code("VCB: OTP 39128471 de xac thuc giao dich 2,000,000VND luc 15:04 07/11").as_deref(), Some("39128471"));
+    }
+
+    #[test]
+    fn amounts_times_and_phone_numbers_are_not_codes() {
+        assert_eq!(otp_code("TK 1234 +500,000VND luc 13:56 07/11. SD: 2,000,000VND"), None);
+        assert_eq!(otp_code("Goi 0901234567 de nhan ma"), None);
+        assert_eq!(otp_code("Dinner tonight at 1900?"), None);
+        assert_eq!(otp_code("Your code: 15000đ off"), None);
+    }
 
     #[test]
     fn phone_lines_are_app_sender_content() {

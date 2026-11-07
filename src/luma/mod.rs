@@ -24,6 +24,8 @@ use smart::{Habits, Live};
 
 /// An unanswered card asks again later, like a snooze (Luma's corner card did the same).
 pub const CARD_TIMEOUT: TimeDelta = TimeDelta::seconds(45);
+/// How long a Pomodoro's phase card has the notch before reminders come.
+const PHASE_CARD: TimeDelta = TimeDelta::seconds(8);
 const SCHEDULE_FILE: &str = "schedule.json";
 /// Ticks (2 s each) between schedule saves.
 const SAVE_EVERY: u32 = 15;
@@ -62,6 +64,8 @@ pub struct Brain {
     /// Off until the separate Luma app has been turned off, so nothing reminds twice.
     pub enabled: bool,
     ticks: u32,
+    /// When a Pomodoro last moved on: its card has the notch to itself for a moment.
+    phase_at: Option<DateTime<Local>>,
 }
 
 /// Islet's copy of Luma's data. Fast-time test runs keep theirs apart, so what Luma learns
@@ -125,7 +129,7 @@ impl Brain {
             sched.restore(&saved, &cfg, now);
         }
         let focus_store = dir.as_deref().map(FocusStore::load).unwrap_or_default();
-        Brain { dir, cfg, stats, habits, sched, live: Live::default(), focus: None, focus_store, showing: None, enabled: true, ticks: 0 }
+        Brain { dir, cfg, stats, habits, sched, live: Live::default(), focus: None, focus_store, showing: None, enabled: true, ticks: 0, phase_at: None }
     }
 
     fn save_stats(&self) {
@@ -168,6 +172,7 @@ impl Brain {
             match step {
                 Step::Phase(worked) => {
                     self.add_focus(worked, now);
+                    self.phase_at = Some(now);
                     if let Some((f, p)) = self.focus.as_ref().and_then(|f| f.pomodoro.map(|p| (f, p))) {
                         out.push(Event::Phase { resting: p.resting, round: p.round, rounds: p.rounds, minutes: f.minutes });
                     }
@@ -191,6 +196,10 @@ impl Brain {
             out.push(Event::Show(s.due.clone()));
         }
         if !self.enabled || self.showing.is_some() {
+            return out;
+        }
+        // "Break Time!" first: the reminders a break lets through come after its card.
+        if self.phase_at.is_some_and(|t| now - t < PHASE_CARD) {
             return out;
         }
         let heads_up = self.cfg.heads_up && !busy;
@@ -610,6 +619,21 @@ mod reminder_tests {
         assert!(b.reminder_in(&id, at(13, 30)).unwrap() > 20 * 3600);
         b.save_reminder(Some(&id), "Listen", "13:56", (0..7).collect(), at(13, 30));
         assert_eq!(b.reminder_in(&id, at(13, 30)), Some(26 * 60));
+    }
+
+    #[test]
+    fn a_break_card_is_not_covered_by_the_reminders_the_break_lets_through() {
+        let t0 = at(9, 0);
+        let mut b = Brain::demo(t0);
+        b.start_pomodoro(25, 5, 2, "", t0);
+        let end = t0 + TimeDelta::minutes(25);
+        let cfg = b.cfg.clone();
+        b.sched.finish(Kind::Water, Outcome::Done, &cfg, end - TimeDelta::minutes(cfg.reminders.water.minutes as i64 + 1));
+        let first = b.tick(end, 0, 0, false, false);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0], Event::Phase { resting: true, .. }));
+        let later = b.tick(end + TimeDelta::seconds(10), 0, 0, false, false);
+        assert!(later.iter().any(|e| matches!(e, Event::Show(Due::Builtin(_)) | Event::HeadsUp(Due::Builtin(_), _))));
     }
 
     #[test]

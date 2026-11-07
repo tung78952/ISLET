@@ -104,6 +104,11 @@ fn lean_toward(along: f32, dist: f32, w: f32) -> (f32, f32) {
     (shift, stretch)
 }
 
+/// Leaving a focus stretch with notifications kept quiet: how many to tell about.
+fn digest_after(was: bool, now: bool, held: u32) -> Option<u32> {
+    (was && !now && held > 0).then_some(held)
+}
+
 fn song_worth_showing(prev_lasted: Duration) -> bool {
     prev_lasted >= SONG_SETTLE
 }
@@ -272,6 +277,8 @@ pub enum ToastKind {
     Sample(u8),
     /// Counting down to switching the PC off at bedtime.
     Shutdown,
+    /// After a focus stretch: how many notifications were kept quiet (`title`).
+    Digest,
 }
 
 impl ToastKind {
@@ -308,6 +315,7 @@ impl ToastKind {
                 | ToastKind::Battery
                 | ToastKind::Net(_)
                 | ToastKind::Goal
+                | ToastKind::Digest
                 | ToastKind::Remind(_)
                 | ToastKind::HeadsUp
                 | ToastKind::LumaApp
@@ -510,6 +518,8 @@ pub struct NoticeInfo {
     pub phone_app: Option<String>,
     /// Where its icon comes from.
     pub icon: Option<PathBuf>,
+    /// The one-time code it carries, if any (shown large, copied with a click).
+    pub code: Option<String>,
 }
 
 impl NoticeInfo {
@@ -539,6 +549,7 @@ impl NoticeInfo {
             thumb: None,
             file_size: String::new(),
             phone_app: n.phone_app.clone(),
+            code: notify::otp_code(&format!("{} {}", n.title, n.body)),
             icon: match &n.phone_app {
                 Some(app) => phone_icon(app),
                 None => (!n.aumid.is_empty()).then(|| PathBuf::from(format!("shell:AppsFolder\\{}", n.aumid))),
@@ -742,6 +753,13 @@ pub struct App {
     pub toast: Option<Toast>,
     /// A notification that arrived while the widgets were open; shown when they close.
     held_notice: Option<Toast>,
+    /// When the one-time code on the card was copied.
+    pub code_copied: Option<Instant>,
+    /// Notifications kept quiet during this focus stretch, whether focus was on at the last
+    /// look, and a count waiting to be shown once the notch is free.
+    focus_held: u32,
+    focus_was: bool,
+    digest_due: Option<u32>,
     /// Clock minute last drawn by the idle tick.
     drawn_minute: u32,
     /// Current period of the pointer/yield poll (ms).
@@ -1068,6 +1086,10 @@ impl App {
             form: None,
             toast: None,
             held_notice: None,
+            code_copied: None,
+            focus_held: 0,
+            focus_was: false,
+            digest_due: None,
             drawn_minute: u32::MAX,
             zone_every: 50,
             hook_blind: false,
@@ -1355,7 +1377,7 @@ impl App {
                         ACT_TOAST
                     } else if matches!(t.kind, ToastKind::Device(true)) && self.device_root.is_some() {
                         WATER_TOAST
-                    } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal) {
+                    } else if matches!(t.kind, ToastKind::Charging(_) | ToastKind::Battery | ToastKind::Net(_) | ToastKind::Goal | ToastKind::Digest) {
                         TALL_TOAST
                     } else if matches!(t.kind, ToastKind::Water | ToastKind::Remind(_)) {
                         WATER_TOAST
@@ -2327,6 +2349,7 @@ impl App {
             ToastKind::Song => 2_400,
             ToastKind::Notice => reading_ms(4_000, title),
             ToastKind::Message => reading_ms(5_000, title),
+            ToastKind::Digest => 4_000,
             _ => 1_800,
         };
         let now = Instant::now();
@@ -2339,7 +2362,8 @@ impl App {
             until: now + Duration::from_millis(life),
         };
         if self.expanded() {
-            if matches!(kind, ToastKind::Notice | ToastKind::Message) {
+            // Notifications and a Pomodoro's phase change wait for the notch to close.
+            if matches!(kind, ToastKind::Notice | ToastKind::Message | ToastKind::Break | ToastKind::Focus | ToastKind::Digest) {
                 self.held_notice = Some(t);
             }
             return;
@@ -2686,7 +2710,7 @@ impl App {
         };
         // A new song passes by once, unless something else has the notch.
         if playing && song != self.last_song {
-            let quiet = self.toast.is_none() && !self.expanded() && !self.yielded && !self.hidden && t > 5.0;
+            let quiet = self.toast.is_none() && !self.expanded() && !self.yielded && !self.hidden && t > 5.0 && !self.focusing();
             let settled = song_worth_showing(self.song_since.elapsed());
             if quiet && settled {
                 self.toast(ToastKind::Song, &song, &artist, None);
@@ -2925,6 +2949,7 @@ impl App {
         if !seen {
             self.history_unread += 1;
         }
+        self.code_copied = None;
         self.notice = Some(info);
     }
 
@@ -3056,6 +3081,7 @@ impl App {
                 luma::Event::HeadsUp(due, secs) => self.present_heads_up(&due, secs),
                 luma::Event::Show(due) => self.present_after_look(due),
                 luma::Event::Phase { resting, round, rounds, minutes } => {
+                    sys::timelog(&format!("phase resting={resting} round={round}/{rounds}"));
                     sound::play(sound::Chime::Soft);
                     if resting {
                         self.react(eyes::Look::Love, 2);
@@ -3067,8 +3093,22 @@ impl App {
                 }
             }
         }
+        // Out of a focus stretch: what was kept quiet is counted once the notch is free.
+        let focusing = self.focusing();
+        if let Some(n) = digest_after(self.focus_was, focusing, self.focus_held) {
+            self.digest_due = Some(n);
+            self.focus_held = 0;
+        }
+        self.focus_was = focusing;
+        if let Some(n) = self.digest_due.filter(|_| self.toast.is_none() && self.mode != Mode::Expanded && !self.hidden && self.card_after.is_none() && self.brain.showing.is_none()) {
+            self.digest_due = None;
+            sys::timelog(&format!("digest shown n={n}"));
+            sound::play(sound::Chime::Soft);
+            let title = if n == 1 { "1 notification".to_string() } else { format!("{n} notifications") };
+            self.toast(ToastKind::Digest, &title, "while you focused", None);
+        }
         // Unread notifications get a poke now and then.
-        if self.history_unread > 0 && self.bell_nudged.elapsed() > BELL_NUDGE && !self.eyes_blocked() && sys::key_idle_ms() > 5000 && !self.eye_feel.battery {
+        if self.history_unread > 0 && self.bell_nudged.elapsed() > BELL_NUDGE && !self.focusing() && !self.eyes_blocked() && sys::key_idle_ms() > 5000 && !self.eye_feel.battery {
             self.bell_nudged = Instant::now();
             self.nudging_bell = true;
             sys::timelog("bell nudge");
@@ -3374,6 +3414,17 @@ impl App {
             Some(ToastKind::Message) => MESSAGE_TOAST[1],
             _ => TALL_TOAST[1],
         }
+    }
+
+    /// A focus stretch is running (not a break, not paused): notifications keep quiet.
+    pub fn focusing(&self) -> bool {
+        self.brain.focus.as_ref().is_some_and(|f| !f.resting() && !f.paused())
+    }
+
+    /// The one-time code on the card now showing, if it shows one.
+    pub fn code_on_card(&self) -> Option<String> {
+        let on = self.settings.show_text && self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Message);
+        self.notice.as_ref().filter(|_| on).and_then(|n| n.code.clone())
     }
 
     /// The current toast is a notification that can grow into its detail view.
@@ -4475,6 +4526,24 @@ impl App {
                 self.leave_yield();
                 return;
             }
+            if let Some(code) = self.code_on_card() {
+                let copied = sys::copy_text(self.hwnd, &code);
+                sys::timelog(&format!("code copied={copied}"));
+                self.code_copied = Some(Instant::now());
+                if let Some(t) = self.toast.as_mut() {
+                    t.until = Instant::now() + Duration::from_millis(1300);
+                }
+                self.kick();
+                self.render();
+                return;
+            }
+            if self.toast.as_ref().is_some_and(|t| t.kind == ToastKind::Digest) {
+                self.toast = None;
+                self.set_mode(Mode::Expanded);
+                self.act(Act::History(true));
+                self.render();
+                return;
+            }
             if self.notice_toast() {
                 if !self.toast_open {
                     self.toast_open = true;
@@ -4643,7 +4712,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             T_HOVER => {
                 let _ = KillTimer(Some(hwnd), T_HOVER);
-                if a.mouse_in && a.mode == Mode::Compact && a.notice_toast() && !a.toast_open {
+                if a.mouse_in && a.mode == Mode::Compact && a.notice_toast() && !a.toast_open && a.code_on_card().is_none() {
                     let (ax, ay) = a.hover_anchor;
                     if ((a.mouse.0 - ax).powi(2) + (a.mouse.1 - ay).powi(2)).sqrt() < 6.0 {
                         a.toast_open = true;
@@ -4827,13 +4896,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 None => {}
             }
             let info = NoticeInfo::of(&n);
-            sys::timelog(&format!("shown aumid={} lines_title={} lines_body={}", n.aumid, n.title.chars().count(), n.body.chars().count()));
+            // While focusing, notifications wait in the history; a one-time code cannot wait.
+            if a.focusing() && info.code.is_none() {
+                sys::timelog("notice held (focus)");
+                a.focus_held += 1;
+                a.keep_notice(info, false);
+                return LRESULT(0);
+            }
+            let code = info.code.is_some();
+            sys::timelog(&format!("shown aumid={} lines_title={} lines_body={} code={code}", n.aumid, n.title.chars().count(), n.body.chars().count()));
             if info.kind == NoticeKind::Screenshot {
                 sys::find_screenshot(a.hwnd, n.id, (240.0 * a.gfx.scale) as i32);
             }
-            if info.kind == NoticeKind::Phone || n.source == Some("facebook") {
+            if code || info.kind == NoticeKind::Phone || n.source == Some("facebook") {
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Message, &body, &n.title, None);
+                // A code is copied by hand, so it stays a while.
+                if let Some(t) = a.toast.as_mut().filter(|t| code && t.kind == ToastKind::Message) {
+                    t.until = Instant::now() + Duration::from_secs(30);
+                }
             } else {
                 sound::play(sound::Chime::Soft);
                 a.toast(ToastKind::Notice, &body, &n.title, None);
@@ -5158,6 +5239,12 @@ fn demo_setup(a: &mut App, spec: &str) {
             until: Instant::now() + Duration::from_secs(3600),
         });
     }
+    if kv.get("copied") == Some(&"1") {
+        a.code_copied = Some(Instant::now());
+    }
+    if let Some(n) = kv.get("digest").and_then(|v| v.parse::<u32>().ok()) {
+        a.toast = Some(Toast { born: Instant::now(), kind: ToastKind::Digest, title: format!("{n} notifications"), value: "while you focused".into(), level: None, until: Instant::now() + Duration::from_secs(3600) });
+    }
     if kv.get("history_open") == Some(&"1") {
         a.view = ui::View::History;
     }
@@ -5447,6 +5534,14 @@ mod song_tests {
     fn scrolling_short_videos_does_not_show_a_card_for_each() {
         assert!(!song_worth_showing(Duration::from_secs(5)));
         assert!(song_worth_showing(Duration::from_secs(25)));
+    }
+
+    #[test]
+    fn what_was_kept_quiet_is_told_once_focus_ends() {
+        assert_eq!(digest_after(true, false, 3), Some(3));
+        assert_eq!(digest_after(true, true, 3), None);
+        assert_eq!(digest_after(true, false, 0), None);
+        assert_eq!(digest_after(false, false, 2), None);
     }
 }
 
