@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "A living notch for Windows: music, lyrics, focus timer, water reminder, to-do and file shelf."
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }

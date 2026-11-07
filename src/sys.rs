@@ -1016,8 +1016,8 @@ unsafe fn shell_overlay(fg: HWND, class: &str) -> bool {
 
 // ---------------------------------------------------------------- icon
 
-/// A small white notch silhouette for the tray and window class.
-pub fn make_icon(size: i32) -> HICON {
+/// Islet's logo as an icon `size` px square: on its white tile (`tile`), or the pill alone (tray).
+pub fn make_icon(size: i32, tile: bool) -> HICON {
     unsafe {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -1036,27 +1036,9 @@ pub fn make_icon(size: i32) -> HICON {
             return HICON::default();
         };
         let px = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
-        let s = size as f32;
-        let (w, h) = (s * 0.86, s * 0.46);
-        let (cx, cy) = (s / 2.0, s / 2.0);
-        let r = h / 2.0;
-        for y in 0..size {
-            for x in 0..size {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                // Signed distance to a capsule.
-                let dx = ((fx - cx).abs() - (w / 2.0 - r)).max(0.0);
-                let dy = fy - cy;
-                let d = (dx * dx + dy * dy).sqrt() - r;
-                let mut a = (0.5 - d).clamp(0.0, 1.0);
-                // Camera dot.
-                let dd = ((fx - (cx + w * 0.22)).powi(2) + (fy - cy).powi(2)).sqrt() - h * 0.18;
-                let hole = (0.5 - dd).clamp(0.0, 1.0);
-                let lum = 1.0 - hole * 0.85;
-                a = a.max(0.0);
-                let c = (255.0 * lum * a) as u32;
-                let al = (255.0 * a) as u32;
-                px[(y * size + x) as usize] = (al << 24) | (c << 16) | (c << 8) | c;
-            }
+        for (dst, [r, g, b, a]) in px.iter_mut().zip(crate::logo::logo(size as u32, tile)) {
+            let pre = |c: u8| (c as u32 * a as u32 + 127) / 255;
+            *dst = (a as u32) << 24 | pre(r) << 16 | pre(g) << 8 | pre(b);
         }
         let mask = CreateBitmap(size, size, 1, 1, None);
         let info = ICONINFO { fIcon: TRUE, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };

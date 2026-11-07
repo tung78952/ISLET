@@ -2,6 +2,7 @@
 //! Islet: a living notch for Windows.
 
 mod anim;
+mod logo;
 mod bt;
 mod devices;
 mod drop;
@@ -5361,12 +5362,15 @@ fn main() {
         }
         let _ = OleInitialize(None);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
-        let icon = sys::make_icon(32);
+        // The tray's own small size at this screen's scale, so the logo is drawn for it, not shrunk.
+        let tray_px = windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXSMICON, windows::Win32::UI::HiDpi::GetDpiForSystem()).max(16);
+        let icon = sys::make_icon(tray_px, false);
+        let window_icon = sys::make_icon(32, true);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
-            hIcon: icon,
+            hIcon: window_icon,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: w!("IsletNotch"),
             ..Default::default()
