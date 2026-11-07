@@ -1014,34 +1014,6 @@ unsafe fn shell_overlay(fg: HWND, class: &str) -> bool {
     window_exe(fg).is_some_and(|exe| ["screenclippinghost.exe", "snippingtool.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe"].contains(&exe.as_str()))
 }
 
-/// Puts `text` on the clipboard; false when the clipboard was busy.
-pub fn copy_text(hwnd: HWND, text: &str) -> bool {
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        if OpenClipboard(Some(hwnd)).is_err() {
-            return false;
-        }
-        let _ = EmptyClipboard();
-        let put = || -> Option<()> {
-            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).ok()?;
-            let p = GlobalLock(mem) as *mut u16;
-            if p.is_null() {
-                return None;
-            }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
-            let _ = GlobalUnlock(mem);
-            // CF_UNICODETEXT; the clipboard owns the memory from here.
-            SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(mem.0))).ok()?;
-            Some(())
-        };
-        let ok = put().is_some();
-        let _ = CloseClipboard();
-        ok
-    }
-}
-
 // ---------------------------------------------------------------- icon
 
 /// Islet's logo as an icon `size` px square: on its white tile (`tile`), or the pill alone (tray).

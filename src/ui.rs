@@ -1742,44 +1742,28 @@ fn tall_toast(a: &mut App, left: f32, w: f32, t: &crate::Toast, live: bool) {
             }
             let tx = left + 64.0;
             let tw = w - 64.0 - 22.0;
-            if let Some(code) = a.code_on_card() {
-                // A one-time code: who sent it, the code large, and how to copy it.
-                let app_h = if phone.is_some() { 14.0 } else { 0.0 };
-                let top = ((h - (app_h + 18.0 + 32.0 + 14.0)) / 2.0).max(3.0) + app_h;
-                if let Some(app) = &phone {
+            // Sender and message are centred together on the card, one line or two; a phone
+            // notification names its app above them.
+            let title = notice_text(a, title);
+            let body_h = a.gfx.measure_wrapped(title, 13.0, 400, tw).clamp(17.0, 34.0);
+            let app_h = if phone.is_some() { 14.0 } else { 0.0 };
+            // Optical centre: glyphs sit low in their line boxes.
+            let top = ((h - (app_h + 20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(3.0) + app_h;
+            match &phone {
+                Some(app) => {
                     a.gfx.ui(app, Rc::new(tx, top - 14.0, tw - 40.0, 14.0), 10.5, 600, 0xA0A0A5, 1.0, Align::L);
+                    a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top - 14.0, 40.0, 14.0), 10.5, 400, 0x8E8E93, 1.0, Align::R);
+                    a.gfx.ui(value, Rc::new(tx, top, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
                 }
-                a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top - app_h, 40.0, 14.0), 10.5, 400, 0x8E8E93, 1.0, Align::R);
-                a.gfx.ui(value, Rc::new(tx, top, tw - 44.0, 18.0), 13.0, 600, 0xE5E5EA, 1.0, Align::L);
-                a.gfx.ui(&code_groups(&code), Rc::new(tx, top + 17.0, tw, 34.0), 27.0, 700, WHITE, 1.0, Align::L);
-                let (hint, colour) = if a.code_copied.is_some() { ("Copied", ON) } else { ("OTP · tap to copy", 0x8E8E93) };
-                a.gfx.ui(hint, Rc::new(tx, top + 51.0, tw, 14.0), 10.5, 600, colour, 1.0, Align::L);
-            } else {
-                let tx = left + 64.0;
-                let tw = w - 64.0 - 22.0;
-                // Sender and message are centred together on the card, one line or two; a phone
-                // notification names its app above them.
-                let title = notice_text(a, title);
-                let body_h = a.gfx.measure_wrapped(title, 13.0, 400, tw).clamp(17.0, 34.0);
-                let app_h = if phone.is_some() { 14.0 } else { 0.0 };
-                // Optical centre: glyphs sit low in their line boxes.
-                let top = ((h - (app_h + 20.0 + 2.0 + body_h)) / 2.0 - 1.5).max(3.0) + app_h;
-                match &phone {
-                    Some(app) => {
-                        a.gfx.ui(app, Rc::new(tx, top - 14.0, tw - 40.0, 14.0), 10.5, 600, 0xA0A0A5, 1.0, Align::L);
-                        a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top - 14.0, 40.0, 14.0), 10.5, 400, 0x8E8E93, 1.0, Align::R);
-                        a.gfx.ui(value, Rc::new(tx, top, tw, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-                    }
-                    None => {
-                        a.gfx.ui(value, Rc::new(tx, top, tw - 40.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
-                        a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top + 1.0, 40.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
-                    }
+                None => {
+                    a.gfx.ui(value, Rc::new(tx, top, tw - 40.0, 20.0), 15.0, 700, WHITE, 1.0, Align::L);
+                    a.gfx.ui("now", Rc::new(left + w - 22.0 - 40.0, top + 1.0, 40.0, 18.0), 11.5, 400, 0x8E8E93, 1.0, Align::R);
                 }
-                let by = top + 22.0;
-                a.gfx.push_clip(Rc::new(tx, by, tw, body_h + 2.0));
-                a.gfx.text(title, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
-                a.gfx.pop_clip();
             }
+            let by = top + 22.0;
+            a.gfx.push_clip(Rc::new(tx, by, tw, body_h + 2.0));
+            a.gfx.text(title, Rc::new(tx, by, tw, 40.0), 13.0, 400, 0xE5E5EA, 1.0, Align::LW, Font::Ui);
+            a.gfx.pop_clip();
             a.gfx.offset(off.0, off.1);
         }
         ToastKind::Bluetooth(on) => {
@@ -2687,13 +2671,6 @@ mod layout_tests {
         assert_eq!(when_words(t(7, 12, 0, 40), now), "in 1 min");
         assert_eq!(when_words(t(8, 9, 0, 0), now), "Tomorrow");
         assert_eq!(when_words(t(9, 13, 56, 0), now), "Monday");
-    }
-
-    #[test]
-    fn a_code_reads_in_groups() {
-        assert_eq!(code_groups("482913"), "482 913");
-        assert_eq!(code_groups("12345678"), "1234 5678");
-        assert_eq!(code_groups("7391"), "7391");
     }
 
     #[test]
@@ -4143,15 +4120,6 @@ fn days_of(r: &crate::luma::config::CustomReminder) -> [bool; 7] {
         on[*d as usize % 7] = true;
     }
     on
-}
-
-/// A one-time code split for reading: "482 913", "1234 5678".
-pub fn code_groups(code: &str) -> String {
-    match code.len() {
-        6 => format!("{} {}", &code[..3], &code[3..]),
-        8 => format!("{} {}", &code[..4], &code[4..]),
-        _ => code.to_string(),
-    }
 }
 
 /// When a reminder rings next, in a few words: a countdown today ("in 5 min", "in 2 h 10 min",
