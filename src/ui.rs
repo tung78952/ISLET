@@ -710,7 +710,7 @@ pub fn draw(a: &mut App) {
     if notice {
         small_alpha = (1.0 - grown / 0.35).clamp(0.0, 1.0);
     }
-    if a.hidden {
+    if a.hidden && !a.peeking() {
         small_alpha = 0.0;
     }
 

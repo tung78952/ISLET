@@ -183,6 +183,8 @@ impl Swipe {
 }
 
 const BELL_NUDGE: Duration = Duration::from_secs(15 * 60);
+/// How long a focus phase card shows over a full-screen app.
+const PEEK_OVER_FULLSCREEN: Duration = Duration::from_secs(6);
 
 /// Logical window size (layout units); pixels = units × DPI scale.
 pub const WIN_W: f32 = 640.0;
@@ -753,6 +755,8 @@ pub struct App {
     /// Notifications kept quiet during this focus stretch, whether focus was on at the last
     /// look, and a count waiting to be shown once the notch is free.
     focus_held: u32,
+    /// Over a full-screen app, the notch comes out until then to tell of a focus phase.
+    peek_until: Option<Instant>,
     focus_was: bool,
     digest_due: Option<u32>,
     /// Clock minute last drawn by the idle tick.
@@ -1082,6 +1086,7 @@ impl App {
             toast: None,
             held_notice: None,
             focus_held: 0,
+            peek_until: None,
             focus_was: false,
             digest_due: None,
             drawn_minute: u32::MAX,
@@ -1335,7 +1340,7 @@ impl App {
         // Stepping aside: only reminders that need an answer keep their size.
         let urgent = self.interactive_toast();
         // A film or a game fills the screen: only a thin sliver stays.
-        if self.hidden && self.mode == Mode::Compact {
+        if self.hidden && self.mode == Mode::Compact && !self.peeking() {
             return MINIMAL;
         }
         if self.yielded && self.mode == Mode::Compact && !urgent {
@@ -3083,6 +3088,7 @@ impl App {
                     } else {
                         self.toast(ToastKind::Focus, "Focus Time!", &format!("Back to work · round {round}/{rounds}"), None);
                     }
+                    self.peek_over_fullscreen();
                 }
             }
         }
@@ -3225,6 +3231,9 @@ impl App {
         if !back {
             sound::play(sound::Chime::Soft);
             self.card_rings += 1;
+            if matches!(due, Due::Focus(_)) {
+                self.peek_over_fullscreen();
+            }
         }
         self.toast(kind, &title, &value, None);
         if let Some(t) = self.toast.as_mut().filter(|t| t.kind == kind) {
@@ -3406,6 +3415,21 @@ impl App {
             Some(ToastKind::Message) if self.notice.as_ref().is_some_and(|n| n.phone_app.is_some()) => MESSAGE_TOAST[1] + 12.0,
             Some(ToastKind::Message) => MESSAGE_TOAST[1],
             _ => TALL_TOAST[1],
+        }
+    }
+
+    /// Over a full-screen app, the notch is out for a moment to tell of a focus phase.
+    pub fn peeking(&self) -> bool {
+        self.peek_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// A focus phase changed or ended while a full-screen app hides the notch: it comes out for
+    /// a few seconds, then goes back to its sliver.
+    fn peek_over_fullscreen(&mut self) {
+        if self.hidden {
+            sys::timelog("peek over fullscreen");
+            self.peek_until = Some(Instant::now() + PEEK_OVER_FULLSCREEN);
+            self.kick();
         }
     }
 
@@ -4066,6 +4090,10 @@ impl App {
         }
         let clock = self.clock();
         self.brain_ticks = self.brain_ticks.wrapping_add(1);
+        if self.peek_until.is_some_and(|t| Instant::now() >= t) {
+            self.peek_until = None;
+            self.kick();
+        }
         if self.brain_ticks % 4 == 0 {
             self.brain_tick();
         }
